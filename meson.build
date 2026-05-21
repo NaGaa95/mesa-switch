@@ -88,6 +88,7 @@ c_args = []
 cpp_args = []
 
 with_moltenvk_dir = get_option('moltenvk-dir')
+
 with_vulkan_icd_dir = get_option('vulkan-icd-dir')
 with_tests = get_option('build-tests')
 with_glcpp_tests = get_option('enable-glcpp-tests')
@@ -174,6 +175,8 @@ if gallium_drivers.contains('auto')
       error('Unknown architecture @0@. Please pass -Dgallium-drivers to set driver options. Patches gladly accepted to fix this.'.format(
             host_machine.cpu_family()))
     endif
+  elif ['horizon'].contains(host_machine.system())
+    gallium_drivers = ['nouveau']
   elif ['windows'].contains(host_machine.system())
     gallium_drivers = ['llvmpipe', 'softpipe', 'zink', 'd3d12']
   elif ['darwin', 'cygwin', 'haiku'].contains(host_machine.system())
@@ -260,7 +263,7 @@ if _vulkan_drivers.contains('auto')
       error('Unknown architecture @0@. Please pass -Dvulkan-drivers to set driver options. Patches gladly accepted to fix this.'.format(
             host_machine.cpu_family()))
     endif
-  elif ['darwin', 'windows', 'cygwin', 'haiku'].contains(host_machine.system())
+  elif ['darwin', 'windows', 'cygwin', 'haiku', 'horizon'].contains(host_machine.system())
     # No vulkan driver supports windows or macOS currently
     _vulkan_drivers = []
   else
@@ -421,6 +424,8 @@ if _platforms.contains('auto')
     _platforms = ['haiku']
   elif host_machine.system() == 'windows'
     _platforms = ['windows']
+  elif ['horizon'].contains(host_machine.system())
+    _platforms = ['switch']
   elif host_machine.system() == 'darwin'
     _platforms = ['x11', 'macos']
   else
@@ -434,6 +439,8 @@ with_platform_x11 = _platforms.contains('x11')
 with_platform_xcb = _platforms.contains('xcb')
 with_platform_wayland = _platforms.contains('wayland')
 with_platform_haiku = _platforms.contains('haiku')
+with_platform_switch = _platforms.contains('switch')
+with_platform_surfaceless = _platforms.contains('surfaceless')
 with_platform_windows = _platforms.contains('windows')
 with_platform_macos = _platforms.contains('macos')
 
@@ -445,7 +452,7 @@ if with_glx == 'auto'
     with_glx = 'disabled'
   elif with_dri
     with_glx = 'dri'
-  elif with_platform_haiku
+  elif with_platform_haiku or with_platform_switch
     with_glx = 'disabled'
   elif host_machine.system() == 'windows'
     with_glx = 'disabled'
@@ -487,7 +494,7 @@ with_xlib_lease = get_option('xlib-lease') \
   .allowed()
 
 with_egl = get_option('egl') \
-  .require(with_platform_windows or with_platform_haiku or with_dri or with_platform_android, error_message : 'EGL requires DRI, Haiku, Windows or Android') \
+  .require(with_platform_windows or with_platform_haiku or with_dri or with_platform_android or with_platform_switch, error_message : 'EGL requires DRI, Haiku, Windows, Android or Switch') \
   .require(with_glx != 'xlib', error_message :'EGL requires DRI, but GLX is being built with xlib support') \
   .disable_auto_if(with_platform_haiku) \
   .allowed()
@@ -1071,7 +1078,7 @@ if cc.has_function('fmemopen')
 endif
 
 # TODO: this is very incomplete
-if ['linux', 'cygwin', 'gnu', 'freebsd', 'gnu/kfreebsd', 'haiku', 'android', 'managarm'].contains(host_machine.system())
+if ['linux', 'cygwin', 'gnu', 'freebsd', 'gnu/kfreebsd', 'haiku', 'android', 'managarm', 'horizon'].contains(host_machine.system())
   pre_args += '-D_GNU_SOURCE'
 elif host_machine.system() == 'sunos'
   pre_args += '-D__EXTENSIONS__'
@@ -1111,6 +1118,10 @@ elif host_machine.system() == 'windows'
     endif
   endif
 elif host_machine.system() == 'openbsd'
+  pre_args += '-D_ISOC11_SOURCE'
+endif
+
+if ['horizon'].contains(host_machine.system())
   pre_args += '-D_ISOC11_SOURCE'
 endif
 
@@ -1231,6 +1242,17 @@ else
   _trial_msvc = ['-Werror=pointer-arith', '-Werror=vla', '-Werror=gnu-empty-initializer']
   c_msvc_compat_args += cc.get_supported_arguments(_trial_msvc)
   cpp_msvc_compat_args += cpp.get_supported_arguments(_trial_msvc)
+
+  if host_machine.system() == 'horizon'
+    # Disable exceptions/rtti support on Switch in order to save on code size.
+    # Disable usage of __cxa_atexit since newlib only supports 32 atexit functions
+    # and mesa wants to register around 200 objects worth of global destructors.
+    cpp_args += [
+      '-fno-exceptions',
+      '-fno-rtti',
+      '-fno-use-cxa-atexit',
+    ]
+  endif
 endif
 
 # set linker arguments
@@ -1535,7 +1557,7 @@ ld_args_build_id = cc.get_supported_link_arguments('-Wl,--build-id=sha1')
 
 # check for dl support
 dep_dl = null_dep
-if host_machine.system() != 'windows'
+if not ['windows', 'horizon'].contains(host_machine.system())
   if not cc.has_function('dlopen')
     dep_dl = cc.find_library('dl', required : true)
   endif
@@ -1985,6 +2007,7 @@ else
 
   # Disable deprecated keyword warnings, since we have to use them for
   # old-bison compat.  See discussion in
+
   # https://gitlab.freedesktop.org/mesa/mesa/merge_requests/2161
   if find_program('bison', required : false, version : '> 2.3').found()
     prog_bison = [prog_bison, '-Wno-deprecated']
@@ -2287,7 +2310,6 @@ if host_machine.system() == 'windows'
 else
   vulkan_icd_lib_path = get_option('prefix') / get_option('libdir')
 endif
-
 
 subdir('include')
 subdir('bin')

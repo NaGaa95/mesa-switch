@@ -1162,11 +1162,13 @@ nak_postprocess_nir(nir_shader *nir,
    nir_divergence_analysis(nir);
 
    if (nak->sm >= 70) {
+#if !defined(__SWITCH__)
       if (nak_should_print_nir()) {
          fprintf(stderr, "Structured NIR for %s shader:\n",
                  _mesa_shader_stage_to_string(nir->info.stage));
          nir_print_shader(nir, stderr);
       }
+#endif
       OPT(nir, nak_nir_lower_cf);
    }
 
@@ -1183,11 +1185,13 @@ nak_postprocess_nir(nir_shader *nir,
       }
    }
 
+#if !defined(__SWITCH__)
    if (nak_should_print_nir()) {
       fprintf(stderr, "NIR for %s shader:\n",
               _mesa_shader_stage_to_string(nir->info.stage));
       nir_print_shader(nir, stderr);
    }
+#endif
 }
 
 static bool

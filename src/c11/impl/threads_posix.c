@@ -19,7 +19,7 @@ Configuration macro:
     Use pthread_mutex_timedlock() for `mtx_timedlock()'
     Otherwise use mtx_trylock() + *busy loop* emulation.
 */
-#if !defined(__CYGWIN__) && !defined(__APPLE__) && !defined(__NetBSD__)
+#if !defined(__CYGWIN__) && !defined(__APPLE__) && !defined(__NetBSD__) && !defined(__SWITCH__)
 #define EMULATED_THREADS_USE_NATIVE_TIMEDLOCK
 #endif
 

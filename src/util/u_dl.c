@@ -40,7 +40,6 @@
 #include "u_pointer.h"
 #include "u_string.h"
 
-
 struct util_dl_library *
 util_dl_open(const char *filename)
 {

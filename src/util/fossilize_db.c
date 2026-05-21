@@ -40,6 +40,9 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include <errno.h>
+
+#include "util/u_debug.h"
 
 #ifdef FOZ_DB_UTIL_DYNAMIC_LIST
 #include <sys/inotify.h>
@@ -51,6 +54,10 @@
 #include "hash_table.h"
 #include "mesa-sha1.h"
 #include "ralloc.h"
+
+#if defined(__SWITCH__)
+#define flock(fd, op) (0)
+#endif
 
 #define FOZ_REF_MAGIC_SIZE 16
 
@@ -111,6 +118,18 @@ create_foz_db_filenames(const char *cache_path,
    }
 
    return true;
+}
+
+static bool
+foz_switch_single_file_default(void)
+{
+#if defined(__SWITCH__)
+   return !os_get_option("MESA_DISK_CACHE_SINGLE_FILE") &&
+          !os_get_option("MESA_DISK_CACHE_DATABASE") &&
+          !os_get_option("MESA_DISK_CACHE_MULTI_FILE");
+#else
+   return false;
+#endif
 }
 
 
@@ -486,6 +505,11 @@ foz_dbs_list_updater_init(struct foz_db *foz_db, char *list_filename)
    }
 
    return true;
+
+fail:
+   foz_destroy(foz_db);
+
+   return false;
 }
 #endif
 
@@ -508,7 +532,8 @@ foz_prepare(struct foz_db *foz_db, char *cache_path)
    /* Open the default foz dbs for read/write. If the files didn't already exist
     * create them.
     */
-   if (debug_get_bool_option("MESA_DISK_CACHE_SINGLE_FILE", false)) {
+   if (debug_get_bool_option("MESA_DISK_CACHE_SINGLE_FILE",
+                             foz_switch_single_file_default())) {
       if (!create_foz_db_filenames(cache_path, "foz_cache",
                                    &filename, &idx_filename))
          goto fail;

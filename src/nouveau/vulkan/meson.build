@@ -77,6 +77,28 @@ nvk_files = files(
   'nvkmd/nvkmd.h',
 )
 
+if with_platform_switch
+  nvk_loaderless_vk = custom_target(
+    'nvk_loaderless_vk',
+    input : [files('nvk_loaderless_vk_gen.py'), vk_api_xml],
+    output : 'nvk_loaderless_vk.c',
+    command : [
+      prog_python, '@INPUT0@', '--xml', '@INPUT1@',
+      '--out-c', '@OUTPUT@', '--beta', with_vulkan_beta.to_string(),
+    ],
+    depend_files : vk_entrypoints_gen_depend_files,
+  )
+
+  nvk_files += [nvk_loaderless_vk]
+  nvk_files += files(
+    'nvk_switch_wsi.h',
+    'rust_switch_stubs.c',
+    'nvkmd/switch/nvkmd_switch.h',
+    'nvkmd/switch/nvkmd_switch_dev.c',
+    'nvkmd/switch/nvkmd_switch_pdev.c',
+  )
+endif
+
 nvkcl_files = files(
   'cl/nvk_query.cl',
 )
@@ -151,15 +173,105 @@ libnvk = static_library(
   dependencies : nvk_deps,
   c_args : [no_override_init_args, nvk_flags],
   gnu_symbol_visibility : 'hidden',
+  install : host_machine.system() == 'horizon',
 )
 
-libvulkan_nouveau = shared_library(
-  'vulkan_nouveau',
-  link_whole : [libnvk],
-  link_args: [ld_args_build_id, ld_args_bsymbolic, ld_args_gc_sections],
-  gnu_symbol_visibility : 'hidden',
-  install : true,
-)
+if host_machine.system() == 'horizon'
+  # Switch has no Vulkan loader and no shared-library runtime: ld pulls in
+  # crt0/libnx that don't compose with -shared, and there's nothing to dlopen
+  # the result anyway. Expose libnvk as a static archive so homebrew code can
+  # link it directly. The custom_targets below still emit an ICD JSON that
+  # points at libvulkan_nouveau.<suffix>; on Switch we just keep the static .a
+  # at that name for any tooling that wants it.
+  libvulkan_nouveau = libnvk
+
+  libvulkan_private_archives = [
+    libnvk,
+    libvulkan_lite_runtime,
+    libvulkan_runtime,
+    libvulkan_lite_instance,
+    libvulkan_instance,
+    libvulkan_util,
+    libvulkan_wsi,
+    _libnak,
+    _libnak_rs,
+    libvtn,
+    _libxmlconfig,
+    _libnil,
+    _libnil_format_table,
+    _libnouveau_mme,
+    libnouveau_ws,
+    _libnvidia_headers,
+    _libnir,
+    libcompiler,
+    _libcompiler_c,
+    _libmesa_util,
+    libmesa_util_simd,
+    blake3,
+    _libmesa_util_c11,
+  ]
+
+  libvulkan_private_link_dirs = []
+  foreach archive : libvulkan_private_archives
+    archive_dir = fs.parent(archive.full_path())
+    if not libvulkan_private_link_dirs.contains(archive_dir)
+      libvulkan_private_link_dirs += archive_dir
+    endif
+  endforeach
+
+  libvulkan_private_link_args = []
+  foreach archive_dir : libvulkan_private_link_dirs
+    libvulkan_private_link_args += '-L' + archive_dir
+  endforeach
+
+  # Preserve the original archive-group semantics behind a single
+  # client-facing libvulkan.a so Horizon consumers don't need bespoke link
+  # order or a manually curated archive list.
+  libvulkan = custom_target(
+    'nvk_loaderless_libvulkan',
+    input : libvulkan_private_archives,
+    output : 'libvulkan.a',
+    command : [
+      prog_python, files('nvk_linker_script_gen.py'),
+      '--out', '@OUTPUT@',
+      '@INPUT@',
+    ],
+    depend_files : files('nvk_linker_script_gen.py'),
+    build_by_default : true,
+    install : true,
+    install_dir : get_option('libdir'),
+  )
+
+  dep_vulkan_horizon = declare_dependency(
+    include_directories : inc_include,
+    dependencies : [
+      dep_libdrm,
+      dep_zlib,
+      dep_zstd,
+    ],
+    link_args : libvulkan_private_link_args + [libvulkan.full_path(), '-lnx', '-lm', '-lstdc++'],
+  )
+
+  meson.override_dependency('vulkan', dep_vulkan_horizon)
+
+  pkg.generate(
+    name : 'vulkan',
+    filebase : 'vulkan',
+    description : 'Mesa Vulkan static archive for Horizon',
+    version : meson.project_version(),
+    libraries : ['-lvulkan'],
+    libraries_private : ['-lnx', '-lm', '-lstdc++'],
+    requires_private : ['libdrm_nouveau', 'zlib', 'libzstd'],
+  )
+else
+  libvulkan_nouveau = shared_library(
+    'vulkan_nouveau',
+    link_whole : [libnvk],
+    link_args: [ld_args_build_id, ld_args_bsymbolic, ld_args_gc_sections],
+    gnu_symbol_visibility : 'hidden',
+    install : true,
+  )
+endif
 
 icd_file_name = libname_prefix + 'vulkan_nouveau.' + libname_suffix
 

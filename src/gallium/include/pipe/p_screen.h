@@ -37,7 +37,6 @@
 #ifndef P_SCREEN_H
 #define P_SCREEN_H
 
-
 #include "util/compiler.h"
 #include "util/format/u_formats.h"
 #include "pipe/p_defines.h"

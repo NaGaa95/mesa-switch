@@ -2,7 +2,7 @@
 #define NOUVEAU_DEVICE 1
 
 #include "nouveau_private.h"
-#include "nv_device_info.h"
+#include "nouveau/headers/nv_device_info.h"
 #include "util/simple_mtx.h"
 
 #include <stddef.h>

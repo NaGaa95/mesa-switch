@@ -439,11 +439,10 @@ out_err:
 void
 nv50_bufctx_fence(struct nv50_context *nv50, struct nouveau_bufctx *bufctx, bool on_flush)
 {
-   struct list_head *list = on_flush ? &bufctx->current : &bufctx->pending;
-   struct list_head *it;
+   NOUVEAU_BUFREF_LIST_TYPE *list = on_flush ? &bufctx->current : &bufctx->pending;
+   struct nouveau_bufref *ref;
 
-   for (it = list->next; it != list; it = it->next) {
-      struct nouveau_bufref *ref = (struct nouveau_bufref *)it;
+   NOUVEAU_BUFREF_LIST_FOR_EACH(ref, list) {
       struct nv04_resource *res = ref->priv;
       if (res)
          nv50_resource_validate(nv50, res, (unsigned)ref->priv_data);

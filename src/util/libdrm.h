@@ -99,6 +99,7 @@ typedef struct _drmDevice {
     } businfo;
     union {
         drmPciDeviceInfoPtr pci;
+        drmPlatformDeviceInfoPtr platform;
     } deviceinfo;
     /* ... */
 } drmDevice, *drmDevicePtr;

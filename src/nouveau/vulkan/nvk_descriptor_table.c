@@ -7,7 +7,11 @@
 #include "nvk_device.h"
 #include "nvk_physical_device.h"
 
+#ifndef __SWITCH__
 #include <sys/mman.h>
+#else
+#include <util/switch_mman.h>
+#endif
 
 static VkResult
 nvk_descriptor_table_grow_locked(struct nvk_device *dev,

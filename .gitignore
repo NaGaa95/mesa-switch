@@ -5,5 +5,13 @@
 *.pyo
 *.out
 /build
+knowledge
+libnx
+libdrm-nouveau
 .venv/
 *.mda.tar
+
+dolphin
+deko3d
+Athmosphere
+new-yabause-stable

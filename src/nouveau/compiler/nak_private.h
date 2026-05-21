@@ -8,7 +8,7 @@
 
 #include "nak.h"
 #include "nir.h"
-#include "nv_device_info.h"
+#include "nouveau/headers/nv_device_info.h"
 
 #ifdef __cplusplus
 extern "C" {

@@ -25,6 +25,7 @@ _libnouveau_mme = static_library(
     idep_mesautil,
     idep_nvidia_headers,
   ],
+  install : host_machine.system() == 'horizon',
 )
 
 idep_nouveau_mme = declare_dependency(

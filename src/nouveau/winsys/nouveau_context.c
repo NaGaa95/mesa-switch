@@ -6,8 +6,14 @@
 #include "nvif/ioctl.h"
 
 #include <errno.h>
+#ifndef __SWITCH__
+#include "nouveau/nvif/ioctl.h"
 #include <xf86drm.h>
+#else 
+#include "nvif/ioctl.h"
+#endif
 
+#ifndef __SWITCH__
 static void
 nouveau_ws_subchan_dealloc(int fd, struct nouveau_ws_object *obj)
 {
@@ -30,8 +36,6 @@ nouveau_ws_subchan_dealloc(int fd, struct nouveau_ws_object *obj)
    /* TODO returns -ENOENT for unknown reasons */
    drmCommandWrite(fd, DRM_NOUVEAU_NVIF, &args, sizeof(args));
 }
-
-#define NOUVEAU_WS_CONTEXT_MAX_CLASSES 16
 
 static int
 nouveau_ws_context_query_classes(int fd, int channel, uint32_t classes[NOUVEAU_WS_CONTEXT_MAX_CLASSES])
@@ -63,6 +67,9 @@ nouveau_ws_context_query_classes(int fd, int channel, uint32_t classes[NOUVEAU_W
 
    return 0;
 }
+#endif
+
+#define NOUVEAU_WS_CONTEXT_MAX_CLASSES 16
 
 static uint32_t
 nouveau_ws_context_find_class(uint32_t classes[NOUVEAU_WS_CONTEXT_MAX_CLASSES], uint8_t type)
@@ -79,6 +86,7 @@ nouveau_ws_context_find_class(uint32_t classes[NOUVEAU_WS_CONTEXT_MAX_CLASSES], 
    return ret;
 }
 
+#ifndef __SWITCH__
 static int
 nouveau_ws_subchan_alloc(int fd, int channel, uint32_t handle, uint16_t oclass, struct nouveau_ws_object *obj)
 {
@@ -248,3 +256,4 @@ nouveau_ws_context_killed(struct nouveau_ws_context *context)
    /* nouveau returns ENODEV once the channel was killed */
    return ret == -ENODEV;
 }
+#endif

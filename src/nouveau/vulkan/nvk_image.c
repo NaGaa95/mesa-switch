@@ -809,6 +809,15 @@ nvk_image_init(struct nvk_device *dev,
 
    uint32_t explicit_row_stride_B = 0;
 
+   /* On platforms where vk_image has a drm_format_mod field (Linux/BSD),
+    * we use it directly. Elsewhere (Switch, etc.) we keep a local. */
+#if DETECT_OS_LINUX || DETECT_OS_BSD
+#define IMAGE_DRM_FORMAT_MOD(img) ((img)->vk.drm_format_mod)
+#else
+   uint64_t _local_drm_format_mod = DRM_FORMAT_MOD_INVALID;
+#define IMAGE_DRM_FORMAT_MOD(img) (_local_drm_format_mod)
+#endif
+
    /* This section is removed by the optimizer for non-ANDROID builds */
    if (vk_image_is_android_native_buffer(&image->vk)) {
       VkImageDrmFormatModifierExplicitCreateInfoEXT eci;
@@ -818,7 +827,7 @@ nvk_image_init(struct nvk_device *dev,
       if (result != VK_SUCCESS)
          return result;
 
-      image->vk.drm_format_mod = eci.drmFormatModifier;
+      IMAGE_DRM_FORMAT_MOD(image) = eci.drmFormatModifier;
       explicit_row_stride_B = eci.pPlaneLayouts[0].rowPitch;
    }
 
@@ -839,11 +848,11 @@ nvk_image_init(struct nvk_device *dev,
          vk_find_struct_const(pCreateInfo->pNext,
                               IMAGE_DRM_FORMAT_MODIFIER_EXPLICIT_CREATE_INFO_EXT);
       if (mod_explicit_info) {
-         image->vk.drm_format_mod = mod_explicit_info->drmFormatModifier;
+         IMAGE_DRM_FORMAT_MOD(image) = mod_explicit_info->drmFormatModifier;
          /* Normally with explicit modifiers, the client specifies all strides,
           * however in our case, we can only really make use of this in the linear
           * case, and we can only create 2D non-array linear images, so ultimately
-          * we only care about the row stride. 
+          * we only care about the row stride.
           */
          explicit_row_stride_B = mod_explicit_info->pPlaneLayouts->rowPitch;
       } else {
@@ -853,14 +862,14 @@ nvk_image_init(struct nvk_device *dev,
 
          enum pipe_format p_format =
             nvk_format_to_pipe_format(image->vk.format);
-         image->vk.drm_format_mod =
+         IMAGE_DRM_FORMAT_MOD(image) =
             nil_select_best_drm_format_mod(&pdev->info, nil_format(p_format),
                                            mod_list_info->drmFormatModifierCount,
                                            mod_list_info->pDrmFormatModifiers);
-         assert(image->vk.drm_format_mod != DRM_FORMAT_MOD_INVALID);
+         assert(IMAGE_DRM_FORMAT_MOD(image) != DRM_FORMAT_MOD_INVALID);
       }
 
-      if (image->vk.drm_format_mod == DRM_FORMAT_MOD_LINEAR) {
+      if (IMAGE_DRM_FORMAT_MOD(image) == DRM_FORMAT_MOD_LINEAR) {
          /* We only have one shadow plane per nvk_image */
          assert(image->plane_count == 1);
 
@@ -913,7 +922,7 @@ nvk_image_init(struct nvk_device *dev,
       nil_info[plane] = (struct nil_image_init_info) {
          .dim = vk_image_type_to_nil_dim(image->vk.image_type),
          .format = nil_format(nvk_format_to_pipe_format(format)),
-         .modifier = image->vk.drm_format_mod,
+         .modifier = IMAGE_DRM_FORMAT_MOD(image),
          .extent_px = {
             .width = image->vk.extent.width / width_scale,
             .height = image->vk.extent.height / height_scale,

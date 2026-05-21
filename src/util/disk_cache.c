@@ -31,7 +31,11 @@
 #include <sys/file.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#ifdef __SWITCH__
+#include "util/switch_mman.h"
+#else
 #include <sys/mman.h>
+#endif
 #include <fcntl.h>
 #include <errno.h>
 #include <dirent.h>
@@ -214,6 +218,18 @@ disk_cache_type_create(const char *gpu_name,
    return NULL;
 }
 
+static bool
+disk_cache_switch_single_file_default(void)
+{
+#if defined(__SWITCH__)
+   return !os_get_option("MESA_DISK_CACHE_SINGLE_FILE") &&
+          !os_get_option("MESA_DISK_CACHE_DATABASE") &&
+          !os_get_option("MESA_DISK_CACHE_MULTI_FILE");
+#else
+   return false;
+#endif
+}
+
 struct disk_cache *
 disk_cache_create(const char *gpu_name, const char *driver_id,
                   uint64_t driver_flags)
@@ -222,8 +238,11 @@ disk_cache_create(const char *gpu_name, const char *driver_id,
    struct disk_cache *cache;
    uint64_t max_size = 0;
    const char *max_size_str;
+   const bool switch_single_file_default =
+      disk_cache_switch_single_file_default();
 
-   if (debug_get_bool_option("MESA_DISK_CACHE_SINGLE_FILE", false)) {
+   if (debug_get_bool_option("MESA_DISK_CACHE_SINGLE_FILE",
+                             switch_single_file_default)) {
       cache_type = DISK_CACHE_SINGLE_FILE;
    } else if (debug_get_bool_option("MESA_DISK_CACHE_DATABASE", false)) {
       cache_type = DISK_CACHE_DATABASE;
@@ -546,6 +565,7 @@ blob_get_compressed(struct disk_cache *cache, const cache_key key,
    unsigned compressed_size = entry_size - sizeof(*entry);
    bool ret = util_compress_inflate(entry->compressed_data, compressed_size,
                                     data, entry->uncompressed_size);
+
    if (!ret) {
       free(data);
       free(entry);

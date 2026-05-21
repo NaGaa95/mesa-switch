@@ -5,6 +5,9 @@
 
 #include "nvkmd.h"
 #include "nouveau/nvkmd_nouveau.h"
+#ifdef __SWITCH__
+#include "switch/nvkmd_switch.h"
+#endif
 #include "nv_push.h"
 #include "util/cache_ops.h"
 #include "util/u_math.h"
@@ -91,6 +94,16 @@ nvkmd_try_create_pdev_for_drm(struct _drmDevice *drm_device,
    return nvkmd_nouveau_try_create_pdev(drm_device, log_obj,
                                         debug_flags, pdev_out);
 }
+
+#ifdef __SWITCH__
+VkResult
+nvkmd_try_create_pdev_for_switch(struct vk_object_base *log_obj,
+                                 enum nvk_debug debug_flags,
+                                 struct nvkmd_pdev **pdev_out)
+{
+   return nvkmd_switch_try_create_pdev(log_obj, debug_flags, pdev_out);
+}
+#endif
 
 VkResult MUST_CHECK
 nvkmd_dev_alloc_mem(struct nvkmd_dev *dev,

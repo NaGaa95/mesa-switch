@@ -1,0 +1,41 @@
+# Image used by UnleashedRecomp's build-switch-nro.sh / build-switch-plume.sh.
+# Build with:
+#   docker build -f Docker.switch-nvk -t switch-nvk-vulkan:local .
+#
+# This is a *consumer* image — it doesn't build Mesa itself. The actual NVK
+# libvulkan.a comes from a host-side mesa-clean checkout that the scripts
+# mount at /mesa-clean. We just need the devkitA64 cross toolchain plus
+# cmake/ninja, and libdrm_nouveau installed under the devkitPro portlib
+# tree so the link step can resolve NVK's transitive symbols.
+
+FROM devkitpro/devkita64:latest
+
+# Build tools + tooling the recomp + Plume CMake configure needs.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        cmake ninja-build pkg-config \
+        python3 python3-pip \
+        git curl ca-certificates \
+        build-essential \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# libdrm_nouveau (headers + static lib + pkg-config file) installed into
+# the devkitPro Switch portlib tree. NVK's libvulkan.a depends on these
+# symbols; without this the recomp link will fail with undefined references
+# to drmIoctl, nouveau_device_new, etc.
+COPY libdrm-nouveau /tmp/libdrm-nouveau
+RUN cd /tmp/libdrm-nouveau && \
+    make clean && make && \
+    cp lib/libdrm_nouveau.a /opt/devkitpro/portlibs/switch/lib/ && \
+    cp include/nouveau.h /opt/devkitpro/portlibs/switch/include/ && \
+    cp include/nv_device_info.h /opt/devkitpro/portlibs/switch/include/ && \
+    mkdir -p /opt/devkitpro/portlibs/switch/lib/pkgconfig && \
+    cp lib/pkgconfig/libdrm_nouveau.pc /opt/devkitpro/portlibs/switch/lib/pkgconfig/ && \
+    rm -rf /tmp/libdrm-nouveau
+
+# devkitA64 binaries are already on PATH via the base image's /etc/profile.d
+# entry. Make sure non-login shells also see them (build-*.sh uses `sh -lc`,
+# which is a login shell, but be defensive).
+ENV PATH="/opt/devkitpro/devkitA64/bin:/opt/devkitpro/tools/bin:${PATH}"
+
+WORKDIR /project

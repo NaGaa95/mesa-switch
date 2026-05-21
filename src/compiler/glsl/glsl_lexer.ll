@@ -28,6 +28,7 @@
 #include "glsl_parser_extras.h"
 #include "glsl_parser.h"
 #include "main/consts_exts.h"
+#include <climits>
 
 static int classify_identifier(struct _mesa_glsl_parse_state *, const char *,
 			       unsigned name_len, YYSTYPE *output);

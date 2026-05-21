@@ -18,6 +18,17 @@
 #define NOUVEAU_MIN_BUFFER_MAP_ALIGN      64
 #define NOUVEAU_MIN_BUFFER_MAP_ALIGN_MASK (NOUVEAU_MIN_BUFFER_MAP_ALIGN - 1)
 
+#ifdef __SWITCH__
+#define NOUVEAU_BUFREF_LIST_TYPE struct nouveau_list
+#else
+#define NOUVEAU_BUFREF_LIST_TYPE struct list_head
+#endif
+
+#define NOUVEAU_BUFREF_LIST_FOR_EACH(ref, list)                              \
+   for (NOUVEAU_BUFREF_LIST_TYPE *__node = (list)->next;                     \
+        __node != (list) && (((ref) = (struct nouveau_bufref *)__node), true); \
+        __node = __node->next)
+
 static inline uint32_t
 PUSH_AVAIL(struct nouveau_pushbuf *push)
 {

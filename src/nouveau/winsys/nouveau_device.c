@@ -11,11 +11,15 @@
 #include "util/os_misc.h"
 
 #include <fcntl.h>
+#ifndef __SWITCH__
+#include "nouveau/nvif/ioctl.h"
+#include <xf86drm.h>
+#else 
+#include "nvif/ioctl.h"
+#endif
 #include "nvif/cl0080.h"
 #include "nvif/class.h"
-#include "nvif/ioctl.h"
 #include <unistd.h>
-#include <xf86drm.h>
 
 static const char *
 name_for_chip(uint32_t dev_id,
@@ -78,7 +82,7 @@ sm_for_chipset(uint16_t chipset)
       return 61;
    else if (chipset >= 0x130)
       return 60;
-   else if (chipset >= 0x12b)
+   else if (chipset >= 0x12b || chipset == 0x120)
       return 53;
    else if (chipset >= 0x120)
       return 52;
@@ -309,6 +313,7 @@ init_shared_mem_sizes(struct nv_device_info *info)
    }
 }
 
+#ifndef __SWITCH__
 static int
 nouveau_ws_param(int fd, uint64_t param, uint64_t *value)
 {
@@ -547,6 +552,7 @@ nouveau_ws_device_destroy(struct nouveau_ws_device *device)
    FREE(device);
 }
 
+
 uint64_t
 nouveau_ws_device_vram_used(struct nouveau_ws_device *device)
 {
@@ -585,3 +591,4 @@ nouveau_ws_device_has_tiled_bo(struct nouveau_ws_device *device)
 
    return has != 0;
 }
+#endif

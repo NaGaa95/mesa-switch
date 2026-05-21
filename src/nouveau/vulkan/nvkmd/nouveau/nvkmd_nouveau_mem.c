@@ -8,7 +8,11 @@
 #include "nouveau_bo.h"
 #include "vk_log.h"
 
+#ifndef __SWITCH__
 #include <sys/mman.h>
+#else
+#include <util/switch_mman.h>
+#endif
 
 VkResult
 nvkmd_nouveau_alloc_mem(struct nvkmd_dev *dev,

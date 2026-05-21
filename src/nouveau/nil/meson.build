@@ -30,6 +30,7 @@ _libnil_format_table = static_library(
   include_directories : [inc_include, inc_src],
   dependencies : [idep_nvidia_headers, idep_mesautil],
   gnu_symbol_visibility: 'hidden',
+  install : host_machine.system() == 'horizon',
 )
 
 _libnil_deps = [
@@ -82,6 +83,7 @@ _libnil = static_library(
   rust_args: nouveau_rust_args,
   link_with: [_libnil_format_table, _libnil_rs_bindings],
   dependencies: _libnil_deps,
+  install : host_machine.system() == 'horizon',
 )
 
 _nil_h = custom_target(

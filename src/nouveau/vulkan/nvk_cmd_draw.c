@@ -185,6 +185,11 @@ nvk_push_draw_state_init(struct nvk_queue *queue, struct nv_push *p)
     * dEQP-VK.subgroups.vote.frag_helper.subgroupallequal_bvec2_fragment will
     * occasionally fail.
     */
+   /* Horizon's nvgpu path rejects the FALCON-backed private-register MME used
+    * here by desktop nouveau. These tweaks are CTS/robustness niceties, not
+    * required for early Switch queue bring-up.
+    */
+#ifndef HAVE_SWITCH_PLATFORM
    if (pdev->info.cls_eng3d >= MAXWELL_B) {
       unsigned reg = get_sm_disp_ctrl_reg(&pdev->info);
       P_1INC(p, NV9097, CALL_MME_MACRO(NVK_MME_SET_PRIV_REG));
@@ -192,6 +197,7 @@ nvk_push_draw_state_init(struct nvk_queue *queue, struct nv_push *p)
       P_INLINE_DATA(p, BITFIELD_BIT(3));
       P_INLINE_DATA(p, reg);
    }
+#endif
 
    /* Disable Out Of Range Address exceptions
     *
@@ -239,6 +245,7 @@ nvk_push_draw_state_init(struct nvk_queue *queue, struct nv_push *p)
     *
     * This clears bit 14 of gr_gpcs_tpcs_sms_hww_warp_esr_report_mask
     */
+#ifndef HAVE_SWITCH_PLATFORM
    if (pdev->info.cls_eng3d >= MAXWELL_B) {
       unsigned reg = get_sms_hww_warp_esp_report_mask_reg(&pdev->info);
       P_1INC(p, NV9097, CALL_MME_MACRO(NVK_MME_SET_PRIV_REG));
@@ -246,6 +253,7 @@ nvk_push_draw_state_init(struct nvk_queue *queue, struct nv_push *p)
       P_INLINE_DATA(p, BITFIELD_BIT(14));
       P_INLINE_DATA(p, reg);
    }
+#endif
 
    /* Set CONSERVATIVE_RASTER_STATE to an invalid value, to ensure the
     * hardware reg is always set the first time conservative rasterization

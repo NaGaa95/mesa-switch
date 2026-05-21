@@ -26,6 +26,7 @@
  **************************************************************************/
 
 
+#ifndef __SWITCH__
 #include "main/arrayobj.h"
 #include "main/image.h"
 #include "main/macros.h"
@@ -475,3 +476,33 @@ st_feedback_draw_vbo_multi_mode(struct gl_context *ctx,
       st_feedback_draw_vbo(ctx, info, 0, NULL, &draws[i], 1);
    }
 }
+#else /* __SWITCH__ */
+
+#include <stdbool.h>
+#include "pipe/p_state.h"
+#include "st_draw.h"
+
+void
+st_feedback_draw_vbo(struct gl_context *ctx,
+                     const struct pipe_draw_info *info,
+                     unsigned drawid_offset,
+                     const struct pipe_draw_indirect_info *indirect,
+                     const struct pipe_draw_start_count_bias *draws,
+                     unsigned num_draws)
+{
+   /* no-op on Switch: feedback draw not supported */
+   (void)ctx; (void)info; (void)drawid_offset; (void)indirect; (void)draws; (void)num_draws;
+}
+
+void
+st_feedback_draw_vbo_multi_mode(struct gl_context *ctx,
+                                struct pipe_draw_info *info,
+                                const struct pipe_draw_start_count_bias *draws,
+                                const unsigned char *mode,
+                                unsigned num_draws)
+{
+   /* no-op on Switch: feedback draw not supported */
+   (void)ctx; (void)info; (void)draws; (void)mode; (void)num_draws;
+}
+
+#endif /* !__SWITCH__ */

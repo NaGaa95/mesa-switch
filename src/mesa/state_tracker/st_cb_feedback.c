@@ -38,6 +38,7 @@
  */
 
 
+#ifndef __SWITCH__
 #include "main/context.h"
 #include "main/feedback.h"
 #include "main/framebuffer.h"
@@ -321,3 +322,17 @@ st_RenderMode(struct gl_context *ctx, GLenum newMode )
       ST_SET_STATE3(ctx->NewDriverState, ST_NEW_GS_SSBOS, ST_NEW_GS_CONSTANTS,
                     ST_NEW_GS_STATE);
 }
+#else /* __SWITCH__ */
+
+#include "main/context.h"
+#include "st_cb_feedback.h"
+
+void
+st_RenderMode(struct gl_context *ctx, GLenum newMode)
+{
+   /* no-op on Switch: GL_SELECT/GL_FEEDBACK not supported */
+   (void)ctx;
+   (void)newMode;
+}
+
+#endif /* !__SWITCH__ */

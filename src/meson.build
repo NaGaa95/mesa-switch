@@ -119,11 +119,22 @@ if with_gallium_or_lvp
 endif
 # These require libgallium (shared_glapi_lib)
 if with_gallium and (with_glx != 'disabled' or with_egl)
-  if with_gles1 and not with_glvnd
-    subdir('mesa/glapi/es1api')
-  endif
-  if with_gles2 and not with_glvnd
-    subdir('mesa/glapi/es2api')
+  if with_platform_switch
+    # Keep the legacy build paths for the Switch consumer build, which still
+    # expects the static GLES wrapper archives under src/mapi/es*api.
+    if with_gles1 and not with_glvnd
+      subdir('mapi/es1api')
+    endif
+    if with_gles2 and not with_glvnd
+      subdir('mapi/es2api')
+    endif
+  else
+    if with_gles1 and not with_glvnd
+      subdir('mesa/glapi/es1api')
+    endif
+    if with_gles2 and not with_glvnd
+      subdir('mesa/glapi/es2api')
+    endif
   endif
   if with_tests
     subdir('mesa/main/tests')

@@ -25,6 +25,7 @@
 #include "nv_push_cl906f.h"
 #include "nv_push_cla16f.h"
 #include "nv_push_cl9097.h"
+#include "nv_push_cl90c0.h"
 #include "nv_push_cl90b5.h"
 #include "nv_push_cla097.h"
 #include "nv_push_cla0c0.h"
@@ -356,10 +357,22 @@ nvk_BeginCommandBuffer(VkCommandBuffer commandBuffer,
 
    nvk_reset_cmd_buffer(&cmd->vk, 0);
 
-   /* Start with a nop so we have at least something to submit */
+   /* Start with a nop so we have at least something to submit.  Prefer a
+    * subchannel whose object/context state is already initialized on the
+    * queue; using the copy engine here trips Switch bring-up because an
+    * otherwise empty graphics command buffer would touch NV90B5 first.
+    */
    struct nv_push *p = nvk_cmd_buffer_push(cmd, 2);
-   P_MTHD(p, NV90B5, NOP);
-   P_NV90B5_NOP(p, 0);
+   if (queue_flags & VK_QUEUE_GRAPHICS_BIT) {
+      P_MTHD(p, NV9097, NO_OPERATION);
+      P_INLINE_DATA(p, 0);
+   } else if (queue_flags & VK_QUEUE_COMPUTE_BIT) {
+      P_MTHD(p, NV90C0, NO_OPERATION);
+      P_INLINE_DATA(p, 0);
+   } else {
+      P_MTHD(p, NV90B5, NOP);
+      P_NV90B5_NOP(p, 0);
+   }
 
    if (queue_flags & VK_QUEUE_COMPUTE_BIT)
       nvk_cmd_buffer_begin_compute(cmd, pBeginInfo);

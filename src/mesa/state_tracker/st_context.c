@@ -344,7 +344,9 @@ st_context_free_zombie_objects(struct st_context *st)
 static void
 st_destroy_context_priv(struct st_context *st, bool destroy_pipe)
 {
+#ifndef __SWITCH__
    st_destroy_draw(st);
+#endif
    st_destroy_clear(st);
    st_destroy_bitmap(st);
    st_destroy_drawpix(st);
@@ -644,6 +646,7 @@ st_create_context_priv(struct gl_context *ctx, struct pipe_context *pipe,
    st->validate_all_dirty_states =
       screen->caps.validate_all_dirty_states
       ? true : false;
+
    st->can_null_texture =
       screen->caps.null_textures
       ? true : false;
@@ -941,8 +944,10 @@ st_destroy_context(struct st_context *st)
     */
    _mesa_make_current(ctx, NULL, NULL);
 
+#ifndef __SWITCH__
    /* This must be called first so that glthread has a chance to finish */
    _mesa_glthread_destroy(ctx);
+#endif
 
    _mesa_HashWalk(&ctx->Shared->TexObjects, destroy_tex_sampler_cb, st);
 

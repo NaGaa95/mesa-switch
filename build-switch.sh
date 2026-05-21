@@ -1,0 +1,162 @@
+#!/bin/bash
+set -e
+
+IMAGE_NAME="devkitpro-mesa-rust"
+CONTAINER_NAME="mesa-switch-build"
+
+# ── Step 0: Build Docker image (if needed) ──────────────────────────────
+if ! docker image inspect "$IMAGE_NAME" >/dev/null 2>&1; then
+    echo "=== Building Docker image ==="
+    docker build -f Docker.rust -t "$IMAGE_NAME" .
+fi
+
+# ── Step 1: Start container ─────────────────────────────────────────────
+docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
+docker run -d --name "$CONTAINER_NAME" \
+    -v "$(pwd):/project" --workdir "/project" \
+    "$IMAGE_NAME" sleep infinity
+
+run() { docker exec "$CONTAINER_NAME" bash -c "$1"; }
+
+# ── Step 1.5: Set up bindgen + rustc wrappers ───────────────────────────
+# bindgen wrapper appends system include paths for cross clang invocation.
+# rustc wrapper strips meson's forced -Clinker=<devkitA64-gcc> so the rust
+# sanity link succeeds; NAK only emits staticlibs so the linker is unused
+# for the real build.
+run '
+mkdir -p /usr/local/libexec
+cp /project/bindgen-switch-wrapper.sh /usr/local/libexec/bindgen
+cp /project/rustc-switch-wrapper.sh /usr/local/libexec/rustc
+chmod +x /usr/local/libexec/bindgen /usr/local/libexec/rustc
+'
+
+# ── Step 1.55: Keep a stable meson path for later Meson regenerations ──
+# Meson records the absolute path of the meson executable in build.ninja.
+# Some downstream builds invoke ninja against this build dir from a different
+# environment, so keep /usr/local/bin/meson pointing at the active meson.
+run '
+MESON_BIN="$(command -v meson || true)"
+if [ -z "$MESON_BIN" ]; then
+    echo "ERROR: meson not found in container PATH" >&2
+    exit 1
+fi
+mkdir -p /usr/local/bin
+if [ "$MESON_BIN" != "/usr/local/bin/meson" ]; then
+    ln -sf "$MESON_BIN" /usr/local/bin/meson
+fi
+'
+
+# ── Step 1.6: Refresh libdrm-nouveau headers in devkitPro portlib ──────
+# The Docker image bakes in libdrm-nouveau headers, but we may have updated
+# them locally (e.g., nv_device_info.h synced with mesa 25.3). Re-copy so
+# bindgen sees the latest fields.
+run '
+cp /project/libdrm-nouveau/include/*.h /opt/devkitpro/portlibs/switch/include/ 2>/dev/null || true
+# Keep the in-tree Mesa header authoritative for bindgen users that include
+# nv_device_info.h through nouveau_device.h during the cross build.
+cp /project/src/nouveau/headers/nv_device_info.h /opt/devkitpro/portlibs/switch/include/ 2>/dev/null || true
+'
+
+# ── Step 1.7: Make clang resource dir discoverable by mesa_clc ─────────
+# mesa_clc looks for headers under <llvm_libdir>/clang/<major>/include
+# but Debian ships them under <llvm_libdir>/clang/<full_version>/include.
+# Symlink the major-version include dir to fix opencl-c-base.h lookup.
+run '
+if [ ! -d /usr/lib/llvm-15/lib/clang/15/include ]; then
+    ln -sf /usr/lib/llvm-15/lib/clang/15.0.6/include /usr/lib/llvm-15/lib/clang/15/include
+fi
+'
+
+# ── Step 1.8: Create empty stub archives for POSIX libs ────────────────
+# Rust std links against -lrt -ldl -lutil which do not exist in newlib.
+# Provide empty static archives so the linker is satisfied; the actual
+# symbols those libs would provide are stubbed in rust_switch_stubs.c.
+run '
+if [ ! -f /opt/devkitpro/portlibs/switch/lib/libdl.a ]; then
+    cd /tmp
+    echo "void __mesa_switch_stub_lib(void) {}" > stub_posix.c
+    /opt/devkitpro/devkitA64/bin/aarch64-none-elf-gcc -c stub_posix.c -o stub_posix.o
+    for L in dl rt util; do
+        /opt/devkitpro/devkitA64/bin/aarch64-none-elf-ar rcs \
+            /opt/devkitpro/portlibs/switch/lib/lib${L}.a stub_posix.o
+    done
+fi
+'
+
+# ── Step 2: Build native host tools (mesa_clc, vtn_bindgen2) ───────────
+echo "=== Building native host tools (mesa_clc, vtn_bindgen2) ==="
+run '
+cd /project && meson setup builddir-native --wipe \
+    -Dvulkan-drivers= \
+    -Dgallium-drivers= \
+    -Dshader-cache=true \
+    -Dplatforms= \
+    -Dglx=disabled \
+    -Degl=disabled \
+    -Dopengl=false \
+    -Dgles1=disabled \
+    -Dgles2=disabled \
+    -Dtools=[] \
+    -Dllvm=enabled \
+    -Dmesa-clc=enabled \
+    -Dprecomp-compiler=enabled \
+    -Dinstall-mesa-clc=true
+'
+run 'ninja -C /project/builddir-native src/compiler/clc/mesa_clc src/compiler/spirv/vtn_bindgen2'
+
+# ── Step 3: Configure cross build ──────────────────────────────────────
+echo "=== Configuring cross build (Switch + nouveau + nouveau_vk) ==="
+run '
+export PATH="/usr/local/libexec:/project/builddir-native/src/compiler/clc:/project/builddir-native/src/compiler/spirv:$PATH"
+cd /project && meson setup builddir-switch --wipe \
+    --cross-file switch_cross_file.txt \
+    --buildtype=release \
+    -Doptimization=1 \
+    -Db_lto=true \
+    -Db_ndebug=true \
+    -Dvulkan-drivers=nouveau \
+    -Dgallium-drivers=nouveau \
+    -Dshader-cache=true \
+    -Dgallium-rusticl=false \
+    -Dplatforms=switch \
+    -Dglx=disabled \
+    -Degl=disabled \
+    -Dopengl=false \
+    -Dgles1=disabled \
+    -Dgles2=disabled \
+    -Dllvm=disabled \
+    -Dshared-glapi=disabled \
+    -Dshared-llvm=disabled \
+    -Dmesa-clc=system \
+    -Dprecomp-compiler=system \
+    -Dcpp_rtti=false
+'
+
+# ── Step 4: Build ──────────────────────────────────────────────────────
+echo "=== Building Mesa for Switch ==="
+run '
+export PATH="/usr/local/libexec:/project/builddir-native/src/compiler/clc:/project/builddir-native/src/compiler/spirv:$PATH"
+ninja -C /project/builddir-switch \
+    src/nouveau/vulkan/libnvk.a \
+    src/nouveau/vulkan/libvulkan.a \
+    src/vulkan/util/libvulkan_util.a \
+    src/compiler/nir/libnir.a \
+    src/compiler/libcompiler.a \
+    src/compiler/spirv/libvtn.a \
+    src/util/libxmlconfig.a \
+    src/nouveau/compiler/libnak.a \
+    src/nouveau/compiler/libnak_rs.a \
+    src/nouveau/nil/liblibnil.a \
+    src/nouveau/nil/liblibnil_format_table.a \
+    src/nouveau/mme/libnouveau_mme.a \
+    src/nouveau/winsys/libnouveau_ws.a \
+    src/nouveau/headers/libnvidia_headers_c.a \
+    src/compiler/rust/libcompiler_c_helpers.a \
+    src/util/libmesa_util.a \
+    src/util/libmesa_util_simd.a \
+    src/util/blake3/libblake3.a \
+    src/c11/impl/libmesa_util_c11.a
+'
+
+echo "=== Build complete ==="
+docker stop "$CONTAINER_NAME"

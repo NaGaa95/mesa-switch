@@ -101,8 +101,10 @@ nouveau_context_destroy(struct nouveau_context *ctx)
       if (ctx->scratch.bo[i])
          nouveau_bo_ref(NULL, &ctx->scratch.bo[i]);
 
+#ifndef __SWITCH__
    nouveau_pushbuf_destroy(&ctx->pushbuf);
    nouveau_client_del(&ctx->client);
+#endif
 
    FREE(ctx);
 }

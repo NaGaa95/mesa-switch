@@ -22,7 +22,7 @@ gles2_def = custom_target(
   command : gen_vs_module_defs_normal_command,
 )
 
-libgles2 = shared_library(
+libgles2 = library(
   'GLESv2' + get_option('gles-lib-suffix'),
   ['libgles2_public.c', es2_glapi_mapi_tmp_h],
   vs_module_defs : gles2_def,

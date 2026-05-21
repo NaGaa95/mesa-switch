@@ -14,6 +14,7 @@
 #include "nvk_physical_device.h"
 #include "nvk_sampler.h"
 #include "nvkmd/nvkmd.h"
+#include "vk_common_entrypoints.h"
 
 #include "util/format/u_format.h"
 
@@ -1088,6 +1089,47 @@ nvk_UpdateDescriptorSetWithTemplate(VkDevice device,
    nvk_descriptor_writer_init_set(pdev, &w, set);
    write_from_template(&w, template, pData);
    nvk_descriptor_writer_finish(&w);
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL
+nvk_CreateDescriptorUpdateTemplate(
+   VkDevice device,
+   const VkDescriptorUpdateTemplateCreateInfo *pCreateInfo,
+   const VkAllocationCallbacks *pAllocator,
+   VkDescriptorUpdateTemplate *pDescriptorUpdateTemplate)
+{
+   return vk_common_CreateDescriptorUpdateTemplate(device, pCreateInfo, pAllocator,
+                                                  pDescriptorUpdateTemplate);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+nvk_DestroyDescriptorUpdateTemplate(
+   VkDevice device,
+   VkDescriptorUpdateTemplate descriptorUpdateTemplate,
+   const VkAllocationCallbacks *pAllocator)
+{
+   vk_common_DestroyDescriptorUpdateTemplate(device, descriptorUpdateTemplate,
+                                             pAllocator);
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL
+nvk_CreateSamplerYcbcrConversion(
+   VkDevice device,
+   const VkSamplerYcbcrConversionCreateInfo *pCreateInfo,
+   const VkAllocationCallbacks *pAllocator,
+   VkSamplerYcbcrConversion *pYcbcrConversion)
+{
+   return vk_common_CreateSamplerYcbcrConversion(device, pCreateInfo, pAllocator,
+                                                 pYcbcrConversion);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+nvk_DestroySamplerYcbcrConversion(
+   VkDevice device,
+   VkSamplerYcbcrConversion ycbcrConversion,
+   const VkAllocationCallbacks *pAllocator)
+{
+   vk_common_DestroySamplerYcbcrConversion(device, ycbcrConversion, pAllocator);
 }
 
 void

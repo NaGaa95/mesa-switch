@@ -18,6 +18,10 @@
 #include <sys/file.h>
 #include <unistd.h>
 
+#if defined(__SWITCH__)
+#define flock(fd, op) (0)
+#endif
+
 #include "crc32.h"
 #include "disk_cache.h"
 #include "hash_table.h"

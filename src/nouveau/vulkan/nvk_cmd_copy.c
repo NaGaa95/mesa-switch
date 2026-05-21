@@ -13,6 +13,7 @@
 #include "nvk_image_view.h"
 #include "nvk_physical_device.h"
 
+#include "vk_common_entrypoints.h"
 #include "vk_format.h"
 
 #include "nvtypes.h"
@@ -27,6 +28,18 @@ nvk_cmd_buffer_copy_cls(struct nvk_cmd_buffer *cmd)
    struct nvk_device *dev = nvk_cmd_buffer_device(cmd);
    const struct nvk_physical_device *pdev = nvk_device_physical(dev);
    return pdev->info.cls_copy;
+}
+
+VKAPI_ATTR void VKAPI_CALL
+nvk_CmdCopyBufferToImage(VkCommandBuffer commandBuffer,
+                         VkBuffer srcBuffer,
+                         VkImage dstImage,
+                         VkImageLayout dstImageLayout,
+                         uint32_t regionCount,
+                         const VkBufferImageCopy *pRegions)
+{
+   vk_common_CmdCopyBufferToImage(commandBuffer, srcBuffer, dstImage,
+                                  dstImageLayout, regionCount, pRegions);
 }
 
 struct nouveau_copy_buffer {

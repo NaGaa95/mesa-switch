@@ -17,6 +17,21 @@ struct nvk_mem_stream_chunk {
    uint64_t idle_time_point;
 };
 
+static const struct vk_sync_type *
+nvk_mem_stream_get_timeline_sync_type(const struct nvk_physical_device *pdev)
+{
+   if (pdev->nvkmd->sync_types == NULL)
+      return NULL;
+
+   for (const struct vk_sync_type *const *sync_type = pdev->nvkmd->sync_types;
+        *sync_type != NULL; sync_type++) {
+      if ((*sync_type)->features & VK_SYNC_FEATURE_TIMELINE)
+         return *sync_type;
+   }
+
+   return NULL;
+}
+
 static VkResult
 nvk_mem_stream_chunk_create(struct nvk_device *dev,
                             struct nvk_mem_stream_chunk **chunk_out)
@@ -56,10 +71,14 @@ nvk_mem_stream_init(struct nvk_device *dev,
                     struct nvk_mem_stream *stream)
 {
    const struct nvk_physical_device *pdev = nvk_device_physical(dev);
+   const struct vk_sync_type *sync_type;
    VkResult result;
 
-   const struct vk_sync_type *sync_type = pdev->nvkmd->sync_types[0];
-   assert(sync_type->features & VK_SYNC_FEATURE_TIMELINE);
+   sync_type = nvk_mem_stream_get_timeline_sync_type(pdev);
+   if (sync_type == NULL) {
+      return vk_errorf(dev, VK_ERROR_INITIALIZATION_FAILED,
+                       "No timeline sync type available for mem stream");
+   }
 
    result = vk_sync_create(&dev->vk, sync_type, VK_SYNC_IS_TIMELINE,
                            0, &stream->sync);

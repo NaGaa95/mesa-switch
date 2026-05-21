@@ -6,7 +6,9 @@
 
 #include "nvk_entrypoints.h"
 #include "nvk_physical_device.h"
+#include "nvkmd/nvkmd.h"
 
+#include "vk_common_entrypoints.h"
 #include "vulkan/wsi/wsi_common.h"
 
 #include "util/build_id.h"
@@ -55,6 +57,9 @@ static const struct vk_instance_extension_table instance_extensions = {
 #ifndef VK_USE_PLATFORM_WIN32_KHR
    .EXT_headless_surface = true,
 #endif
+#ifdef VK_USE_PLATFORM_VI_NN
+   .NN_vi_surface = true,
+#endif
    .KHR_device_group_creation = true,
    .KHR_external_fence_capabilities = true,
    .KHR_external_memory_capabilities = true,
@@ -75,6 +80,40 @@ nvk_EnumerateInstanceExtensionProperties(const char *pLayerName,
    return vk_enumerate_instance_extension_properties(
       &instance_extensions, pPropertyCount, pProperties);
 }
+
+VKAPI_ATTR VkResult VKAPI_CALL
+nvk_EnumerateInstanceLayerProperties(uint32_t *pPropertyCount,
+                                     VkLayerProperties *pProperties)
+{
+   if (pPropertyCount == NULL)
+      return VK_ERROR_INITIALIZATION_FAILED;
+
+   *pPropertyCount = 0;
+   return VK_SUCCESS;
+}
+
+#ifdef __SWITCH__
+static VkResult
+nvk_enumerate_switch_physical_devices(struct vk_instance *_instance)
+{
+   struct nvk_instance *instance = (struct nvk_instance *)_instance;
+   struct nvkmd_pdev *nvkmd;
+
+   VkResult result =
+      nvkmd_try_create_pdev_for_switch(&instance->vk.base,
+                                       instance->debug_flags, &nvkmd);
+   if (result != VK_SUCCESS)
+      return result;
+
+   struct vk_physical_device *pdev;
+   result = nvk_create_physical_device_from_nvkmd(instance, nvkmd, &pdev);
+   if (result != VK_SUCCESS)
+      return result;
+
+   list_addtail(&pdev->link, &instance->vk.physical_devices.list);
+   return VK_SUCCESS;
+}
+#endif
 
 static void
 nvk_init_debug_flags(struct nvk_instance *instance)
@@ -161,8 +200,13 @@ nvk_CreateInstance(const VkInstanceCreateInfo *pCreateInfo,
 
    instance->vk.physical_devices.try_create_for_drm =
       nvk_create_drm_physical_device;
+#ifdef __SWITCH__
+   instance->vk.physical_devices.enumerate =
+      nvk_enumerate_switch_physical_devices;
+#endif
    instance->vk.physical_devices.destroy = nvk_physical_device_destroy;
 
+#ifdef HAVE_DL_ITERATE_PHDR
    const struct build_id_note *note =
       build_id_find_nhdr_for_addr(nvk_CreateInstance);
    if (!note) {
@@ -180,6 +224,17 @@ nvk_CreateInstance(const VkInstanceCreateInfo *pCreateInfo,
 
    STATIC_ASSERT(sizeof(instance->driver_build_sha) == SHA1_DIGEST_LENGTH);
    memcpy(instance->driver_build_sha, build_id_data(note), SHA1_DIGEST_LENGTH);
+#else
+   /* No dl_iterate_phdr (e.g. Switch / static-only platforms): use a fixed
+    * pseudo build-id derived from the package version. The shader cache
+    * UUID will be stable for a given driver build but won't change between
+    * incremental rebuilds. */
+   STATIC_ASSERT(sizeof(instance->driver_build_sha) == SHA1_DIGEST_LENGTH);
+   memset(instance->driver_build_sha, 0, SHA1_DIGEST_LENGTH);
+   const char fallback_id[] = "nvk-" PACKAGE_VERSION;
+   memcpy(instance->driver_build_sha, fallback_id,
+          MIN2(sizeof(fallback_id) - 1, (size_t)SHA1_DIGEST_LENGTH));
+#endif
 
    *pInstance = nvk_instance_to_handle(instance);
    return VK_SUCCESS;
@@ -206,6 +261,15 @@ nvk_DestroyInstance(VkInstance _instance,
 
    vk_instance_finish(&instance->vk);
    vk_free(&instance->vk.alloc, instance);
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL
+nvk_EnumeratePhysicalDevices(VkInstance instance,
+                             uint32_t *pPhysicalDeviceCount,
+                             VkPhysicalDevice *pPhysicalDevices)
+{
+   return vk_common_EnumeratePhysicalDevices(instance, pPhysicalDeviceCount,
+                                             pPhysicalDevices);
 }
 
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL

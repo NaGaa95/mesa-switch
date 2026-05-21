@@ -334,6 +334,7 @@ libmesa_util_simd = static_library(
   include_directories : [inc_util],
   gnu_symbol_visibility : 'hidden',
   build_by_default : false,
+  install : host_machine.system() == 'horizon',
 )
 libmesa_util_links += libmesa_util_simd
 
@@ -345,7 +346,8 @@ _libmesa_util = static_library(
   link_with: libmesa_util_links,
   c_args : [c_msvc_compat_args],
   gnu_symbol_visibility : 'hidden',
-  build_by_default : false
+  build_by_default : false,
+  install : host_machine.system() == 'horizon',
 )
 
 idep_mesautil = declare_dependency(
@@ -384,6 +386,7 @@ _libxmlconfig = static_library(
   ],
   gnu_symbol_visibility : 'hidden',
   build_by_default : false,
+  install : host_machine.system() == 'horizon',
 )
 
 idep_xmlconfig = declare_dependency(

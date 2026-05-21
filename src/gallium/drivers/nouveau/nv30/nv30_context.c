@@ -46,7 +46,7 @@ nv30_context_kick_notify(struct nouveau_pushbuf *push)
 
    if (push->bufctx) {
       struct nouveau_bufref *bref;
-      LIST_FOR_EACH_ENTRY(bref, &push->bufctx->current, thead) {
+      NOUVEAU_BUFREF_LIST_FOR_EACH(bref, &push->bufctx->current) {
          struct nv04_resource *res = bref->priv;
          if (res && res->mm) {
             _nouveau_fence_ref(p->context->fence, &res->fence);

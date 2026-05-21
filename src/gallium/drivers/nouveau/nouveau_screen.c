@@ -19,9 +19,11 @@
 #include <stdlib.h>
 
 #include "drm-uapi/nouveau_drm.h"
+#ifndef __SWITCH__
 #include <xf86drm.h>
-#include "nvif/class.h"
-#include "nvif/cl0080.h"
+#endif
+#include <nvif/class.h>
+#include <nvif/cl0080.h>
 
 #include "nouveau_winsys.h"
 #include "nouveau_screen.h"
@@ -29,6 +31,8 @@
 #include "nouveau_fence.h"
 #include "nouveau_mm.h"
 #include "nouveau_buffer.h"
+
+#include "util/disk_cache_os.h"
 
 #include <compiler/glsl_types.h>
 
@@ -102,7 +106,7 @@ nouveau_screen_fence_finish(struct pipe_screen *screen,
 struct nouveau_bo *
 nouveau_screen_bo_from_handle(struct pipe_screen *pscreen,
                               struct winsys_handle *whandle,
-                              unsigned *out_stride)
+                              unsigned *out_stride, unsigned *out_offset)
 {
    struct nouveau_device *dev = nouveau_screen(pscreen)->device;
    struct nouveau_bo *bo = NULL;
@@ -133,6 +137,7 @@ nouveau_screen_bo_from_handle(struct pipe_screen *pscreen,
    }
 
    *out_stride = whandle->stride;
+   *out_offset = whandle->offset;
    return bo;
 }
 
@@ -141,9 +146,11 @@ bool
 nouveau_screen_bo_get_handle(struct pipe_screen *pscreen,
                              struct nouveau_bo *bo,
                              unsigned stride,
+                             unsigned offset,
                              struct winsys_handle *whandle)
 {
    whandle->stride = stride;
+   whandle->offset = offset;
 
    if (whandle->type == WINSYS_HANDLE_TYPE_SHARED) {
       return nouveau_bo_name_get(bo, &whandle->handle) == 0;
@@ -179,6 +186,9 @@ nouveau_disk_cache_create(struct nouveau_screen *screen)
    unsigned char sha1[20];
    char cache_id[20 * 2 + 1];
    uint64_t driver_flags = 0;
+
+   if (!disk_cache_enabled())
+      return;
 
    _mesa_sha1_init(&ctx);
    if (!disk_cache_get_function_identifier(nouveau_disk_cache_create,
@@ -331,6 +341,7 @@ nouveau_screen_init(struct nouveau_screen *screen, struct nouveau_device *dev)
 
    bool enable_svm = debug_get_bool_option("NOUVEAU_SVM", false);
    screen->has_svm = false;
+#ifndef __SWITCH__
    /* we only care about HMM with OpenCL enabled */
    if (dev->chipset > 0x130 && enable_svm) {
       /* Before being able to enable SVM we need to carve out some memory for
@@ -369,9 +380,11 @@ nouveau_screen_init(struct nouveau_screen *screen, struct nouveau_device *dev)
          break;
       } while ((start + screen->svm_cutout_size) < BITFIELD64_MASK(limit_bit));
    }
+#endif
 
    switch (dev->chipset) {
    case 0x0ea: /* TK1, GK20A */
+   case 0x120: /* Tegra X1 (Switch) */
    case 0x12b: /* TX1, GM20B */
    case 0x13b: /* TX2, GP10B */
       screen->tegra_sector_layout = true;
@@ -480,7 +493,6 @@ nouveau_screen_fini(struct nouveau_screen *screen)
 
    nouveau_device_del(&screen->device);
    nouveau_drm_del(&screen->drm);
-   close(fd);
 
    disk_cache_destroy(screen->disk_shader_cache);
    nouveau_fence_list_destroy(&screen->fence);
@@ -506,6 +518,16 @@ nouveau_context_init(struct nouveau_context *context, struct nouveau_screen *scr
    context->pipe.set_debug_callback = nouveau_set_debug_callback;
    context->screen = screen;
 
+#ifdef __SWITCH__
+   /* Switch: share screen's pushbuf/GPU channel (like Mesa 22.2 did).
+    * Each nouveau_pushbuf_new creates a new NvGpuChannel, but the 3D engine
+    * state was initialized on the screen's channel. Using a separate channel
+    * for draw calls would send GPU commands to an uninitialized channel.
+    */
+   context->client = screen->client;
+   context->pushbuf = screen->pushbuf;
+   return 0;
+#else
    ret = nouveau_client_new(screen->device, &context->client);
    if (ret)
       return ret;
@@ -516,4 +538,5 @@ nouveau_context_init(struct nouveau_context *context, struct nouveau_screen *scr
       return ret;
 
    return 0;
+#endif
 }

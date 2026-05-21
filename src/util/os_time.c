@@ -40,7 +40,7 @@
 #include "util/u_atomic.h"
 #include "util/u_overflow.h"
 
-#if DETECT_OS_POSIX_LITE
+#if DETECT_OS_POSIX_LITE || DETECT_OS_SWITCH
 #  include <unistd.h> /* usleep */
 #  include <time.h> /* timeval */
 #  include <sys/time.h> /* timeval */
@@ -50,6 +50,10 @@
 #  include <windows.h>
 #else
 #  error Unsupported OS
+#endif
+
+#if DETECT_OS_SWITCH
+#  include <switch/kernel/svc.h>
 #endif
 
 
@@ -95,6 +99,8 @@ os_time_sleep(int64_t usecs)
    if (dwMilliseconds) {
       Sleep(dwMilliseconds);
    }
+#elif DETECT_OS_SWITCH
+   svcSleepThread((u64)usecs * 1000);
 #else
 #  error Unsupported OS
 #endif

@@ -20,7 +20,10 @@
  * OTHER DEALINGS IN THE SOFTWARE.
  */
 
+#include <nouveau_drm.h>
+#ifndef __SWITCH__
 #include <xf86drm.h>
+#endif
 #include "drm-uapi/nouveau_drm.h"
 #include <nvif/class.h>
 #include "util/format/u_format.h"
@@ -82,6 +85,7 @@ nvc0_screen_is_format_supported(struct pipe_screen *pscreen,
     */
    if ((desc->layout == UTIL_FORMAT_LAYOUT_ETC ||
         desc->layout == UTIL_FORMAT_LAYOUT_ASTC) &&
+       nouveau_screen(pscreen)->device->chipset != 0x120 &&
        nouveau_screen(pscreen)->device->chipset != 0x12b &&
        nouveau_screen(pscreen)->class_3d != NVEA_3D_CLASS)
       return false;
@@ -580,7 +584,6 @@ nvc0_screen_fence_emit(struct pipe_context *pcontext, u32 *sequence,
    struct nvc0_context *nvc0 = nvc0_context(pcontext);
    struct nvc0_screen *screen = nvc0->screen;
    struct nouveau_pushbuf *push = nvc0->base.pushbuf;
-   struct nouveau_pushbuf_refn ref = { wait, NOUVEAU_BO_GART | NOUVEAU_BO_RDWR };
 
    /* we need to do it after possible flush in MARK_RING */
    *sequence = ++screen->base.fence.sequence;
@@ -593,7 +596,12 @@ nvc0_screen_fence_emit(struct pipe_context *pcontext, u32 *sequence,
    PUSH_DATA (push, NVC0_3D_QUERY_GET_FENCE | NVC0_3D_QUERY_GET_SHORT |
               (0xf << NVC0_3D_QUERY_GET_UNIT__SHIFT));
 
-   nouveau_pushbuf_refn(push, &ref, 1);
+#ifndef __SWITCH__
+   {
+      struct nouveau_pushbuf_refn ref = { wait, NOUVEAU_BO_GART | NOUVEAU_BO_RDWR };
+      nouveau_pushbuf_refn(push, &ref, 1);
+   }
+#endif
 }
 
 static u32
@@ -804,6 +812,7 @@ nvc0_screen_create(struct nouveau_device *dev)
    ret = nouveau_screen_init(&screen->base, dev);
    if (ret)
       FAIL_SCREEN_INIT("Base screen init failed: %d\n", ret);
+
    chan = screen->base.channel;
    push = screen->base.pushbuf;
    push->rsvd_kick = 5;

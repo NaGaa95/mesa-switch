@@ -84,6 +84,11 @@ VkResult nvk_create_drm_physical_device(struct vk_instance *vk_instance,
                                         struct _drmDevice *drm_device,
                                         struct vk_physical_device **pdev_out);
 
+struct nvkmd_pdev;
+VkResult nvk_create_physical_device_from_nvkmd(struct nvk_instance *instance,
+                                               struct nvkmd_pdev *nvkmd,
+                                               struct vk_physical_device **pdev_out);
+
 void nvk_physical_device_destroy(struct vk_physical_device *vk_device);
 
 VkExtent2D nvk_max_shading_rate(const struct nvk_physical_device *pdev,
@@ -92,7 +97,8 @@ VkExtent2D nvk_max_shading_rate(const struct nvk_physical_device *pdev,
 #if defined(VK_USE_PLATFORM_WAYLAND_KHR) || \
     defined(VK_USE_PLATFORM_XCB_KHR) || \
     defined(VK_USE_PLATFORM_XLIB_KHR) || \
-    defined(VK_USE_PLATFORM_DISPLAY_KHR)
+    defined(VK_USE_PLATFORM_DISPLAY_KHR) || \
+    defined(VK_USE_PLATFORM_VI_NN)
 #define NVK_USE_WSI_PLATFORM
 #endif
 

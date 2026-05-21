@@ -35,9 +35,11 @@
 #define ST_DRAW_H
 
 #include "util/glheader.h"
+#include "st_atom.h"
 
 struct gl_context;
 struct st_context;
+struct dd_function_table;
 
 void st_init_draw_functions(struct pipe_screen *screen,
                             struct dd_function_table *functions);

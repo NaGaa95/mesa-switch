@@ -16,6 +16,7 @@ if with_platform_windows
 endif
 deps_for_egl = []
 incs_for_egl = [inc_include, inc_src, inc_egl]
+objs_for_egl = []
 
 files_egl = files(
   'main/eglapi.c',
@@ -149,6 +150,23 @@ elif with_platform_haiku
 
   link_for_egl += [libmesa, libgallium, libswhgl, libsthgl]
   deps_for_egl += [cpp.find_library('be'), driver_swrast]
+elif with_platform_switch
+  incs_for_egl += [inc_gallium, inc_gallium_aux, inc_gallium_winsys, inc_mesa]
+  files_egl += files('drivers/switch/egl_switch.c')
+  link_for_egl += libglapi
+  objs_for_egl += [
+    libmesa.extract_all_objects(),
+    libglsl.extract_all_objects(),
+    libglcpp.extract_all_objects(),
+    libcompiler.extract_all_objects(),
+    _libnir.extract_all_objects(),
+    libgallium.extract_all_objects(),
+    libgalliumvl_stub.extract_all_objects(),
+    libnouveauwinsys.extract_all_objects(),
+    libnouveau_codegen.extract_all_objects(),
+    libnouveau.extract_all_objects()
+  ]
+  deps_for_egl += dep_zstd
 elif with_platform_windows
   c_args_for_egl += [
     '-DEGLAPI=', '-DPUBLIC='
@@ -193,6 +211,10 @@ if with_ld_version_script
   endif
 endif
 
+if not with_platform_switch
+  link_for_egl += libmesa_util
+endif
+
 egl_def = custom_target(
   'egl.def',
   input: 'main/egl.def.in',
@@ -200,7 +222,7 @@ egl_def = custom_target(
   command : gen_vs_module_defs_normal_command,
 )
 
-libegl = shared_library(
+libegl = library(
   egl_lib_name,
   files_egl,
   c_args : [
@@ -210,6 +232,7 @@ libegl = shared_library(
   cpp_args : [cpp_args_for_egl],
   gnu_symbol_visibility : 'hidden',
   include_directories : incs_for_egl,
+  objects : objs_for_egl,
   link_with : [link_for_egl],
   link_args : [ld_args_bsymbolic, ld_args_gc_sections, link_args_for_egl],
   link_depends : [link_deps_for_egl],

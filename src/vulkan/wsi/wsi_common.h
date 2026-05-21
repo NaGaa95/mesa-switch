@@ -51,7 +51,11 @@ struct vk_queue;
 
 struct driOptionCache;
 
-#define VK_ICD_WSI_PLATFORM_MAX (VK_ICD_WSI_PLATFORM_METAL + 1)
+/* Cover all loader platform IDs through VK_ICD_WSI_PLATFORM_VI so the Switch
+ * backend can index the wsi array without going out of bounds. The earlier
+ * cap at METAL+1 was tight against the highest index actually used by Mesa
+ * before VK_NN_vi_surface was wired up. */
+#define VK_ICD_WSI_PLATFORM_MAX (VK_ICD_WSI_PLATFORM_VI + 1)
 
 struct wsi_device {
    /* Allocator for the instance */

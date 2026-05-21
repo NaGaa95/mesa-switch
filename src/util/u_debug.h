@@ -402,7 +402,7 @@ debug_get_option_ ## suffix (void) \
 static inline bool
 __normal_user(void)
 {
-#if defined(_WIN32)
+#if defined(_WIN32) || defined(__SWITCH__)
    return true;
 #else
    return geteuid() == getuid() && getegid() == getgid();
@@ -410,10 +410,16 @@ __normal_user(void)
 }
 
 #ifndef HAVE_SECURE_GETENV
+#ifdef __SWITCH__
+/* Switch stdlib.h declares secure_getenv but doesn't implement it.
+ * Use a macro to avoid conflicting with the non-static declaration. */
+#define secure_getenv(name) getenv(name)
+#else
 static inline char *secure_getenv(const char *name)
 {
    return getenv(name);
 }
+#endif
 #endif
 
 #define DEBUG_GET_ONCE_BOOL_OPTION(sufix, name, dfault) \

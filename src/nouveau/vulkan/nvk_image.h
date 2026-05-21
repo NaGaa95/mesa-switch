@@ -59,7 +59,7 @@ struct nvk_image_plane {
    struct nil_image nil;
    uint64_t addr;
 
-   /** Reserved VA for sparse images, NULL otherwise. */
+   /** Reserved VA for sparse images and tiled images. */
    struct nvkmd_va *va;
 
    /* Needed for EXT_Host_Image_Copy. We get GPU addresses from the API,

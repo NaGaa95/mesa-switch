@@ -33,8 +33,12 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <sys/stat.h>
+#include <string.h>
 #include "util/mesa-sha1.h"
 #include "util/detect_os.h"
+#ifdef __SWITCH__
+#include "git_sha1.h"
+#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -79,7 +83,7 @@ struct cache_item_metadata {
 
 struct disk_cache;
 
-#ifdef HAVE_DLADDR
+#if defined(HAVE_DLADDR) && !defined(__SWITCH__)
 static inline bool
 disk_cache_get_function_timestamp(void *ptr, uint32_t* timestamp)
 {
@@ -118,6 +122,15 @@ disk_cache_get_function_identifier(void *ptr, struct mesa_sha1 *ctx)
       _mesa_sha1_update(ctx, &timestamp, sizeof(timestamp));
    } else
       return false;
+   return true;
+}
+#elif defined(__SWITCH__)
+static inline bool
+disk_cache_get_function_identifier(void *ptr, struct mesa_sha1 *ctx)
+{
+   (void)ptr;
+   const char build_id[] = PACKAGE_VERSION MESA_GIT_SHA1;
+   _mesa_sha1_update(ctx, build_id, strlen(build_id));
    return true;
 }
 #elif DETECT_OS_WINDOWS

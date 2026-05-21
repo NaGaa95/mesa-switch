@@ -45,6 +45,7 @@ blake3 = static_library(
   c_args : blake3_defs + cc.get_supported_arguments('-Wno-error'),
   gnu_symbol_visibility : 'hidden',
   build_by_default : false,
+  install : host_machine.system() == 'horizon',
 )
 
 idep_blake3 = declare_dependency(

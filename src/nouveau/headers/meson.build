@@ -113,6 +113,7 @@ _libnvidia_headers = static_library(
   include_directories : ['.', 'nvidia/classes', inc_include, inc_src],
   c_args : [no_override_init_args],
   gnu_symbol_visibility : 'hidden',
+  install : host_machine.system() == 'horizon',
 )
 
 idep_nvidia_headers = declare_dependency(

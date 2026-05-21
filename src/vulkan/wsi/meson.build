@@ -33,6 +33,10 @@ else
   files_vulkan_wsi += files('wsi_common_headless.c')
 endif
 
+if with_platform_switch
+  files_vulkan_wsi += files('wsi_common_switch.c')
+endif
+
 if with_platform_macos
   files_vulkan_wsi += files('wsi_common_metal.c', 'wsi_common_metal_layer.m')
 endif

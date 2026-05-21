@@ -38,8 +38,8 @@
 #include "compiler/glsl_types.h"
 #endif
 
-#ifndef _WIN32
-#include "dlfcn.h"
+#ifndef _WIN32 
+// #include "dlfcn.h"
 #endif
 
 #define VERSION_IS_1_0(version) \

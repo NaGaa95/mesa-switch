@@ -24,6 +24,8 @@
 
 namespace nv50_ir {
 
+#ifndef __SWITCH__
+
 // Argh, all these assertions ...
 
 class CodeEmitterNVC0 : public CodeEmitter
@@ -1253,6 +1255,8 @@ CodeEmitterNVC0::emitSLCT(const CmpInstruction *i)
       code[0] |= 1 << 5;
 }
 
+#endif
+
 void
 nvc0_selpFlip(const FixupEntry *entry, uint32_t *code, const FixupData& data)
 {
@@ -1271,6 +1275,8 @@ nvc0_selpFlip(const FixupEntry *entry, uint32_t *code, const FixupData& data)
    else
       code[loc + 1] &= ~(1 << 20);
 }
+
+#ifndef __SWITCH__
 
 void CodeEmitterNVC0::emitSELP(const Instruction *i)
 {
@@ -1733,6 +1739,8 @@ CodeEmitterNVC0::emitInterpMode(const Instruction *i)
    }
 }
 
+#endif
+
 void
 nvc0_interpApply(const FixupEntry *entry, uint32_t *code, const FixupData& data)
 {
@@ -1754,6 +1762,8 @@ nvc0_interpApply(const FixupEntry *entry, uint32_t *code, const FixupData& data)
    code[loc + 0] &= ~(0x3f << 26);
    code[loc + 0] |= reg << 26;
 }
+
+#ifndef __SWITCH__
 
 void
 CodeEmitterNVC0::emitINTERP(const Instruction *i)
@@ -3538,5 +3548,7 @@ TargetNVC0::getCodeEmitter(Program::Type type)
       return createCodeEmitterGK110(type);
    return createCodeEmitterNVC0(type);
 }
+
+#endif
 
 } // namespace nv50_ir

@@ -519,7 +519,7 @@ nv30_state_validate(struct nv30_context *nv30, uint32_t mask, bool hwtnl)
       PUSH_DATA (push, 0);
    }
 
-   LIST_FOR_EACH_ENTRY(bref, &bctx->current, thead) {
+   NOUVEAU_BUFREF_LIST_FOR_EACH(bref, &bctx->current) {
       struct nv04_resource *res = bref->priv;
       if (res && res->mm) {
          nouveau_fence_ref(nv30->base.fence, &res->fence);

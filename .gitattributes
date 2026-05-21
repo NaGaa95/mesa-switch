@@ -5,3 +5,4 @@
 *.gif binary
 *.ico binary
 *.cl gitlab-language=c
+*.patch filter=lfs diff=lfs merge=lfs -text

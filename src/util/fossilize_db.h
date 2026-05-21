@@ -33,8 +33,15 @@
 #ifndef FOSSILIZE_DB_H
 #define FOSSILIZE_DB_H
 
-#ifdef HAVE_FLOCK
+#if defined(HAVE_FLOCK)
 #define FOZ_DB_UTIL 1
+#elif defined(__SWITCH__)
+#define FOZ_DB_UTIL 1
+#ifndef LOCK_EX
+#define LOCK_EX 0
+#define LOCK_NB 0
+#define LOCK_UN 0
+#endif
 #endif
 
 #ifdef HAVE_SYS_INOTIFY_H

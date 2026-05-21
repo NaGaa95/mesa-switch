@@ -23,12 +23,20 @@
 #include "util/mesa-sha1.h"
 
 #include "vk_android.h"
+#include "vk_common_entrypoints.h"
 #include "vk_device.h"
 #include "vk_drm_syncobj.h"
 #include "vk_shader_module.h"
 #include "vulkan/wsi/wsi_common.h"
 
+#ifndef __SWITCH__
 #include <sys/sysmacros.h>
+#else
+/* Switch has no DRM device files; render_dev/primary_dev are always 0,
+ * so these macros are only used in unreachable code. */
+#define major(dev) ((unsigned)(((dev) >> 8) & 0xff))
+#define minor(dev) ((unsigned)((dev) & 0xff))
+#endif
 
 #include "nv_push.h"
 #include "cl90c0.h"
@@ -154,10 +162,12 @@ nvk_get_device_extensions(const struct nvk_instance *instance,
       .KHR_pipeline_executable_properties = true,
       .KHR_pipeline_library = true,
 #ifdef NVK_USE_WSI_PLATFORM
+#ifndef __SWITCH__
       .KHR_present_id = true,
       .KHR_present_id2 = true,
       .KHR_present_wait = true,
       .KHR_present_wait2 = true,
+#endif
 #endif
       .KHR_push_descriptor = true,
       .KHR_relaxed_block_layout = true,
@@ -295,6 +305,21 @@ nvk_get_device_extensions(const struct nvk_instance *instance,
    };
 }
 
+static bool
+nvk_sparse_binding_supported(const struct nv_device_info *info)
+{
+#ifdef __SWITCH__
+   /* The Switch nvkmd backend has no VM-bind (ctx_bind) implementation, so
+    * vkQueueBindSparse cannot be honored.  Advertise no sparse support at
+    * all rather than letting apps create sparse resources that can never be
+    * bound. */
+   (void)info;
+   return false;
+#else
+   return info->cls_eng3d >= MAXWELL_B;
+#endif
+}
+
 static void
 nvk_get_device_features(const struct nv_device_info *info,
                         const struct vk_device_extension_table *supported_extensions,
@@ -349,14 +374,14 @@ nvk_get_device_features(const struct nv_device_info *info,
       .shaderInt16 = true,
       .shaderResourceResidency = info->cls_eng3d >= VOLTA_A,
       .shaderResourceMinLod = info->cls_eng3d >= VOLTA_A,
-      .sparseBinding = info->cls_eng3d >= MAXWELL_B,
-      .sparseResidency2Samples = info->cls_eng3d >= MAXWELL_B,
-      .sparseResidency4Samples = info->cls_eng3d >= MAXWELL_B,
-      .sparseResidency8Samples = info->cls_eng3d >= MAXWELL_B,
-      .sparseResidencyAliased = info->cls_eng3d >= MAXWELL_B,
-      .sparseResidencyBuffer = info->cls_eng3d >= MAXWELL_B,
-      .sparseResidencyImage2D = info->cls_eng3d >= MAXWELL_B,
-      .sparseResidencyImage3D = info->cls_eng3d >= MAXWELL_B,
+      .sparseBinding = nvk_sparse_binding_supported(info),
+      .sparseResidency2Samples = nvk_sparse_binding_supported(info),
+      .sparseResidency4Samples = nvk_sparse_binding_supported(info),
+      .sparseResidency8Samples = nvk_sparse_binding_supported(info),
+      .sparseResidencyAliased = nvk_sparse_binding_supported(info),
+      .sparseResidencyBuffer = nvk_sparse_binding_supported(info),
+      .sparseResidencyImage2D = nvk_sparse_binding_supported(info),
+      .sparseResidencyImage3D = nvk_sparse_binding_supported(info),
       .variableMultisampleRate = true,
       .inheritedQueries = true,
 
@@ -489,11 +514,13 @@ nvk_get_device_features(const struct nv_device_info *info,
       .pipelineExecutableInfo = true,
 
 #ifdef NVK_USE_WSI_PLATFORM
+#ifndef __SWITCH__
       /* VK_KHR_present_id */
       .presentId = true,
 
       /* VK_KHR_present_wait */
       .presentWait = true,
+#endif
 #endif
 
       /* VK_KHR_shader_quad_control */
@@ -726,11 +753,13 @@ nvk_get_device_features(const struct nv_device_info *info,
       .shaderSMBuiltins = true,
 
 #ifdef NVK_USE_WSI_PLATFORM
+#ifndef __SWITCH__
       /* VK_KHR_present_id2 */
       .presentId2 = true,
 
       /* VK_KHR_present_wait2 */
       .presentWait2 = true,
+#endif
 #endif
    };
 }
@@ -1349,18 +1378,11 @@ nvk_get_vram_heap_available(struct nvk_physical_device *pdev)
 }
 
 VkResult
-nvk_create_drm_physical_device(struct vk_instance *_instance,
-                               struct _drmDevice *drm_device,
-                               struct vk_physical_device **pdev_out)
+nvk_create_physical_device_from_nvkmd(struct nvk_instance *instance,
+                                      struct nvkmd_pdev *nvkmd,
+                                      struct vk_physical_device **pdev_out)
 {
-   struct nvk_instance *instance = (struct nvk_instance *)_instance;
    VkResult result;
-
-   struct nvkmd_pdev *nvkmd;
-   result = nvkmd_try_create_pdev_for_drm(drm_device, &instance->vk.base,
-                                          instance->debug_flags, &nvkmd);
-   if (result != VK_SUCCESS)
-      return result;
 
    /* We don't support anything pre-Kepler */
    if (nvkmd->dev_info.cls_eng3d < KEPLER_A) {
@@ -1368,6 +1390,7 @@ nvk_create_drm_physical_device(struct vk_instance *_instance,
       goto fail_nvkmd;
    }
 
+#ifndef __SWITCH__
    if (!nvk_is_conformant(&nvkmd->dev_info) &&
        !debug_get_bool_option("NVK_I_WANT_A_BROKEN_VULKAN_DRIVER", false)) {
 #ifdef NDEBUG
@@ -1381,6 +1404,7 @@ nvk_create_drm_physical_device(struct vk_instance *_instance,
 #endif
       goto fail_nvkmd;
    }
+#endif
 
    if (!nvk_is_conformant(&nvkmd->dev_info))
       vk_warn_non_conformant_implementation("NVK");
@@ -1531,11 +1555,14 @@ nvk_create_drm_physical_device(struct vk_instance *_instance,
    assert(pdev->mem_heap_count <= ARRAY_SIZE(pdev->mem_heaps));
    assert(pdev->mem_type_count <= ARRAY_SIZE(pdev->mem_types));
 
+   VkQueueFlags queue_flags = VK_QUEUE_GRAPHICS_BIT |
+                              VK_QUEUE_COMPUTE_BIT |
+                              VK_QUEUE_TRANSFER_BIT;
+   if (nvk_sparse_binding_supported(&nvkmd->dev_info))
+      queue_flags |= VK_QUEUE_SPARSE_BINDING_BIT;
+
    pdev->queue_families[pdev->queue_family_count++] = (struct nvk_queue_family) {
-      .queue_flags = VK_QUEUE_GRAPHICS_BIT |
-                     VK_QUEUE_COMPUTE_BIT |
-                     VK_QUEUE_TRANSFER_BIT |
-                     VK_QUEUE_SPARSE_BINDING_BIT,
+      .queue_flags = queue_flags,
       .queue_count = 1,
    };
    assert(pdev->queue_family_count <= ARRAY_SIZE(pdev->queue_families));
@@ -1564,6 +1591,23 @@ fail_nvkmd:
    return result;
 }
 
+VkResult
+nvk_create_drm_physical_device(struct vk_instance *_instance,
+                               struct _drmDevice *drm_device,
+                               struct vk_physical_device **pdev_out)
+{
+   struct nvk_instance *instance = (struct nvk_instance *)_instance;
+   struct nvkmd_pdev *nvkmd;
+
+   VkResult result =
+      nvkmd_try_create_pdev_for_drm(drm_device, &instance->vk.base,
+                                    instance->debug_flags, &nvkmd);
+   if (result != VK_SUCCESS)
+      return result;
+
+   return nvk_create_physical_device_from_nvkmd(instance, nvkmd, pdev_out);
+}
+
 void
 nvk_physical_device_destroy(struct vk_physical_device *vk_pdev)
 {
@@ -1578,6 +1622,110 @@ nvk_physical_device_destroy(struct vk_physical_device *vk_pdev)
    nvkmd_pdev_destroy(pdev->nvkmd);
    vk_physical_device_finish(&pdev->vk);
    vk_free(&pdev->vk.instance->alloc, pdev);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+nvk_GetPhysicalDeviceProperties(VkPhysicalDevice physicalDevice,
+                                VkPhysicalDeviceProperties *pProperties)
+{
+   vk_common_GetPhysicalDeviceProperties(physicalDevice, pProperties);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+nvk_GetPhysicalDeviceQueueFamilyProperties(
+   VkPhysicalDevice physicalDevice,
+   uint32_t *pQueueFamilyPropertyCount,
+   VkQueueFamilyProperties *pQueueFamilyProperties)
+{
+   vk_common_GetPhysicalDeviceQueueFamilyProperties(
+      physicalDevice, pQueueFamilyPropertyCount, pQueueFamilyProperties);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+nvk_GetPhysicalDeviceMemoryProperties(
+   VkPhysicalDevice physicalDevice,
+   VkPhysicalDeviceMemoryProperties *pMemoryProperties)
+{
+   vk_common_GetPhysicalDeviceMemoryProperties(physicalDevice,
+                                               pMemoryProperties);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+nvk_GetPhysicalDeviceFeatures(VkPhysicalDevice physicalDevice,
+                              VkPhysicalDeviceFeatures *pFeatures)
+{
+   vk_common_GetPhysicalDeviceFeatures(physicalDevice, pFeatures);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+nvk_GetPhysicalDeviceFormatProperties(
+   VkPhysicalDevice physicalDevice,
+   VkFormat format,
+   VkFormatProperties *pFormatProperties)
+{
+   vk_common_GetPhysicalDeviceFormatProperties(physicalDevice, format,
+                                               pFormatProperties);
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL
+nvk_GetPhysicalDeviceImageFormatProperties(
+   VkPhysicalDevice physicalDevice,
+   VkFormat format,
+   VkImageType type,
+   VkImageTiling tiling,
+   VkImageUsageFlags usage,
+   VkImageCreateFlags flags,
+   VkImageFormatProperties *pImageFormatProperties)
+{
+   return vk_common_GetPhysicalDeviceImageFormatProperties(
+      physicalDevice, format, type, tiling, usage, flags,
+      pImageFormatProperties);
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL
+nvk_EnumerateDeviceLayerProperties(VkPhysicalDevice physicalDevice,
+                                   uint32_t *pPropertyCount,
+                                   VkLayerProperties *pProperties)
+{
+   return vk_common_EnumerateDeviceLayerProperties(physicalDevice,
+                                                   pPropertyCount,
+                                                   pProperties);
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL
+nvk_EnumerateDeviceExtensionProperties(VkPhysicalDevice physicalDevice,
+                                       const char *pLayerName,
+                                       uint32_t *pPropertyCount,
+                                       VkExtensionProperties *pProperties)
+{
+   return vk_common_EnumerateDeviceExtensionProperties(physicalDevice,
+                                                       pLayerName,
+                                                       pPropertyCount,
+                                                       pProperties);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+nvk_GetPhysicalDeviceSparseImageFormatProperties(
+   VkPhysicalDevice physicalDevice,
+   VkFormat format,
+   VkImageType type,
+   VkSampleCountFlagBits samples,
+   VkImageUsageFlags usage,
+   VkImageTiling tiling,
+   uint32_t *pPropertyCount,
+   VkSparseImageFormatProperties *pProperties)
+{
+   vk_common_GetPhysicalDeviceSparseImageFormatProperties(
+      physicalDevice, format, type, samples, usage, tiling, pPropertyCount,
+      pProperties);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+nvk_GetPhysicalDeviceProperties2(
+   VkPhysicalDevice physicalDevice,
+   VkPhysicalDeviceProperties2 *pProperties)
+{
+   vk_common_GetPhysicalDeviceProperties2(physicalDevice, pProperties);
 }
 
 VKAPI_ATTR void VKAPI_CALL

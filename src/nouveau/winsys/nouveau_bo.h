@@ -12,7 +12,11 @@ using std::atomic_uint_fast32_t;
 #include <stdatomic.h>
 #endif
 
+#ifndef __SWITCH__
 #include <sys/mman.h>
+#else
+#include <util/switch_mman.h>
+#endif
 
 #ifdef __cplusplus
 extern "C" {

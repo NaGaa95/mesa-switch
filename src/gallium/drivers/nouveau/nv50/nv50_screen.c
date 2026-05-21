@@ -21,7 +21,9 @@
  */
 
 #include <errno.h>
+#ifndef __SWITCH__
 #include <xf86drm.h>
+#endif
 #include "drm-uapi/nouveau_drm.h"
 #include "util/format/u_format.h"
 #include "util/format/u_format_s3tc.h"

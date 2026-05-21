@@ -38,6 +38,7 @@
 #include "tgsi/tgsi_parse.h"
 #include "tgsi/tgsi_scan.h"
 #include "util/os_time.h"
+#include "c99_alloca.h"
 #include <inttypes.h>
 #include "util/detect.h"
 

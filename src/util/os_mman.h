@@ -42,6 +42,8 @@
 
 #if DETECT_OS_POSIX
 #  include <sys/mman.h>
+#elif DETECT_OS_SWITCH
+#  include "util/switch_mman.h"
 #else
 #  error Unsupported OS
 #endif

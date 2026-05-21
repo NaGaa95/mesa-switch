@@ -7,12 +7,17 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stddef.h>
+#ifndef __SWITCH__
 #include <sys/mman.h>
 #include <xf86drm.h>
+#else
+#include <util/switch_mman.h>
+#endif
 
 #include "nvidia/classes/cl9097.h"
 #include "nvidia/classes/clc597.h"
 
+#ifndef __SWITCH__
 void
 nouveau_ws_bo_unbind_vma(struct nouveau_ws_device *dev,
                          uint64_t offset, uint64_t range)
@@ -310,3 +315,4 @@ nouveau_ws_bo_dma_buf(struct nouveau_ws_bo *bo, int *fd)
 {
    return drmPrimeHandleToFD(bo->dev->fd, bo->handle, DRM_CLOEXEC | O_RDWR, fd);
 }
+#endif

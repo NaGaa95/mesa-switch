@@ -40,11 +40,13 @@ nouveau_fence_new(struct nouveau_context *nv, struct nouveau_fence **fence)
    if (!*fence)
       return false;
 
+#ifndef __SWITCH__
    int ret = nouveau_bo_new(nv->screen->device, NOUVEAU_BO_GART, 0x1000, 0x1000, NULL, &(*fence)->bo);
    if (ret) {
       FREE(*fence);
       return false;
    }
+#endif
 
    (*fence)->screen = nv->screen;
    (*fence)->context = nv;
@@ -92,7 +94,11 @@ _nouveau_fence_emit(struct nouveau_fence *fence)
 
    fence_list->tail = fence;
 
+#ifdef __SWITCH__
+   fence_list->emit(&fence->context->pipe, &fence->sequence, NULL);
+#else
    fence_list->emit(&fence->context->pipe, &fence->sequence, fence->bo);
+#endif
 
    assert(fence->state == NOUVEAU_FENCE_STATE_EMITTING);
    fence->state = NOUVEAU_FENCE_STATE_EMITTED;
@@ -125,7 +131,9 @@ nouveau_fence_del(struct nouveau_fence *fence)
       nouveau_fence_trigger_work(fence);
    }
 
+#ifndef __SWITCH__
    nouveau_bo_ref(NULL, &fence->bo);
+#endif
    FREE(fence);
 }
 
@@ -256,6 +264,32 @@ _nouveau_fence_wait(struct nouveau_fence *fence, struct util_debug_callback *deb
    if (!nouveau_fence_kick(fence))
       return false;
 
+#ifdef __SWITCH__
+   /* 22.3 pattern: spin-poll the shared screen->fence.map[] via
+    * _nouveau_fence_update(). No per-fence BO needed. */
+   {
+      uint32_t spins = 0;
+      do {
+         if (fence->state == NOUVEAU_FENCE_STATE_SIGNALLED) {
+            if (debug && debug->debug_message)
+               util_debug_message(debug, PERF_INFO,
+                                  "stalled %.3f ms waiting for fence",
+                                  (os_time_get_nano() - start) / 1000000.f);
+            return true;
+         }
+         if (!spins)
+            NOUVEAU_DRV_STAT(screen, any_non_kernel_fence_sync_count, 1);
+         spins++;
+
+         _nouveau_fence_update(screen, false);
+      } while (spins < NOUVEAU_FENCE_MAX_SPINS);
+
+      debug_printf("Wait on fence %u (ack = %u, next = %u) timed out !\n",
+                   fence->sequence,
+                   fence_list->sequence_ack, fence_list->sequence);
+      return false;
+   }
+#else
    if (fence->state < NOUVEAU_FENCE_STATE_SIGNALLED) {
       NOUVEAU_DRV_STAT(screen, any_non_kernel_fence_sync_count, 1);
       int ret = nouveau_bo_wait(fence->bo, NOUVEAU_BO_RDWR, screen->client);
@@ -277,6 +311,7 @@ _nouveau_fence_wait(struct nouveau_fence *fence, struct util_debug_callback *deb
    }
 
    return true;
+#endif
 }
 
 void

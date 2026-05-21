@@ -36,6 +36,7 @@
  */
 
 
+#ifndef __SWITCH__
 
 #include "main/macros.h"
 #include "main/arrayobj.h"
@@ -275,6 +276,7 @@ st_RasterPos(struct gl_context *ctx, const GLfloat v[4])
 
    _mesa_save_and_set_draw_vao(ctx, rs->VAO, VERT_BIT_POS,
                                &old_vao, &old_vp_input_filter);
+
    _mesa_set_varying_vp_inputs(ctx, VERT_BIT_POS &
                                ctx->Array._DrawVAO->_EnabledWithMapMode);
 
@@ -292,3 +294,17 @@ st_RasterPos(struct gl_context *ctx, const GLfloat v[4])
       draw_set_rasterize_stage(draw, st->selection_stage);
    }
 }
+#else /* __SWITCH__ */
+
+#include "main/context.h"
+#include "main/rastpos.h"
+#include "st_cb_rasterpos.h"
+
+void
+st_RasterPos(struct gl_context *ctx, const GLfloat v[4])
+{
+   /* On Switch, just use the simple fixed-function path */
+   _mesa_RasterPos(ctx, v);
+}
+
+#endif /* !__SWITCH__ */

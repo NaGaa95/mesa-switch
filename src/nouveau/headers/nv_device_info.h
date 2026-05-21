@@ -39,6 +39,11 @@ struct nv_device_info {
    uint8_t mp_per_tpc;
    uint8_t max_warps_per_mp;
 
+   /* Keep this as an integer field rather than C bool so Rust bindgen preserves
+    * the shared layout of nv_device_info across C and Rust code.
+    */
+   uint8_t has_transfer_queue;
+
    /** Non-coherent memory map atom size */
    uint16_t nc_atom_size_B;
 

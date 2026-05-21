@@ -92,8 +92,13 @@
 #include <sched.h>
 #endif
 
+#if defined(__SWITCH__)
+#include <switch.h>
+#endif
+
 // prevent inadvert infinite recursion
 #define util_get_cpu_caps() util_get_cpu_caps_DO_NOT_USE()
+
 
 DEBUG_GET_ONCE_BOOL_OPTION(dump_cpu, "GALLIUM_DUMP_CPU", false)
 
@@ -707,6 +712,14 @@ _util_cpu_detect_once(void)
       GetSystemInfo(&system_info);
       available_cpus = MAX2(1, system_info.dwNumberOfProcessors);
    }
+#elif DETECT_OS_SWITCH
+   {
+      u64 core_mask = 0;
+      if (R_SUCCEEDED(svcGetInfo(&core_mask, InfoType_CoreMask, CUR_PROCESS_HANDLE, 0))) {
+         available_cpus = util_bitcount64(core_mask);
+         total_cpus = 4;
+      }
+   }
 #elif DETECT_OS_POSIX
 #  if defined(HAS_SCHED_GETAFFINITY)
    {
@@ -782,6 +795,8 @@ _util_cpu_detect_once(void)
 
    util_cpu_caps.max_cpus = total_cpus;
    util_cpu_caps.num_cpu_mask_bits = align(total_cpus, 32);
+
+   util_cpu_caps.num_cpu_mask_bits = align(util_cpu_caps.nr_cpus, 32);
 
    /* Make the fallback cacheline size nonzero so that it can be
     * safely passed to align().

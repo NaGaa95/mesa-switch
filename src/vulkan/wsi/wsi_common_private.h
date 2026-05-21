@@ -249,6 +249,12 @@ struct wsi_swapchain {
    VkResult (*acquire_next_image)(struct wsi_swapchain *swap_chain,
                                   const VkAcquireNextImageInfoKHR *info,
                                   uint32_t *image_index);
+   VkResult (*signal_acquire_semaphore)(struct wsi_swapchain *swap_chain,
+                                        uint32_t image_index,
+                                        VkSemaphore semaphore);
+   VkResult (*signal_acquire_fence)(struct wsi_swapchain *swap_chain,
+                                    uint32_t image_index,
+                                    VkFence fence);
    VkResult (*queue_present)(struct wsi_swapchain *swap_chain,
                              uint32_t image_index,
                              uint64_t present_id,
@@ -490,6 +496,15 @@ VkResult wsi_headless_init_wsi(struct wsi_device *wsi_device,
 
 void wsi_headless_finish_wsi(struct wsi_device *wsi_device,
                              const VkAllocationCallbacks *alloc);
+
+#ifdef VK_USE_PLATFORM_VI_NN
+VkResult wsi_switch_init_wsi(struct wsi_device *wsi_device,
+                             const VkAllocationCallbacks *alloc,
+                             VkPhysicalDevice physical_device);
+
+void wsi_switch_finish_wsi(struct wsi_device *wsi_device,
+                           const VkAllocationCallbacks *alloc);
+#endif
 
 VK_DEFINE_NONDISP_HANDLE_CASTS(wsi_swapchain, base, VkSwapchainKHR,
                                VK_OBJECT_TYPE_SWAPCHAIN_KHR)

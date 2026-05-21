@@ -1,0 +1,41 @@
+FROM devkitpro/devkita64:latest
+
+# Pre-install all required packages
+RUN apt-get update && \
+    apt-get install -y \
+        python3-pip python3-setuptools python3-wheel \
+        ninja-build pkg-config flex bison curl \
+        libclang-dev clang cmake git \
+        llvm-15-dev libllvmspirvlib-15-dev libclc-15-dev libclang-15-dev \
+    && apt-get clean
+
+# Pre-install all Python packages
+RUN pip3 install --break-system-packages meson mako
+
+# Build and install libdrm_nouveau
+COPY libdrm-nouveau /tmp/libdrm-nouveau
+RUN cd /tmp/libdrm-nouveau && \
+    make clean && make && \
+    cp lib/libdrm_nouveau.a /opt/devkitpro/portlibs/switch/lib/ && \
+    cp include/nouveau.h /opt/devkitpro/portlibs/switch/include/ && \
+    cp include/nv_device_info.h /opt/devkitpro/portlibs/switch/include/ && \
+    mkdir -p /opt/devkitpro/portlibs/switch/lib/pkgconfig && \
+    cp lib/pkgconfig/libdrm_nouveau.pc /opt/devkitpro/portlibs/switch/lib/pkgconfig/ && \
+    rm -rf /tmp/libdrm-nouveau
+
+# Build and install SPIRV-Tools (mesa 25.3 requires >= 2024.1)
+RUN cd /tmp && \
+    git clone --depth 1 --branch vulkan-sdk-1.3.290.0 https://github.com/KhronosGroup/SPIRV-Tools.git && \
+    git clone --depth 1 --branch vulkan-sdk-1.3.290.0 https://github.com/KhronosGroup/SPIRV-Headers.git SPIRV-Tools/external/spirv-headers && \
+    cd SPIRV-Tools && mkdir build && cd build && \
+    cmake .. -DCMAKE_INSTALL_PREFIX=/usr/local -DCMAKE_BUILD_TYPE=Release -DSPIRV_SKIP_TESTS=ON && \
+    make -j$(nproc) && make install && \
+    rm -rf /tmp/SPIRV-Tools
+
+# Install Rust nightly with rust-src for -Zbuild-std and bindgen for NAK
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain nightly && \
+    . $HOME/.cargo/env && \
+    rustup component add rust-src && \
+    cargo install bindgen-cli cbindgen
+
+ENV PATH="/root/.cargo/bin:${PATH}"

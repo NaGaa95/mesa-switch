@@ -74,6 +74,8 @@
 #  include <kernel/OS.h>
 #elif DETECT_OS_WINDOWS
 #  include <windows.h>
+#elif DETECT_OS_SWITCH
+#  include <switch.h>
 #elif DETECT_OS_FUCHSIA
 #include <unistd.h>
 #include <zircon/syscalls.h>
@@ -126,6 +128,8 @@ os_log_message(const char *message)
       fputs(message, fout);
       fflush(fout);
    }
+#elif DETECT_OS_SWITCH
+   svcOutputDebugString(message, __builtin_strlen(message) + 1);
 #endif
 #else /* !DETECT_OS_WINDOWS */
    fflush(stdout);
@@ -140,7 +144,6 @@ os_log_message(const char *message)
 #if DETECT_OS_ANDROID
 #  include <ctype.h>
 #  include "c11/threads.h"
-
 /**
  * Get an option value from android's property system, as a fallback to
  * getenv() (which is generally less useful on android due to processes
@@ -342,6 +345,8 @@ os_get_total_physical_memory(uint64_t *size)
    ret = GlobalMemoryStatusEx(&status);
    *size = status.ullTotalPhys;
    return (ret == true);
+#elif DETECT_OS_SWITCH
+   return R_SUCCEEDED(svcGetInfo(size, InfoType_TotalMemorySize, CUR_PROCESS_HANDLE, 0));
 #elif DETECT_OS_FUCHSIA
    *size = zx_system_get_physmem();
    return true;
@@ -444,6 +449,8 @@ os_get_page_size(uint64_t *size)
    return true;
 #elif DETECT_OS_APPLE
    *size = PAGE_SIZE;
+#elif DETECT_OS_SWITCH
+   *size = 0x1000;
    return true;
 #else
 #error unexpected platform in os_sysinfo.c

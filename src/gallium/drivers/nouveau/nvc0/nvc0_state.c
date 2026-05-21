@@ -771,7 +771,7 @@ nvc0_get_compute_state_info(struct pipe_context *pipe, void *hwcso,
    uint32_t smregs;
 
    // fermi and a handful of tegra devices have less gprs per SM
-   if (obj_class < NVE4_COMPUTE_CLASS || chipset == 0xea || chipset == 0x12b || chipset == 0x13b)
+   if (obj_class < NVE4_COMPUTE_CLASS || chipset == 0xea || chipset == 0x120 || chipset == 0x12b || chipset == 0x13b)
       smregs = 32768;
    else
       smregs = 65536;

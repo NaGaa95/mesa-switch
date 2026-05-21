@@ -127,7 +127,11 @@ _eglPointerIsDereferenceable(void *p)
 {
    uintptr_t addr = (uintptr_t)p;
    uint64_t page_size = 0;
+#if defined(__SWITCH__)
+   page_size = 0x1000;
+#else
    os_get_page_size(&page_size);
+#endif
 #ifdef HAVE_MINCORE
    unsigned char valid = 0;
 

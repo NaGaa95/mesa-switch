@@ -8,5 +8,8 @@ libnouveau_noop_drm_shim = shared_library(
   c_args: [ cc.get_supported_arguments('-Wno-gnu-variable-sized-type-not-at-end') ],
   dependencies: dep_drm_shim,
   gnu_symbol_visibility : 'hidden',
-  install : true,
+)
+dep_drm_shim = declare_dependency(
+  link_with: drm_shim,
+  dependencies: dep_libdrm,
 )

@@ -130,6 +130,7 @@ libvulkan_util = static_library(
   c_args : [c_msvc_compat_args],
   gnu_symbol_visibility : 'hidden',
   build_by_default : false,
+  install : host_machine.system() == 'horizon',
 )
 
 idep_vulkan_util_headers = declare_dependency(

@@ -74,15 +74,16 @@ static const struct {
    _EGLPlatformType platform;
    const char *name;
 } egl_platforms[] = {
-   {_EGL_PLATFORM_X11, "x11"},
-   {_EGL_PLATFORM_XCB, "xcb"},
-   {_EGL_PLATFORM_WAYLAND, "wayland"},
-   {_EGL_PLATFORM_DRM, "drm"},
-   {_EGL_PLATFORM_ANDROID, "android"},
-   {_EGL_PLATFORM_HAIKU, "haiku"},
-   {_EGL_PLATFORM_SURFACELESS, "surfaceless"},
-   {_EGL_PLATFORM_DEVICE, "device"},
-   {_EGL_PLATFORM_WINDOWS, "windows"},
+   { _EGL_PLATFORM_X11, "x11" },
+   { _EGL_PLATFORM_XCB, "xcb" },
+   { _EGL_PLATFORM_WAYLAND, "wayland" },
+   { _EGL_PLATFORM_DRM, "drm" },
+   { _EGL_PLATFORM_ANDROID, "android" },
+   { _EGL_PLATFORM_HAIKU, "haiku" },
+   { _EGL_PLATFORM_SWITCH, "switch" },
+   { _EGL_PLATFORM_SURFACELESS, "surfaceless" },
+   { _EGL_PLATFORM_DEVICE, "device" },
+   { _EGL_PLATFORM_WINDOWS, "windows" },
 };
 
 /**

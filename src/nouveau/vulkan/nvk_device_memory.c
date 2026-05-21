@@ -13,7 +13,11 @@
 #include "util/u_atomic.h"
 
 #include <inttypes.h>
+#ifndef __SWITCH__
 #include <sys/mman.h>
+#else
+#include <util/switch_mman.h>
+#endif
 
 /* Supports opaque fd only */
 const VkExternalMemoryProperties nvk_opaque_fd_mem_props = {
@@ -157,8 +161,22 @@ nvk_AllocateMemory(VkDevice device,
    uint8_t pte_kind = 0, tile_mode = 0;
    if (dedicated_info != NULL) {
       VK_FROM_HANDLE(nvk_image, image, dedicated_info->image);
-      if (image != NULL &&
-          image->vk.tiling == VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT) {
+      const bool dedicated_for_drm_modifier = image != NULL &&
+         image->vk.tiling == VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
+#ifdef __SWITCH__
+      /* On Switch, dedicated optimal tiled images need the backing NvMap to be
+       * created with the same pte_kind/tile_mode that NIL selected for the
+       * image.  This covers WSI scanout and explicit dedicated app image
+       * allocations.
+       */
+      const bool dedicated_for_switch_tiled_image = image != NULL &&
+         image->vk.tiling == VK_IMAGE_TILING_OPTIMAL &&
+         image->plane_count == 1 &&
+         image->planes[0].nil.pte_kind != 0;
+#else
+      const bool dedicated_for_switch_tiled_image = false;
+#endif
+      if (dedicated_for_drm_modifier || dedicated_for_switch_tiled_image) {
          /* This image might be shared with GL so we need to set the BO flags
           * such that GL can bind and use it.
           */

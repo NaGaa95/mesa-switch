@@ -20,7 +20,11 @@
  * OTHER DEALINGS IN THE SOFTWARE.
  */
 
+#ifdef __SWITCH__
+#include "util/switch_mman.h"
+#else
 #include <sys/mman.h>
+#endif
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <fcntl.h>

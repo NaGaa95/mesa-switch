@@ -370,6 +370,7 @@ _libnir = static_library(
   gnu_symbol_visibility : 'hidden',
   dependencies : [idep_compiler, dep_valgrind, idep_mesautil],
   build_by_default : false,
+  install : host_machine.system() == 'horizon',
 )
 
 inc_nir = include_directories('.')

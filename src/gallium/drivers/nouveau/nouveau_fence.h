@@ -13,6 +13,7 @@
 #define NOUVEAU_FENCE_STATE_SIGNALLED 4
 
 struct util_debug_callback;
+struct nouveau_bo;
 
 struct nouveau_fence_work {
    struct list_head list;
@@ -24,7 +25,9 @@ struct nouveau_fence {
    struct nouveau_fence *next;
    struct nouveau_screen *screen;
    struct nouveau_context *context;
+#ifndef __SWITCH__
    struct nouveau_bo *bo;
+#endif
    int state;
    int ref;
    uint32_t sequence;

@@ -22,7 +22,8 @@ _libmesa_util_c11 = static_library(
   include_directories : inc_util_c11,
   c_args : [c_msvc_compat_args],
   gnu_symbol_visibility : 'hidden',
-  build_by_default : false
+  build_by_default : false,
+  install : host_machine.system() == 'horizon',
 )
 
 idep_mesautilc11 = declare_dependency(

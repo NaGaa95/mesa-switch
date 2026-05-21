@@ -57,6 +57,7 @@ libvtn = static_library(
   gnu_symbol_visibility : 'hidden',
   dependencies : [dep_spirv_tools, idep_nir, dep_valgrind],
   build_by_default : false,
+  install : host_machine.system() == 'horizon',
 )
 
 idep_vtn = declare_dependency(

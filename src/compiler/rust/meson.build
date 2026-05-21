@@ -82,6 +82,7 @@ _libcompiler_c = static_library(
   include_directories : [inc_include, inc_util],
   c_args : [no_override_init_args],
   gnu_symbol_visibility : 'hidden',
+  install : host_machine.system() == 'horizon',
 )
 
 _idep_libcompiler_c = declare_dependency(

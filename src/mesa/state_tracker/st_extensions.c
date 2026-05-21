@@ -1053,6 +1053,7 @@ void st_init_extensions(struct pipe_screen *screen,
    EXT_CAP(ARB_draw_instanced,               vs_instanceid);
    EXT_CAP(ARB_fragment_program_shadow,      texture_shadow_map);
    EXT_CAP(ARB_framebuffer_object,           mixed_framebuffer_sizes);
+
    EXT_CAP(ARB_gpu_shader_int64,             int64);
    EXT_CAP(ARB_gl_spirv,                     gl_spirv);
    EXT_CAP(ARB_indirect_parameters,          multi_draw_indirect_params);
@@ -1163,6 +1164,10 @@ void st_init_extensions(struct pipe_screen *screen,
    EXT_CAP(MESA_texture_const_bandwidth,     has_const_bw);
 
 #undef EXT_CAP
+
+   /* MESA_texture_const_bandwidth depends on EXT_memory_object */
+   if (!extensions->EXT_memory_object)
+      extensions->MESA_texture_const_bandwidth = GL_FALSE;
 
    /* MESA_texture_const_bandwidth depends on EXT_memory_object */
    if (!extensions->EXT_memory_object)

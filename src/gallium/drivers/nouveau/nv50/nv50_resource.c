@@ -76,7 +76,8 @@ nv50_memobj_create_from_handle(struct pipe_screen *screen,
 {
    struct nv50_memobj *memobj = CALLOC_STRUCT(nv50_memobj);
 
-   memobj->bo = nouveau_screen_bo_from_handle(screen, handle, &memobj->stride);
+   unsigned dummy_offset;
+   memobj->bo = nouveau_screen_bo_from_handle(screen, handle, &memobj->stride, &dummy_offset);
    if (memobj->bo == NULL) {
       FREE(memobj);
       return NULL;

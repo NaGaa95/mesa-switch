@@ -249,7 +249,7 @@ st_init_draw_functions(struct pipe_screen *screen,
    functions->DrawGalliumMultiMode = st_draw_gallium_multimode;
 }
 
-
+#ifndef __SWITCH__
 void
 st_destroy_draw(struct st_context *st)
 {
@@ -281,6 +281,7 @@ st_get_draw_context(struct st_context *st)
 
    return st->draw;
 }
+#endif
 
 /**
  * Draw a quad with given position, texcoords and color.

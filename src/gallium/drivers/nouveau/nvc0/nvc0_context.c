@@ -28,16 +28,17 @@
 #include "nvc0/nvc0_screen.h"
 #include "nvc0/nvc0_resource.h"
 
-
+#ifndef __SWITCH__
 #include "xf86drm.h"
+#endif
 #include "drm-uapi/nouveau_drm.h"
-
 
 static void
 nvc0_svm_migrate(struct pipe_context *pipe, unsigned num_ptrs,
                  const void* const* ptrs, const size_t *sizes,
                  bool to_device, bool mem_undefined)
 {
+#ifndef __SWITCH__
    struct nvc0_context *nvc0 = nvc0_context(pipe);
    struct nouveau_screen *screen = &nvc0->screen->base;
    int fd = screen->drm->fd;
@@ -72,6 +73,7 @@ nvc0_svm_migrate(struct pipe_context *pipe, unsigned num_ptrs,
       drmCommandWrite(fd, DRM_NOUVEAU_SVM_BIND,
                       &args, sizeof(args));
    }
+#endif
 }
 
 
@@ -572,12 +574,11 @@ void
 nvc0_bufctx_fence(struct nvc0_context *nvc0, struct nouveau_bufctx *bufctx,
                   bool on_flush)
 {
-   struct list_head *list = on_flush ? &bufctx->current : &bufctx->pending;
-   struct list_head *it;
+   NOUVEAU_BUFREF_LIST_TYPE *list = on_flush ? &bufctx->current : &bufctx->pending;
    NOUVEAU_DRV_STAT_IFD(unsigned count = 0);
+   struct nouveau_bufref *ref;
 
-   for (it = list->next; it != list; it = it->next) {
-      struct nouveau_bufref *ref = (struct nouveau_bufref *)it;
+   NOUVEAU_BUFREF_LIST_FOR_EACH(ref, list) {
       struct nv04_resource *res = ref->priv;
       if (res)
          nvc0_resource_validate(nvc0, res, (unsigned)ref->priv_data);

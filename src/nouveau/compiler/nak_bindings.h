@@ -9,7 +9,7 @@
 #include "nouveau_context.h"
 #include "nouveau_device.h"
 
-#include <xf86drm.h>
+// #include <xf86drm.h>
 #include "drm-uapi/nouveau_drm.h"
 
 #define DRM_RS_IOCTL(FOO) \

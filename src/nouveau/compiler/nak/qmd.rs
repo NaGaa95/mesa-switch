@@ -394,7 +394,10 @@ fn gv100_get_hw_smem_sizes(
         &info.__bindgen_anon_1.cs
     };
 
-    let smem_sizes = &dev.sm_smem_sizes_kB[0..dev.sm_smem_size_count.into()];
+    let smem_size_count =
+        usize::from(dev.sm_smem_size_count).min(dev.sm_smem_sizes_kB.len());
+    assert!(smem_size_count > 0, "Device reports no shared memory sizes");
+    let smem_sizes = &dev.sm_smem_sizes_kB[0..smem_size_count];
     let threads =
         cs_info.local_size[0] * cs_info.local_size[1] * cs_info.local_size[2];
     let warps = threads.div_ceil(32);

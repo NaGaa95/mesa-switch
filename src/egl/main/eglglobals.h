@@ -30,6 +30,7 @@
 #ifndef EGLGLOBALS_INCLUDED
 #define EGLGLOBALS_INCLUDED
 
+#include <assert.h>
 #include <stdbool.h>
 #include "util/simple_mtx.h"
 

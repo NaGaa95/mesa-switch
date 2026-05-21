@@ -92,7 +92,11 @@ disk_cache_get_function_identifier(void *ptr, struct mesa_sha1 *ctx)
 #include <stdio.h>
 #include <string.h>
 #include <sys/file.h>
+#ifdef __SWITCH__
+#include "util/switch_mman.h"
+#else
 #include <sys/mman.h>
+#endif
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -238,6 +242,9 @@ choose_lru_file_matching(const char *dir_path,
                                            const struct stat *,
                                            const char *, const size_t))
 {
+#ifdef __SWITCH__
+   return NULL;
+#else
    DIR *dir;
    struct dirent *dir_ent;
 
@@ -282,7 +289,13 @@ choose_lru_file_matching(const char *dir_path,
          break;
 
       struct stat sb;
+#if defined(__SWITCH__)
+      char full_path[1024];
+      snprintf(full_path, sizeof(full_path), "%s/%s", dir_path, dir_ent->d_name);
+      if (stat(full_path, &sb) == 0) {
+#else
       if (fstatat(dir_fd, dir_ent->d_name, &sb, 0) == 0) {
+#endif
          struct lru_file *entry = NULL;
          if (!list_is_empty(lru_file_list))
             entry = list_first_entry(lru_file_list, struct lru_file, node);
@@ -352,6 +365,7 @@ choose_lru_file_matching(const char *dir_path,
    closedir(dir);
 
    return lru_file_list;
+#endif
 }
 
 /* Is entry a regular file, and not having a name with a trailing
@@ -952,6 +966,26 @@ disk_cache_generate_cache_dir(void *mem_ctx, const char *gpu_name,
    }
 
    if (!path) {
+#if defined(__SWITCH__)
+      char *home = getenv("HOME");
+      
+      if (home) {
+         path = concatenate_and_mkdir(mem_ctx, home, ".mesa", mkdir);
+      } else {
+         path = ralloc_strdup(mem_ctx, "sdmc:/.mesa");
+         if (find_or_mkdir_if_needed(path, mkdir) == -1) {
+            path = NULL;
+         }
+      }
+
+      if (!path) {
+         return NULL;
+      }
+
+      path = concatenate_and_mkdir(mem_ctx, path, cache_dir_name, mkdir);
+      if (!path)
+         return NULL;
+#else
       char *buf;
       size_t buf_size;
       struct passwd pwd, *result;
@@ -984,6 +1018,7 @@ disk_cache_generate_cache_dir(void *mem_ctx, const char *gpu_name,
       path = concatenate_and_mkdir(mem_ctx, path, cache_dir_name, mkdir);
       if (!path)
          return NULL;
+#endif
    }
 
    if (cache_type == DISK_CACHE_SINGLE_FILE) {
@@ -1002,9 +1037,11 @@ disk_cache_generate_cache_dir(void *mem_ctx, const char *gpu_name,
 bool
 disk_cache_enabled()
 {
+#ifndef __SWITCH__
    /* If running as a users other than the real user disable cache */
    if (!__normal_user())
       return false;
+#endif
 
    /* At user request, disable shader cache entirely.
     * Disk cache is not enabled by default for android, for most
@@ -1160,8 +1197,15 @@ disk_cache_mmap_cache_index(void *mem_ctx, struct disk_cache *cache)
     * guarantees of the cryptographic hash, a corrupt entry is
     * unlikely to ever match a real cache key).
     */
+#if defined(__SWITCH__)
+   /* The Switch doesn't support file-backed mmaps in newlib, and we don't
+    * need multi-process IPC for a single game anyway. */
+   cache->index_mmap = mmap(NULL, size, PROT_READ | PROT_WRITE,
+                            MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+#else
    cache->index_mmap = mmap(NULL, size, PROT_READ | PROT_WRITE,
                             MAP_SHARED, fd, 0);
+#endif
    if (cache->index_mmap == MAP_FAILED)
       goto path_fail;
    cache->index_mmap_size = size;

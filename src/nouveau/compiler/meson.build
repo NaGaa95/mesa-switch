@@ -63,6 +63,8 @@ _nak_bindings_rs = rust.bindgen(
     '--raw-line', 'use compiler::bindings::*;',
     '--allowlist-type', 'drm.*',
     '--allowlist-type', 'nak_.*',
+    '--allowlist-type', 'nv_device_info',
+    '--allowlist-type', 'nv_device_type',
     '--allowlist-type', 'nouveau_ws_.*',
     '--allowlist-var', 'DRM_.*',
     '--allowlist-var', 'NAK_.*',
@@ -120,6 +122,7 @@ _libnak_rs = static_library(
     _libnak_ir_proc_rs,
     libnak_latencies_rs,
   ],
+  install : host_machine.system() == 'horizon',
 )
 
 # TODO: Linking Rust executables (such as unit tests) doesn't play nicely
@@ -171,6 +174,7 @@ _libnak = static_library(
   link_with : [_libnak_rs],
   c_args : [no_override_init_args],
   gnu_symbol_visibility : 'hidden',
+  install : host_machine.system() == 'horizon',
 )
 
 idep_nak = declare_dependency(

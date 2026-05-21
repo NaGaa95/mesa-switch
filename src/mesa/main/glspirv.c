@@ -237,6 +237,11 @@ _mesa_spirv_to_nir(struct gl_context *ctx,
                    mesa_shader_stage stage,
                    const nir_shader_compiler_options *options)
 {
+#ifdef __SWITCH__
+   /* SPIR-V is not supported on Switch */
+   (void)ctx; (void)prog; (void)stage; (void)options;
+   return NULL;
+#else
    struct gl_linked_shader *linked_shader = prog->_LinkedShaders[stage];
    assert (linked_shader);
 
@@ -338,6 +343,7 @@ _mesa_spirv_to_nir(struct gl_context *ctx,
    NIR_PASS(_, nir, nir_lower_frexp);
 
    return nir;
+#endif
 }
 
 void GLAPIENTRY
@@ -355,7 +361,8 @@ _mesa_SpecializeShaderARB(GLuint shader,
       _mesa_error(ctx, GL_INVALID_OPERATION, "glSpecializeShaderARB");
       return;
    }
-
+  
+#ifndef __SWITCH__
    sh = _mesa_lookup_shader_err(ctx, shader, "glSpecializeShaderARB");
    if (!sh)
       return;
@@ -456,4 +463,5 @@ _mesa_SpecializeShaderARB(GLuint shader,
 
  end:
    free(spec_entries);
+#endif
 }

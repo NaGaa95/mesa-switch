@@ -51,7 +51,15 @@ util_get_current_cpu(void)
 int u_thread_create(thrd_t *thrd, int (*routine)(void *), void *param)
 {
    int ret = thrd_error;
-#if defined(HAVE_PTHREAD) && !DETECT_OS_FUCHIA
+#if defined(HAVE_PTHREAD) && !DETECT_OS_FUCHSIA
+#ifdef __SWITCH__
+   /* Switch requires custom stack size due to deep compiler recursion */
+   pthread_attr_t attr;
+   pthread_attr_init(&attr);
+   pthread_attr_setstacksize(&attr, 8 * 1024 * 1024);
+   ret = pthread_create((pthread_t*)thrd, &attr, (void *(*)(void *))routine, param);
+   pthread_attr_destroy(&attr);
+#else
    sigset_t saved_set, new_set;
 
    sigfillset(&new_set);
@@ -65,11 +73,12 @@ int u_thread_create(thrd_t *thrd, int (*routine)(void *), void *param)
    pthread_sigmask(SIG_BLOCK, &new_set, &saved_set);
    ret = thrd_create(thrd, routine, param);
    pthread_sigmask(SIG_SETMASK, &saved_set, NULL);
+#endif /* __SWITCH__ */
 #else
    ret = thrd_create(thrd, routine, param);
 #endif
 
-   return ret;
+return ret;
 }
 
 void u_thread_setname( const char *name )

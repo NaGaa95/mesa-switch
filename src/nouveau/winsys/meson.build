@@ -22,6 +22,7 @@ libnouveau_ws = static_library(
     idep_nvidia_headers,
   ],
   gnu_symbol_visibility : 'hidden',
+  install : host_machine.system() == 'horizon',
 )
 
 idep_nouveau_ws = declare_dependency(

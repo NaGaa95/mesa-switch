@@ -96,6 +96,12 @@ wsi_device_init(struct wsi_device *wsi,
    WSI_GET_CB(GetPhysicalDeviceQueueFamilyProperties);
 #undef WSI_GET_CB
 
+   if (GetPhysicalDeviceExternalSemaphoreProperties == NULL ||
+       GetPhysicalDeviceProperties2 == NULL ||
+       GetPhysicalDeviceMemoryProperties == NULL ||
+       GetPhysicalDeviceQueueFamilyProperties == NULL)
+      return VK_ERROR_INITIALIZATION_FAILED;
+
    wsi->drm_info.sType =
       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRM_PROPERTIES_EXT;
    wsi->pci_bus_info.sType =
@@ -250,6 +256,12 @@ wsi_device_init(struct wsi_device *wsi,
       goto fail;
 #endif
 
+#ifdef VK_USE_PLATFORM_VI_NN
+   result = wsi_switch_init_wsi(wsi, alloc, pdevice);
+   if (result != VK_SUCCESS)
+      goto fail;
+#endif
+
    present_mode = getenv("MESA_VK_WSI_PRESENT_MODE");
    if (present_mode) {
       if (!strcmp(present_mode, "fifo")) {
@@ -317,6 +329,9 @@ wsi_device_finish(struct wsi_device *wsi,
 {
 #ifndef VK_USE_PLATFORM_WIN32_KHR
    wsi_headless_finish_wsi(wsi, alloc);
+#endif
+#ifdef VK_USE_PLATFORM_VI_NN
+   wsi_switch_finish_wsi(wsi, alloc);
 #endif
 #ifdef VK_USE_PLATFORM_DISPLAY_KHR
    wsi_display_finish_wsi(wsi, alloc);
@@ -1294,17 +1309,33 @@ wsi_common_acquire_next_image2(const struct wsi_device *wsi,
    image->acquired = true;
 
    if (pAcquireInfo->semaphore != VK_NULL_HANDLE) {
-      VkResult signal_result =
-         wsi_signal_semaphore_for_image(device, swapchain, image,
-                                        pAcquireInfo->semaphore);
+      VkResult signal_result = VK_ERROR_FEATURE_NOT_PRESENT;
+      if (swapchain->signal_acquire_semaphore != NULL) {
+         signal_result =
+            swapchain->signal_acquire_semaphore(swapchain, *pImageIndex,
+                                                pAcquireInfo->semaphore);
+      }
+      if (signal_result == VK_ERROR_FEATURE_NOT_PRESENT) {
+         signal_result =
+            wsi_signal_semaphore_for_image(device, swapchain, image,
+                                           pAcquireInfo->semaphore);
+      }
       if (signal_result != VK_SUCCESS)
          return signal_result;
    }
 
    if (pAcquireInfo->fence != VK_NULL_HANDLE) {
-      VkResult signal_result =
-         wsi_signal_fence_for_image(device, swapchain, image,
-                                    pAcquireInfo->fence);
+      VkResult signal_result = VK_ERROR_FEATURE_NOT_PRESENT;
+      if (swapchain->signal_acquire_fence != NULL) {
+         signal_result =
+            swapchain->signal_acquire_fence(swapchain, *pImageIndex,
+                                            pAcquireInfo->fence);
+      }
+      if (signal_result == VK_ERROR_FEATURE_NOT_PRESENT) {
+         signal_result =
+            wsi_signal_fence_for_image(device, swapchain, image,
+                                       pAcquireInfo->fence);
+      }
       if (signal_result != VK_SUCCESS)
          return signal_result;
    }

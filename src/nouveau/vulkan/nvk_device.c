@@ -12,7 +12,12 @@
 #include "nvk_shader.h"
 #include "nvkmd/nvkmd.h"
 
+#ifdef __SWITCH__
+#include "nvkmd/switch/nvkmd_switch.h"
+#else
 #include "vk_drm_syncobj.h"
+#endif
+#include "vk_common_entrypoints.h"
 #include "vk_pipeline_cache.h"
 #include "vulkan/wsi/wsi_common.h"
 
@@ -129,6 +134,48 @@ nvk_device_get_timestamp(struct vk_device *vk_dev, uint64_t *timestamp)
    return VK_SUCCESS;
 }
 
+VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
+nvk_GetDeviceProcAddr(VkDevice device, const char *pName)
+{
+   return vk_common_GetDeviceProcAddr(device, pName);
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL
+nvk_CreateFramebuffer(VkDevice device,
+                      const VkFramebufferCreateInfo *pCreateInfo,
+                      const VkAllocationCallbacks *pAllocator,
+                      VkFramebuffer *pFramebuffer)
+{
+   return vk_common_CreateFramebuffer(device, pCreateInfo,
+                                      pAllocator, pFramebuffer);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+nvk_DestroyFramebuffer(VkDevice device,
+                       VkFramebuffer framebuffer,
+                       const VkAllocationCallbacks *pAllocator)
+{
+   vk_common_DestroyFramebuffer(device, framebuffer, pAllocator);
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL
+nvk_CreatePipelineLayout(VkDevice device,
+                         const VkPipelineLayoutCreateInfo *pCreateInfo,
+                         const VkAllocationCallbacks *pAllocator,
+                         VkPipelineLayout *pPipelineLayout)
+{
+   return vk_common_CreatePipelineLayout(device, pCreateInfo,
+                                         pAllocator, pPipelineLayout);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+nvk_DestroyPipelineLayout(VkDevice device,
+                          VkPipelineLayout pipelineLayout,
+                          const VkAllocationCallbacks *pAllocator)
+{
+   vk_common_DestroyPipelineLayout(device, pipelineLayout, pAllocator);
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL
 nvk_CreateDevice(VkPhysicalDevice physicalDevice,
                  const VkDeviceCreateInfo *pCreateInfo,
@@ -166,11 +213,17 @@ nvk_CreateDevice(VkPhysicalDevice physicalDevice,
       if (result != VK_SUCCESS)
          goto fail_init;
 
+#ifndef __SWITCH__
       vk_device_set_drm_fd(&dev->vk, nvkmd_dev_get_drm_fd(dev->nvkmd));
+#endif
       dev->vk.command_buffer_ops = &nvk_cmd_buffer_ops;
 
       dev->vk.get_timestamp = nvk_device_get_timestamp;
+#ifdef __SWITCH__
+      dev->vk.copy_sync_payloads = nvkmd_switch_sync_copy_payloads;
+#else
       dev->vk.copy_sync_payloads = vk_drm_syncobj_copy_payloads;
+#endif
 
       result = nvk_upload_queue_init(dev, &dev->upload);
       if (result != VK_SUCCESS)
