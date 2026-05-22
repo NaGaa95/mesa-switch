@@ -52,7 +52,7 @@ struct vdrm_device_funcs {
 
 struct vdrm_device {
    const struct vdrm_device_funcs *funcs;
-   
+
    bool supports_cross_device;
    struct vdrm_shmem *shmem;
    uint8_t *rsp_mem;

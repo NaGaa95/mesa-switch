@@ -8,7 +8,7 @@
 
 #include "pipe/p_video_codec.h"
 #include "radeon_vcn_enc.h"
-#include "radeon_video.h"
+#include "si_video.h"
 #include "si_pipe.h"
 #include "util/u_video.h"
 
@@ -16,25 +16,6 @@
 
 #define RENCODE_FW_INTERFACE_MAJOR_VERSION         1
 #define RENCODE_FW_INTERFACE_MINOR_VERSION         20
-
-static void radeon_enc_op_preset(struct radeon_encoder *enc)
-{
-   uint32_t preset_mode;
-
-   if (enc->enc_pic.quality_modes.preset_mode == RENCODE_PRESET_MODE_SPEED &&
-         (!enc->enc_pic.hevc_deblock.disable_sao &&
-         (u_reduce_video_profile(enc->base.profile) == PIPE_VIDEO_FORMAT_HEVC)))
-      preset_mode = RENCODE_IB_OP_SET_BALANCE_ENCODING_MODE;
-   else if (enc->enc_pic.quality_modes.preset_mode == RENCODE_PRESET_MODE_QUALITY)
-      preset_mode = RENCODE_IB_OP_SET_QUALITY_ENCODING_MODE;
-   else if (enc->enc_pic.quality_modes.preset_mode == RENCODE_PRESET_MODE_BALANCE)
-      preset_mode = RENCODE_IB_OP_SET_BALANCE_ENCODING_MODE;
-   else
-      preset_mode = RENCODE_IB_OP_SET_SPEED_ENCODING_MODE;
-
-   RADEON_ENC_BEGIN(preset_mode);
-   RADEON_ENC_END();
-}
 
 static void radeon_enc_quality_params(struct radeon_encoder *enc)
 {
@@ -98,7 +79,7 @@ static void radeon_enc_ctx(struct radeon_encoder *enc)
    enc->enc_pic.ctx_buf.two_pass_search_center_map_offset = 0;
 
    RADEON_ENC_BEGIN(enc->cmd.ctx);
-   RADEON_ENC_READWRITE(enc->dpb->res->buf, enc->dpb->res->domains, 0);
+   RADEON_ENC_READWRITE(enc->dpb->buf, enc->dpb->domains, 0);
    RADEON_ENC_CS(enc->enc_pic.ctx_buf.swizzle_mode);
    RADEON_ENC_CS(enc->enc_pic.ctx_buf.rec_luma_pitch);
    RADEON_ENC_CS(enc->enc_pic.ctx_buf.rec_chroma_pitch);
@@ -141,67 +122,16 @@ static void radeon_enc_spec_misc_hevc(struct radeon_encoder *enc)
    RADEON_ENC_END();
 }
 
-static void encode(struct radeon_encoder *enc)
-{
-   unsigned i;
-
-   enc->before_encode(enc);
-   enc->session_info(enc);
-   enc->total_task_size = 0;
-   enc->task_info(enc, enc->need_feedback);
-
-   if (enc->need_spec_misc)
-      enc->spec_misc(enc);
-
-   if (enc->need_rate_control || enc->need_rc_per_pic) {
-      i = 0;
-      do {
-         enc->enc_pic.layer_sel.temporal_layer_index = i;
-         if (enc->need_rate_control) {
-            enc->layer_select(enc);
-            enc->rc_layer_init(enc);
-         }
-         if (enc->need_rc_per_pic) {
-            enc->layer_select(enc);
-            enc->rc_per_pic(enc);
-         }
-      } while (++i < enc->enc_pic.num_temporal_layers);
-   }
-
-   enc->enc_pic.layer_sel.temporal_layer_index = enc->enc_pic.temporal_id;
-   enc->layer_select(enc);
-
-   enc->encode_headers(enc);
-   enc->ctx(enc);
-   enc->ctx_override(enc);
-   enc->bitstream(enc);
-   enc->feedback(enc);
-   enc->metadata(enc);
-   enc->encode_statistics(enc);
-   enc->intra_refresh(enc);
-   enc->qp_map(enc);
-   enc->input_format(enc);
-   enc->output_format(enc);
-
-   enc->op_preset(enc);
-   enc->op_enc(enc);
-   *enc->p_task_size = (enc->total_task_size);
-}
-
 void radeon_enc_2_0_init(struct radeon_encoder *enc)
 {
    struct si_screen *sscreen = (struct si_screen *)enc->screen;
    uint32_t minor_version;
 
    radeon_enc_1_2_init(enc);
-   enc->encode = encode;
    enc->input_format = radeon_enc_input_format;
    enc->output_format = radeon_enc_output_format;
    enc->ctx = radeon_enc_ctx;
-   enc->op_preset = radeon_enc_op_preset;
    enc->quality_params = radeon_enc_quality_params;
-   enc->ctx_override = radeon_enc_dummy;
-   enc->metadata = radeon_enc_dummy;
 
    if (u_reduce_video_profile(enc->base.profile) == PIPE_VIDEO_FORMAT_HEVC) {
       enc->deblocking_filter = radeon_enc_loop_filter_hevc;

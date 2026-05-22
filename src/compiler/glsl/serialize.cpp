@@ -1332,7 +1332,7 @@ extern "C" void
 serialize_glsl_program(struct blob *blob, struct gl_context *ctx,
                        struct gl_shader_program *prog)
 {
-   blob_write_bytes(blob, prog->data->sha1, sizeof(prog->data->sha1));
+   blob_write_bytes(blob, prog->data->blake3, sizeof(prog->data->blake3));
 
    write_uniforms(blob, prog);
 
@@ -1391,7 +1391,7 @@ deserialize_glsl_program(struct blob_reader *blob, struct gl_context *ctx,
 
    assert(prog->data->UniformStorage == NULL);
 
-   blob_copy_bytes(blob, prog->data->sha1, sizeof(prog->data->sha1));
+   blob_copy_bytes(blob, prog->data->blake3, sizeof(prog->data->blake3));
 
    read_uniforms(blob, prog);
 

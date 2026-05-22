@@ -192,7 +192,6 @@ static bool compare_gpu_textures(struct pipe_context *ctx, struct pipe_resource 
 }
 
 struct si_format_options {
-   bool only_resolve;
    bool allow_float;
    bool allow_unorm16;
    bool allow_srgb;
@@ -274,10 +273,6 @@ static enum pipe_format get_random_format(struct si_screen *sscreen, bool render
             continue;
       }
 
-      if (options->only_resolve &&
-          (desc->colorspace == UTIL_FORMAT_COLORSPACE_ZS || util_format_is_pure_integer(format)))
-         continue;
-
       if (desc->colorspace != UTIL_FORMAT_COLORSPACE_ZS) {
          /* Every integer format should have an equivalent non-integer format, but 128-bit integer
           * formats don't have that if floats are disallowed, which can cause an infinite loop later
@@ -308,18 +303,9 @@ static enum pipe_format get_random_format(struct si_screen *sscreen, bool render
 
 #define MAX_ALLOC_SIZE (64 * 1024 * 1024)
 
-static void set_random_image_attrs(struct pipe_resource *templ, bool allow_msaa,
-                                   bool only_cb_resolve)
+static void set_random_image_attrs(struct pipe_resource *templ, bool allow_msaa)
 {
-   unsigned target_index;
-
-   if (only_cb_resolve) {
-      target_index = 6; /* CB resolving doesn't support array textures. */
-   } else {
-      target_index = rand() % (allow_msaa ? 8 : 6);
-   }
-
-   switch (target_index) {
+   switch (rand() % (allow_msaa ? 8 : 6)) {
    case 0:
       templ->target = PIPE_TEXTURE_1D;
       break;
@@ -505,7 +491,6 @@ void si_test_image_copy_region(struct si_screen *sscreen)
 
       /* generate a random test case */
       struct si_format_options format_options = {
-         .only_resolve = false,
          .allow_float = true,
          .allow_unorm16 = true,
          .allow_x_channels = false, /* cpu_texture doesn't implement X channels */
@@ -518,8 +503,8 @@ void si_test_image_copy_region(struct si_screen *sscreen)
       /* MSAA copy testing not implemented and might be too difficult because of how
        * cpu_texture works.
        */
-      set_random_image_attrs(&tsrc, false, false);
-      set_random_image_attrs(&tdst, false, false);
+      set_random_image_attrs(&tsrc, false);
+      set_random_image_attrs(&tdst, false);
 
       /* Allocate textures (both the GPU and CPU copies).
        * The CPU will emulate what the GPU should be doing.
@@ -642,7 +627,6 @@ void si_test_blit(struct si_screen *sscreen, unsigned test_flags)
    struct si_context *sctx = (struct si_context *)ctx;
    unsigned iterations;
    unsigned num_pass = 0, num_fail = 0;
-   bool only_cb_resolve = test_flags == DBG(TEST_CB_RESOLVE);
 
    bool allow_float = false;
    bool allow_unorm16_dst = false;
@@ -657,15 +641,6 @@ void si_test_blit(struct si_screen *sscreen, unsigned test_flags)
 
    /* The following tests always compare the tested operation with the gfx blit (u_blitter). */
    switch (test_flags) {
-   case DBG(TEST_CB_RESOLVE):
-      /* This is mostly failing because the precision of CB_RESOLVE is very different
-       * from the gfx blit. FP32 and FP16 are the only formats that mostly pass.
-       */
-      allow_float = true;
-      allow_unorm16_dst = true;
-      allow_srgb_dst = true;
-      break;
-
    case DBG(TEST_COMPUTE_BLIT):
       //allow_float = true;      /* precision difference: NaNs not preserved by CB (u_blitter) */
       allow_unorm16_dst = true;
@@ -701,7 +676,6 @@ void si_test_blit(struct si_screen *sscreen, unsigned test_flags)
       /* Generate a random test case. */
       {
          struct si_format_options format_options = {
-            .only_resolve = only_cb_resolve,
             .allow_float = allow_float,
             .allow_unorm16 = true,
             .allow_srgb = true,
@@ -714,8 +688,8 @@ void si_test_blit(struct si_screen *sscreen, unsigned test_flags)
          tdst.format = get_random_format(sscreen, true, tsrc.format, 0, 0, &format_options);
       }
 
-      set_random_image_attrs(&tsrc, true, only_cb_resolve);
-      set_random_image_attrs(&tdst, !only_cb_resolve, false);
+      set_random_image_attrs(&tsrc, true);
+      set_random_image_attrs(&tdst, true);
 
       /* MSAA blits must have matching sample counts. */
       if (tsrc.nr_samples > 1 && tdst.nr_samples > 1)
@@ -753,7 +727,6 @@ void si_test_blit(struct si_screen *sscreen, unsigned test_flags)
 
       {
          struct si_format_options format_options = {
-            .only_resolve = only_cb_resolve,
             .allow_float = allow_float,
             .allow_unorm16 = true,
             .allow_srgb = true,
@@ -945,14 +918,10 @@ void si_test_blit(struct si_screen *sscreen, unsigned test_flags)
       info.src.resource = comp_src;
       info.dst.resource = comp_dst;
 
-      bool success;
-      if (only_cb_resolve)
-         success = si_msaa_resolve_blit_via_CB(ctx, &info, false);
-      else
-         success = si_compute_blit(sctx, &info, NULL, 0, 0, false);
+      bool success = si_compute_blit(sctx, &info, NULL, 0, 0, false);
 
       if (success) {
-         printf(" %-7s", only_cb_resolve ? "resolve" : "comp");
+         printf(" %-7s", "comp");
       } else {
          si_gfx_blit(ctx, &info);
          printf(" %-7s", "gfx");

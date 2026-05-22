@@ -18,15 +18,17 @@
         - src/panfrost/ci/$GPU_VERSION-gles2-extensions.txt
         - src/panfrost/ci/$DRIVER_NAME-skips.txt
         - src/panfrost/ci/$PIGLIT_TRACES_FILE
+        - src/panfrost/clc/*
+        - src/panfrost/compiler/*
         - src/panfrost/genxml/*
-        - src/panfrost/include/*
         - src/panfrost/lib/*
         - src/panfrost/lib/kmod/*
+        - src/panfrost/libpan/*
+        - src/panfrost/model/*
         - src/panfrost/shared/*
-        - src/panfrost/util/*
       when: on_success
     - changes:
-        - src/panfrost/midgard/**/*
+        - src/panfrost/compiler/midgard/**/*
       when: on_success
 
 .panfrost-midgard-manual-rules:
@@ -41,7 +43,7 @@
     - changes: *panfrost_common_file_list
       when: manual
     - changes:
-        - src/panfrost/midgard/**/*
+        - src/panfrost/compiler/midgard/**/*
       when: manual
 
 .panfrost-bifrost-gl-rules:
@@ -57,7 +59,7 @@
         *panfrost_gallium_file_list
       when: on_success
     - changes: &panfrost_bifrost_file_list
-        - src/panfrost/compiler/**/*
+        - src/panfrost/compiler/bifrost/**/*
       when: on_success
 
 .panfrost-bifrost-gl-manual-rules:
@@ -122,7 +124,7 @@
         *panfrost_gallium_file_list
       when: on_success
     - changes: &panfrost_valhall_file_list
-        - src/panfrost/compiler/**/*
+        - src/panfrost/compiler/bifrost/**/*
       when: on_success
 
 .panfrost-valhall-gl-manual-rules:
@@ -167,6 +169,7 @@
 #   FDO_CI_CONCURRENT: ?
     RUNNER_TAG: mesa-ci-x86-64-lava-meson-g12b-a311d-khadas-vim3
     VK_DRIVER: panfrost
+    KERNEL_TAG: "v6.18-pan-mesa-296c"
 
 # Status: https://lava.collabora.dev/scheduler/device_type/mt8183-kukui-jacuzzi-juniper-sku16
 .lava-mt8183-kukui-jacuzzi-juniper-sku16:arm64:
@@ -192,6 +195,7 @@
     KERNEL_IMAGE_TYPE: ""
     RUNNER_TAG: mesa-ci-x86-64-lava-mt8186-corsola-steelix-sku131072
     VK_DRIVER: panfrost
+    KERNEL_TAG: "v6.18-pan-mesa-296c"
 
 # Status: https://lava.collabora.dev/scheduler/device_type/mt8192-asurada-spherion-r0
 .lava-mt8192-asurada-spherion-r0:arm64:
@@ -253,11 +257,28 @@
     FDO_CI_CONCURRENT: 6
     HWCI_KERNEL_MODULES: panthor
     BOOT_METHOD: u-boot
-    KERNEL_IMAGE_NAME: Image
     KERNEL_IMAGE_TYPE: "image"
     RUNNER_TAG: mesa-ci-x86-64-lava-rk3588-rock-5b
     VK_DRIVER: panfrost
-    LAVA_FIRMWARE: arm-lava
+    LAVA_FIRMWARE: arm
+    KERNEL_TAG: "v6.18-pan-mesa-296c"
+
+# Status: https://lava.collabora.dev/scheduler/device_type/mt8196-rauru-navi-sku0
+.lava-mt8196-rauru-navi-sku0:arm64:
+  variables:
+    DEVICE_TYPE: mt8196-rauru-navi-sku0
+    DTB: $DEVICE_TYPE
+    FARM: collabora
+    GPU_VERSION: panfrost-g925
+    FDO_CI_CONCURRENT: 9
+    HWCI_KERNEL_MODULES: panthor
+    BOOT_METHOD: depthcharge
+    KERNEL_IMAGE_TYPE: ""
+    RUNNER_TAG: mesa-ci-x86-64-lava-mt8196-rauru-navi-sku0
+    VK_DRIVER: panfrost
+    LAVA_FIRMWARE: arm
+    # Mainline kernel support for MT8196 is still incomplete
+    KERNEL_TAG: "v6.18-pan-mesa-296c"
 
 # Status: https://lava.collabora.dev/scheduler/device_type/sun50i-h6-pine-h64
 .lava-sun50i-h6-pine-h64:arm64:

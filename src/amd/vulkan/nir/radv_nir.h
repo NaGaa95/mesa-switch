@@ -24,9 +24,10 @@ struct radv_shader_args;
 struct radv_shader_layout;
 struct radv_device;
 struct radv_graphics_state_key;
+struct radv_ps_epilog_key;
+struct radv_debug_nir;
 
-bool radv_nir_apply_pipeline_layout(nir_shader *shader, struct radv_device *device,
-                                    const struct radv_shader_stage *stage);
+bool radv_nir_lower_descriptors(nir_shader *shader, struct radv_device *device, const struct radv_shader_stage *stage);
 
 bool radv_nir_lower_abi(nir_shader *shader, enum amd_gfx_level gfx_level, const struct radv_shader_stage *stage,
                         const struct radv_graphics_state_key *gfx_state, uint32_t address32_hi);
@@ -56,11 +57,7 @@ bool radv_nir_lower_intrinsics_early(nir_shader *nir, bool lower_view_index_to_z
 
 bool radv_nir_lower_view_index(nir_shader *nir);
 
-bool radv_nir_lower_viewport_to_zero(nir_shader *nir);
-
 bool radv_nir_export_multiview(nir_shader *nir);
-
-void radv_nir_lower_io_vars_to_scalar(nir_shader *nir, nir_variable_mode mask);
 
 unsigned radv_map_io_driver_location(unsigned semantic);
 
@@ -78,7 +75,9 @@ bool radv_nir_lower_draw_id_to_zero(nir_shader *shader);
 
 bool radv_nir_remap_color_attachment(nir_shader *shader, const struct radv_graphics_state_key *gfx_state);
 
-bool radv_nir_lower_printf(nir_shader *shader);
+bool radv_nir_trim_fs_color_exports(nir_shader *shader, const struct radv_ps_epilog_key *epilog_key);
+
+bool radv_nir_lower_printf(nir_shader *shader, struct radv_debug_nir *debug_nir);
 
 typedef struct radv_nir_opt_tid_function_options {
    bool use_masked_swizzle_amd : 1;
@@ -100,6 +99,10 @@ bool radv_nir_opt_fs_builtins(nir_shader *shader, const struct radv_graphics_sta
 
 bool radv_nir_lower_immediate_samplers(nir_shader *shader, struct radv_device *device,
                                        const struct radv_shader_stage *stage);
+
+void radv_nir_lower_callee_signature(nir_function *function);
+
+bool radv_nir_lower_call_abi(nir_shader *shader, unsigned wave_size);
 
 #ifdef __cplusplus
 }

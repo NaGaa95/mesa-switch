@@ -183,8 +183,9 @@ radv_get_buffer_memory_requirements(struct radv_device *device, VkDeviceSize siz
    /* Force 32-bit address-space for descriptor buffers usage because they are passed to shaders
     * through 32-bit pointers.
     */
-   if (usage & (VK_BUFFER_USAGE_2_RESOURCE_DESCRIPTOR_BUFFER_BIT_EXT |
-                VK_BUFFER_USAGE_2_SAMPLER_DESCRIPTOR_BUFFER_BIT_EXT | VK_BUFFER_USAGE_2_PREPROCESS_BUFFER_BIT_EXT))
+   if (usage &
+       (VK_BUFFER_USAGE_2_RESOURCE_DESCRIPTOR_BUFFER_BIT_EXT | VK_BUFFER_USAGE_2_SAMPLER_DESCRIPTOR_BUFFER_BIT_EXT |
+        VK_BUFFER_USAGE_2_PREPROCESS_BUFFER_BIT_EXT | VK_BUFFER_USAGE_2_DESCRIPTOR_HEAP_BIT_EXT))
       pMemoryRequirements->memoryRequirements.memoryTypeBits = pdev->memory_types_32bit;
 
    if (flags & VK_BUFFER_CREATE_SPARSE_BINDING_BIT) {
@@ -264,6 +265,12 @@ radv_bo_create(struct radv_device *device, struct vk_object_base *object, uint64
    struct radv_instance *instance = radv_physical_device_instance(pdev);
    struct radeon_winsys *ws = device->ws;
    VkResult result;
+
+   /* Pad the BO with an extra VM page to mitigate OOB access from SMEM instructions.
+    * This doesn't allocate extra memory, just writes an extra page table entry.
+    */
+   if (pdev->cache_key.mitigate_smem_oob && !is_internal)
+      flags |= RADEON_FLAG_VM_PAD_1PAGE;
 
    result = ws->buffer_create(ws, size, alignment, domain, flags, priority, address, out_bo);
    if (result != VK_SUCCESS)

@@ -12,6 +12,7 @@ static const nvk_mme_builder_func mme_builders[NVK_MME_COUNT] = {
    [NVK_MME_SELECT_CB0]                    = nvk_mme_select_cb0,
    [NVK_MME_BIND_CBUF_DESC]                = nvk_mme_bind_cbuf_desc,
    [NVK_MME_CLEAR]                         = nvk_mme_clear,
+   [NVK_MME_UPDATE_WINDOW_CLIP]            = nvk_mme_update_window_clip,
    [NVK_MME_BIND_IB]                       = nvk_mme_bind_ib,
    [NVK_MME_BIND_VB]                       = nvk_mme_bind_vb,
    [NVK_MME_SET_VB_ENABLES]                = nvk_mme_set_vb_enables,
@@ -25,6 +26,7 @@ static const nvk_mme_builder_func mme_builders[NVK_MME_COUNT] = {
    [NVK_MME_DRAW_INDEXED_INDIRECT]         = nvk_mme_draw_indexed_indirect,
    [NVK_MME_DRAW_INDIRECT_COUNT]           = nvk_mme_draw_indirect_count,
    [NVK_MME_DRAW_INDEXED_INDIRECT_COUNT]   = nvk_mme_draw_indexed_indirect_count,
+   [NVK_MME_BEGIN_COND_RENDER]             = nvk_mme_begin_cond_render,
    [NVK_MME_ADD_CS_INVOCATIONS]            = nvk_mme_add_cs_invocations,
    [NVK_MME_DISPATCH_INDIRECT]             = nvk_mme_dispatch_indirect,
    [NVK_MME_WRITE_CS_INVOCATIONS]          = nvk_mme_write_cs_invocations,
@@ -78,9 +80,11 @@ nvk_mme_test_state_state(void *_ts, uint16_t addr)
    /* First, look backwards through the expected data that we've already
     * written.  This ensures that mthd() impacts state().
     */
-   for (int32_t i = ts->ei - 1; i >= 0; i--) {
-      if (ts->test->expected[i].mthd == addr)
-         return ts->test->expected[i].data;
+   if (ts->test->expected != NULL) {
+      for (int32_t i = ts->ei - 1; i >= 0; i--) {
+         if (ts->test->expected[i].mthd == addr)
+            return ts->test->expected[i].data;
+      }
    }
 
    /* Now look at init.  We assume the init data is unique */

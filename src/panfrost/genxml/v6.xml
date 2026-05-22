@@ -1,3 +1,8 @@
+<!--
+  Copyright (C) 2020 Collabora Ltd.
+  SPDX-License-Identifier: MIT
+-->
+
 <panxml arch="6">
   <enum name="Attribute Type">
     <value name="1D" value="1"/>
@@ -990,7 +995,7 @@
     <field name="Block Format" size="2" start="3:4" type="Block Format"/>
     <field name="MSAA" size="2" start="3:6" default="Single" type="MSAA"/>
     <field name="Big Endian" size="1" start="3:8" type="bool"/>
-    <field name="Clean Pixel Write Enable" size="1" start="3:10" type="bool"/>
+    <field name="Clean Tile Write Enable" size="1" start="3:10" type="bool"/>
     <field name="Base" size="64" start="4:0" type="address"/>
     <field name="Row Stride" size="32" start="6:0" type="uint"/>
     <field name="Surface Stride" size="32" start="7:0" type="uint"/>
@@ -1006,14 +1011,14 @@
     <field name="Big Endian" size="1" start="3:8" type="bool"/>
     <!-- Must be set if either one of the effective tile size dimension is
          smaller than the AFBC superblock dimension. -->
-    <field name="Clean Pixel Write Enable" size="1" start="3:10" type="bool"/>
+    <field name="Clean Tile Write Enable" size="1" start="3:10" type="bool"/>
     <field name="Header" size="64" start="4:0" type="address"/>
     <field name="Header Row Stride" size="13" start="6:0" type="uint"/>
     <field name="Body" size="64" start="8:0" type="address"/>
   </struct>
 
   <struct name="S Target" align="64" size="16">
-    <field name="Clean Pixel Write Enable" size="1" start="3:10" type="bool"/>
+    <field name="Clean Tile Write Enable" size="1" start="3:10" type="bool"/>
     <field name="Write Format" size="4" start="3:16" type="S Format"/>
     <field name="Block Format" size="2" start="3:20" type="Block Format"/>
     <field name="MSAA" size="2" start="3:22" default="Single" type="MSAA"/>
@@ -1073,7 +1078,7 @@
     <field name="sRGB" size="1" start="1:14" type="bool"/>
     <field name="Dithering Enable" size="1" start="1:15" type="bool"/>
     <field name="Swizzle" size="12" start="1:16" type="Component Swizzle"/>
-    <field name="Clean Pixel Write Enable" size="1" start="1:31" type="bool"/>
+    <field name="Clean Tile Write Enable" size="1" start="1:31" type="bool"/>
     <field name="Writeback buffer" size="128" start="8:0" type="RT Buffer"/>
     <field name="Clear" size="128" start="12:0" type="RT Clear"/>
   </struct>
@@ -1091,7 +1096,7 @@
     <field name="sRGB" size="1" start="1:14" type="bool"/>
     <field name="Dithering Enable" size="1" start="1:15" type="bool"/>
     <field name="Swizzle" size="12" start="1:16" type="Component Swizzle"/>
-    <field name="Clean Pixel Write Enable" size="1" start="1:31" type="bool"/>
+    <field name="Clean Tile Write Enable" size="1" start="1:31" type="bool"/>
     <field name="YUV Swizzle" size="3" start="2:16" type="YUV Swizzle"/>
     <field name="Full Range" size="1" start="2:20" type="bool"/>
     <field name="Conversion Mode" size="4" start="2:21" type="YUV Conversion Mode"/>
@@ -1120,7 +1125,7 @@
     <field name="Swizzle" size="12" start="1:16" type="Component Swizzle"/>
     <!-- Must be set if either one of the effective tile size dimension is
          smaller than the AFBC superblock dimension. -->
-    <field name="Clean Pixel Write Enable" size="1" start="1:31" type="bool"/>
+    <field name="Clean Tile Write Enable" size="1" start="1:31" type="bool"/>
     <field name="Header" size="64" start="4:0" type="address"/>
     <field name="Row Stride" size="13" start="6:0" type="uint"/>
     <field name="Chunk Size" size="12" start="7:0" type="uint"/>
@@ -1150,7 +1155,7 @@
     <field name="sRGB" size="1" start="1:14" type="bool"/>
     <field name="Dithering Enable" size="1" start="1:15" type="bool"/>
     <field name="Swizzle" size="12" start="1:16" type="Component Swizzle"/>
-    <field name="Clean Pixel Write Enable" size="1" start="1:31" type="bool"/>
+    <field name="Clean Tile Write Enable" size="1" start="1:31" type="bool"/>
     <field name="YUV Swizzle" size="3" start="2:16" type="YUV Swizzle"/>
     <field name="Full Range" size="1" start="2:20" type="bool"/>
     <field name="Conversion Mode" size="4" start="2:21" type="YUV Conversion Mode"/>

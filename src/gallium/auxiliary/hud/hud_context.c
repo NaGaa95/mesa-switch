@@ -527,7 +527,8 @@ hud_draw_results(struct hud_context *hud, struct pipe_resource *tex)
                         CSO_BIT_RASTERIZER |
                         CSO_BIT_VIEWPORT |
                         CSO_BIT_STREAM_OUTPUTS |
-                        CSO_BITS_ALL_SHADERS |
+                        CSO_BIT_MESH_SHADER |
+                        CSO_BITS_VERTEX_PIPE_SHADERS |
                         CSO_BIT_VERTEX_ELEMENTS |
                         CSO_BIT_PAUSE_QUERIES |
                         CSO_BIT_RENDER_CONDITION));
@@ -575,7 +576,6 @@ hud_draw_results(struct hud_context *hud, struct pipe_resource *tex)
    cso_set_tessctrl_shader_handle(cso, NULL);
    cso_set_tesseval_shader_handle(cso, NULL);
    cso_set_geometry_shader_handle(cso, NULL);
-   cso_set_task_shader_handle(cso, NULL);
    cso_set_mesh_shader_handle(cso, NULL);
    cso_set_vertex_shader_handle(cso, hud->vs_color);
    cso_set_vertex_elements(cso, &hud->velems);
@@ -772,6 +772,15 @@ hud_run(struct hud_context *hud, struct cso_context *cso,
     */
    if (hud->record_pipe && (!pipe || pipe == hud->record_pipe))
       hud_stop_queries(hud, hud->record_pipe);
+
+   /* Show info about the record device. */
+   if (hud->record_device_x >= 0 && hud->record_device_y >= 0)
+      hud_draw_string(hud, hud->record_device_x, hud->record_device_y, "Device: %s (%04d:%02x:%02d.%d)",
+               hud->record_pipe->screen->get_name(hud->record_pipe->screen),
+               hud->record_pipe->screen->caps.pci_group,
+               hud->record_pipe->screen->caps.pci_bus,
+               hud->record_pipe->screen->caps.pci_device,
+               hud->record_pipe->screen->caps.pci_function);
 
    if (hud->cso && (!cso || cso == hud->cso))
       hud_draw_results(hud, tex);
@@ -1040,7 +1049,7 @@ hud_graph_destroy(struct hud_graph *graph, struct pipe_context *pipe)
    FREE(graph->vertices);
    if (graph->free_query_data)
       graph->free_query_data(graph->query_data, pipe);
-   if (graph->fd)
+   if (graph->fd && graph->fd != stdout)
       fclose(graph->fd);
    FREE(graph);
 }
@@ -1239,6 +1248,7 @@ hud_parse_env_var(struct hud_context *hud, struct pipe_screen *screen,
    bool sort_items = false;
    bool is_csv = false;
    bool to_stdout = false;
+   bool device = false;
    const char *period_env;
 
    if (strncmp(env, "simple,", 7) == 0) {
@@ -1406,6 +1416,9 @@ hud_parse_env_var(struct hud_context *hud, struct pipe_screen *screen,
          to_stdout = true;
          is_csv = true;
       }
+      else if (strcmp(name, "dev") == 0) {
+         device = true;
+      }
       else {
          bool processed = false;
 
@@ -1508,14 +1521,15 @@ hud_parse_env_var(struct hud_context *hud, struct pipe_screen *screen,
          if (!pane)
             break;
 
-         y += height + hud->font.glyph_height * (pane->num_graphs + 2);
-         y_simple += hud->font.glyph_height * (pane->num_graphs + 1);
-         height = 100;
-
          if (pane && pane->num_graphs) {
+            y += height + hud->font.glyph_height * (pane->num_graphs + 2);
+            y_simple += hud->font.glyph_height * (pane->num_graphs + 1);
             list_addtail(&pane->head, &hud->pane_list);
             pane = NULL;
          }
+
+         height = 100;
+
          break;
 
       case ';':
@@ -1554,6 +1568,12 @@ hud_parse_env_var(struct hud_context *hud, struct pipe_screen *screen,
       else {
          FREE(pane);
       }
+   }
+
+   /* Draw device after below the last graph. */
+   if (device) {
+      hud->record_device_x = x;
+      hud->record_device_y = (pane && pane->num_graphs) ? (pane->y2 + 1.5 * hud->font.glyph_height) : y;
    }
 
    const char *hud_dump_dir = os_get_option("GALLIUM_HUD_DUMP_DIR");
@@ -1634,6 +1654,7 @@ print_help(struct pipe_screen *screen)
    puts("    fps");
    puts("    frametime");
    puts("    cpu");
+   puts("    dev (prints render device info)");
 
    for (i = 0; i < num_cpus; i++)
       printf("    cpu%i\n", i);
@@ -2050,6 +2071,9 @@ hud_create(struct cso_context *cso, struct hud_context *share,
    /* constants */
    hud->constbuf.buffer_size = sizeof(hud->constants);
    hud->constbuf.user_buffer = &hud->constants;
+
+   hud->record_device_x = -1;
+   hud->record_device_y = -1;
 
    list_inithead(&hud->pane_list);
 

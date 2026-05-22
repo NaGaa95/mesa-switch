@@ -215,9 +215,15 @@ i915_gem_mmap_offset(struct iris_bufmgr *bufmgr, struct iris_bo *bo)
       return NULL;
    }
 
+   void *map;
+
    /* And map it */
-   void *map = mmap(0, bo->size, PROT_READ | PROT_WRITE, MAP_SHARED,
-                    iris_bufmgr_get_fd(bufmgr), mmap_arg.offset);
+   if (iris_bufmgr_get_device_info(bufmgr)->is_virtio)
+      map = intel_virtio_bo_mmap(iris_bufmgr_get_fd(bufmgr),
+                                 bo->gem_handle, bo->size, NULL);
+   else
+      map = mmap(0, bo->size, PROT_READ | PROT_WRITE, MAP_SHARED,
+                 iris_bufmgr_get_fd(bufmgr), mmap_arg.offset);
    if (map == MAP_FAILED) {
       DBG("%s:%d: Error mapping buffer %d (%s): %s .\n",
           __FILE__, __LINE__, bo->gem_handle, bo->name, strerror(errno));
@@ -372,7 +378,7 @@ i915_batch_submit(struct iris_batch *batch)
       .buffer_count = validation_count,
       .batch_start_offset = 0,
       /* This must be QWord aligned. */
-      .batch_len = ALIGN(batch->primary_batch_size, 8),
+      .batch_len = align(batch->primary_batch_size, 8),
       .flags = batch->i915.exec_flags |
                I915_EXEC_NO_RELOC |
                I915_EXEC_BATCH_FIRST |

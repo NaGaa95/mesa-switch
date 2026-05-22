@@ -62,7 +62,12 @@ cull_face_triangle(nir_builder *b, nir_def *pos[3][4], const position_w_info *w_
    /* Don't reject NaN and +/-infinity, these are tricky.
     * Just trust fixed-function HW to handle these cases correctly.
     */
-   return nir_iand(b, face_culled, nir_fisfinite(b, det));
+   unsigned old_fp_math_ctrl = b->fp_math_ctrl;
+   b->fp_math_ctrl = nir_fp_preserve_inf | nir_fp_preserve_nan;
+   face_culled = nir_iand(b, face_culled, nir_fisfinite(b, det));
+   b->fp_math_ctrl = old_fp_math_ctrl;
+
+   return face_culled;
 }
 
 static void

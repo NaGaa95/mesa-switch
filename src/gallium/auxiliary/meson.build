@@ -420,7 +420,7 @@ endif
 if with_platform_x11
   files_libgalliumvlwinsys += files('vl/vl_winsys_dri.c')
   links_libgalliumvlwinsys += libloader_x11
-  if with_dri_platform == 'drm'
+  if with_dri_platform == 'drm' or with_dri_platform == 'pseudo-drm'
     vlwinsys_deps += [
       dep_xcb_sync, dep_xcb_present, dep_xshmfence, dep_xcb_xfixes,
       dep_xcb_dri3,
@@ -443,7 +443,7 @@ files_libgallium += custom_target(
   'tr_util.[ch]',
   input: ['../include/pipe/p_defines.h', '../include/pipe/p_video_enums.h', '../../util/blend.h'],
   output: ['tr_util.c', 'tr_util.h'],
-  command: [prog_python, prog_enums2names, '@INPUT@', '-C', '@OUTPUT0@', '-H', '@OUTPUT1@', '-I', 'tr_util.h'],
+  command: [prog_python, prog_enums2names, '@INPUT@', '-C', '@OUTPUT0@', '-H', '@OUTPUT1@'],
   depend_files: prog_enums2names,
 )
 

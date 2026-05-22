@@ -69,7 +69,7 @@ v3d_pipe_flush(struct pipe_context *pctx, struct pipe_fence_handle **fence,
                  */
                 drmSyncobjExportSyncFile(v3d->fd, v3d->out_sync, &fd);
                 if (fd == -1) {
-                        fprintf(stderr, "export failed\n");
+                        mesa_loge("Export failed");
                         *fence = NULL;
                         return;
                 }
@@ -476,7 +476,7 @@ v3d_context_create(struct pipe_screen *pscreen, void *priv, unsigned flags)
         v3d->base.stream_uploader = v3d->uploader;
         v3d->base.const_uploader = v3d->uploader;
         v3d->state_uploader = u_upload_create(&v3d->base,
-                                              4096,
+                                              devinfo->page_size,
                                               PIPE_BIND_CONSTANT_BUFFER,
                                               PIPE_USAGE_STREAM, 0);
 

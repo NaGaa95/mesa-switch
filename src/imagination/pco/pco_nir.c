@@ -53,13 +53,9 @@ static const nir_shader_compiler_options nir_options = {
    .lower_fpow = true,
    .lower_fsqrt = true,
    .lower_ftrunc = true,
+   .lower_iadd_sat = true,
    .lower_ifind_msb = true,
-   .lower_ldexp = true,
    .lower_layer_fs_input_to_sysval = true,
-   .lower_uadd_carry = true,
-   .lower_uadd_sat = true,
-   .lower_usub_borrow = true,
-   .lower_usub_sat = true,
    .lower_mul_2x32_64 = true,
    .compact_arrays = true,
    .scalarize_ddx = true,
@@ -74,6 +70,7 @@ static const nir_shader_compiler_options nir_options = {
    .lower_helper_invocation = true,
 
    .max_unroll_iterations = 16,
+   .max_samples = 4,
 
    .io_options = nir_io_vectorizer_ignores_types,
 };
@@ -144,12 +141,10 @@ static uint8_t vectorize_filter(const nir_instr *instr, UNUSED const void *data)
  * \param[in] data User data.
  * \return True if the instruction was found.
  */
-static bool frag_in_scalar_filter(const nir_instr *instr, const void *data)
+static bool frag_in_scalar_filter(const nir_intrinsic_instr *intr, const void *data)
 {
-   assert(instr->type == nir_instr_type_intrinsic);
    nir_shader *nir = (nir_shader *)data;
 
-   nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
    if (intr->intrinsic != nir_intrinsic_load_input &&
        intr->intrinsic != nir_intrinsic_load_interpolated_input) {
       return false;
@@ -449,7 +444,7 @@ static void pco_nir_opt(pco_ctx *ctx, nir_shader *nir, bool algebraic)
    do {
       progress = false;
 
-      if (count > 1000) {
+      if (count++ > 1000) {
          printf("WARNING! Infinite opt loop!\n");
          break;
       }
@@ -471,7 +466,7 @@ static void pco_nir_opt(pco_ctx *ctx, nir_shader *nir, bool algebraic)
       NIR_PASS(progress, nir, nir_opt_copy_prop_vars);
       NIR_PASS(progress, nir, nir_opt_dead_write_vars);
 
-      NIR_PASS(progress, nir, nir_copy_prop);
+      NIR_PASS(progress, nir, nir_opt_copy_prop);
       NIR_PASS(progress, nir, nir_opt_remove_phis);
       NIR_PASS(progress, nir, nir_opt_dce);
       NIR_PASS(progress, nir, nir_opt_dead_cf);
@@ -541,6 +536,7 @@ void pco_preprocess_nir(pco_ctx *ctx, nir_shader *nir)
       const struct nir_lower_sysvals_to_varyings_options sysvals_to_varyings = {
          .frag_coord = true,
          .point_coord = true,
+         .primitive_id = nir->info.stage == MESA_SHADER_FRAGMENT,
       };
       NIR_PASS(_, nir, nir_lower_sysvals_to_varyings, &sysvals_to_varyings);
       NIR_PASS(_, nir, nir_lower_helper_writes, true);
@@ -567,8 +563,7 @@ void pco_preprocess_nir(pco_ctx *ctx, nir_shader *nir)
             nir,
             nir_lower_io_vars_to_temporaries,
             nir_shader_get_entrypoint(nir),
-            true,
-            true);
+            nir_var_shader_out | nir_var_shader_in);
 
    NIR_PASS(_, nir, nir_lower_global_vars_to_local);
    NIR_PASS(_, nir, nir_split_var_copies);
@@ -587,7 +582,7 @@ void pco_preprocess_nir(pco_ctx *ctx, nir_shader *nir)
 
    NIR_PASS(_,
             nir,
-            nir_lower_indirect_derefs,
+            nir_lower_indirect_derefs_to_if_else_trees,
             nir_var_shader_in | nir_var_shader_out,
             UINT32_MAX);
 
@@ -598,7 +593,6 @@ void pco_preprocess_nir(pco_ctx *ctx, nir_shader *nir)
       NIR_PASS(_,
                nir,
                nir_lower_vars_to_scratch,
-               nir_var_function_temp,
                8,
                glsl_get_natural_size_align_bytes,
                glsl_get_word_size_align_bytes);
@@ -606,7 +600,7 @@ void pco_preprocess_nir(pco_ctx *ctx, nir_shader *nir)
 
    NIR_PASS(_,
             nir,
-            nir_lower_indirect_derefs,
+            nir_lower_indirect_derefs_to_if_else_trees,
             nir_var_function_temp,
             UINT32_MAX);
 
@@ -634,10 +628,10 @@ void pco_preprocess_nir(pco_ctx *ctx, nir_shader *nir)
             nir_var_function_temp | nir_var_shader_temp,
             NULL);
 
+   /* Fold constant offset srcs for IO. */
    NIR_PASS(_,
             nir,
-            nir_io_add_const_offset_to_base,
-            nir_var_shader_in | nir_var_shader_out);
+            nir_opt_constant_folding);
 
    NIR_PASS(_,
             nir,
@@ -704,12 +698,12 @@ void pco_link_nir(pco_ctx *ctx,
 
       NIR_PASS(_,
                producer,
-               nir_lower_indirect_derefs,
+               nir_lower_indirect_derefs_to_if_else_trees,
                nir_var_shader_in | nir_var_shader_out,
                UINT32_MAX);
       NIR_PASS(_,
                consumer,
-               nir_lower_indirect_derefs,
+               nir_lower_indirect_derefs_to_if_else_trees,
                nir_var_shader_in | nir_var_shader_out,
                UINT32_MAX);
 
@@ -830,8 +824,9 @@ void pco_lower_nir(pco_ctx *ctx, nir_shader *nir, pco_data *data)
 
    nir_move_options move_options = nir_move_load_global | nir_move_load_ubo |
                                    nir_move_load_ssbo | nir_move_load_input |
-                                   nir_move_load_frag_coord |
-                                   nir_intrinsic_load_uniform;
+                                   nir_move_load_frag_coord | nir_move_alu |
+                                   nir_move_comparisons | nir_move_copies;
+
    NIR_PASS(_, nir, nir_opt_sink, move_options);
    NIR_PASS(_, nir, nir_opt_move, move_options);
 
@@ -882,17 +877,13 @@ void pco_lower_nir(pco_ctx *ctx, nir_shader *nir, pco_data *data)
                                     ? nir_var_shader_out
                                     : nir_var_shader_in;
    NIR_PASS(_, nir, nir_lower_io_to_scalar, vec_modes, NULL, NULL);
-   NIR_PASS(_, nir, nir_copy_prop);
+   NIR_PASS(_, nir, nir_opt_copy_prop);
    NIR_PASS(_, nir, nir_opt_dce);
    NIR_PASS(_, nir, nir_opt_cse);
    NIR_PASS(_, nir, nir_opt_vectorize_io, vec_modes, false);
 
    NIR_PASS(_, nir, nir_opt_dce);
    NIR_PASS(_, nir, nir_opt_constant_folding);
-   NIR_PASS(_,
-            nir,
-            nir_io_add_const_offset_to_base,
-            nir_var_shader_in | nir_var_shader_out);
 
    /* Internal shaders will be using invalid32 types at this stage. */
    if (!nir->info.internal)
@@ -901,13 +892,14 @@ void pco_lower_nir(pco_ctx *ctx, nir_shader *nir, pco_data *data)
    if (nir->info.stage == MESA_SHADER_VERTEX)
       NIR_PASS(_, nir, pco_nir_lower_clip_cull_vars);
 
-   NIR_PASS(_, nir, pco_nir_lower_images, data);
+   NIR_PASS(_, nir, pco_nir_lower_images, data, ctx);
    NIR_PASS(_, nir, pco_nir_lower_atomics, data);
    NIR_PASS(_,
             nir,
             nir_lower_tex,
             &(nir_lower_tex_options){
                .lower_txd_cube_map = true,
+               .lower_tg4_offsets = true,
             });
    NIR_PASS(_, nir, pco_nir_lower_tex, data, ctx);
 
@@ -1091,7 +1083,7 @@ void pco_postprocess_nir(pco_ctx *ctx, nir_shader *nir, pco_data *data)
       NIR_PASS(_, nir, pco_nir_lower_algebraic_late);
       NIR_PASS(_, nir, nir_opt_constant_folding);
       NIR_PASS(_, nir, nir_lower_load_const_to_scalar);
-      NIR_PASS(_, nir, nir_copy_prop);
+      NIR_PASS(_, nir, nir_opt_copy_prop);
       NIR_PASS(_, nir, nir_opt_dce);
       NIR_PASS(_, nir, nir_opt_cse);
    } while (progress);
@@ -1109,7 +1101,7 @@ void pco_postprocess_nir(pco_ctx *ctx, nir_shader *nir, pco_data *data)
                                  NULL);
 
    NIR_PASS(_, nir, nir_convert_from_ssa, true, false);
-   NIR_PASS(_, nir, nir_copy_prop);
+   NIR_PASS(_, nir, nir_opt_copy_prop);
    NIR_PASS(_, nir, nir_move_vec_src_uses_to_dest, false);
    NIR_PASS(_, nir, nir_opt_dce);
 

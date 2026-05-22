@@ -8,7 +8,7 @@
 #include <optional>
 #include <unordered_map>
 
-#include "drm_fourcc.h"
+#include "drm-uapi/drm_fourcc.h"
 #include "util/log.h"
 
 namespace gfxstream {

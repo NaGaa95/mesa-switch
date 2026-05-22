@@ -81,57 +81,57 @@ enum intel_tess_configs {
    INTEL_TESS_CONFIG_ISOLINES        = BITFIELD_BIT(31)
 };
 
-#define INTEL_MSAA_FLAG_FIRST_VUE_SLOT_OFFSET     (19)
-#define INTEL_MSAA_FLAG_FIRST_VUE_SLOT_SIZE       (6)
-#define INTEL_MSAA_FLAG_PRIMITIVE_ID_INDEX_OFFSET (25)
-#define INTEL_MSAA_FLAG_PRIMITIVE_ID_INDEX_SIZE   (6)
-#define INTEL_MSAA_FLAG_PRIMITIVE_ID_INDEX_MESH   (32)
+#define INTEL_FS_CONFIG_FIRST_VUE_SLOT_OFFSET     (19)
+#define INTEL_FS_CONFIG_FIRST_VUE_SLOT_SIZE       (6)
+#define INTEL_FS_CONFIG_PRIMITIVE_ID_INDEX_OFFSET (25)
+#define INTEL_FS_CONFIG_PRIMITIVE_ID_INDEX_SIZE   (6)
+#define INTEL_FS_CONFIG_PRIMITIVE_ID_INDEX_MESH   (32)
 
-enum intel_msaa_flags {
+enum intel_fs_config {
    /** Must be set whenever any dynamic MSAA is used
     *
     * This flag mostly exists to let us assert that the driver understands
     * dynamic MSAA so we don't run into trouble with drivers that don't.
     */
-   INTEL_MSAA_FLAG_ENABLE_DYNAMIC = (1 << 0),
+   INTEL_FS_CONFIG_ENABLE_DYNAMIC = (1 << 0),
 
    /** True if the framebuffer is multisampled */
-   INTEL_MSAA_FLAG_MULTISAMPLE_FBO = (1 << 1),
+   INTEL_FS_CONFIG_MULTISAMPLE_FBO = (1 << 1),
 
    /** True if this shader has been dispatched per-sample */
-   INTEL_MSAA_FLAG_PERSAMPLE_DISPATCH = (1 << 2),
+   INTEL_FS_CONFIG_PERSAMPLE_DISPATCH = (1 << 2),
 
    /** True if inputs should be interpolated per-sample by default */
-   INTEL_MSAA_FLAG_PERSAMPLE_INTERP = (1 << 3),
+   INTEL_FS_CONFIG_PERSAMPLE_INTERP = (1 << 3),
 
    /** True if this shader has been dispatched with alpha-to-coverage */
-   INTEL_MSAA_FLAG_ALPHA_TO_COVERAGE = (1 << 4),
+   INTEL_FS_CONFIG_ALPHA_TO_COVERAGE = (1 << 4),
 
    /** True if provoking vertex is last */
-   INTEL_MSAA_FLAG_PROVOKING_VERTEX_LAST = (1 << 5),
+   INTEL_FS_CONFIG_PROVOKING_VERTEX_LAST = (1 << 5),
 
    /** True if we need to apply Wa_18019110168 remapping */
-   INTEL_MSAA_FLAG_PER_PRIMITIVE_REMAPPING = (1 << 6),
+   INTEL_FS_CONFIG_PER_PRIMITIVE_REMAPPING = (1 << 6),
 
    /** True if this shader has been dispatched coarse
     *
     * This is intentionally chose to be bit 15 to correspond to the coarse bit
     * in the pixel interpolator messages.
     */
-   INTEL_MSAA_FLAG_COARSE_PI_MSG = (1 << 15),
+   INTEL_FS_CONFIG_COARSE_PI_MSG = (1 << 15),
 
    /** True if this shader has been dispatched coarse
     *
     * This is intentionally chose to be bit 18 to correspond to the coarse bit
     * in the render target messages.
     */
-   INTEL_MSAA_FLAG_COARSE_RT_WRITES = (1 << 18),
+   INTEL_FS_CONFIG_COARSE_RT_WRITES = (1 << 18),
 
    /** First slot read in the VUE
     *
     * This is not a flag but a value that cover 6bits.
     */
-   INTEL_MSAA_FLAG_FIRST_VUE_SLOT = (1 << INTEL_MSAA_FLAG_FIRST_VUE_SLOT_OFFSET),
+   INTEL_FS_CONFIG_FIRST_VUE_SLOT = (1 << INTEL_FS_CONFIG_FIRST_VUE_SLOT_OFFSET),
 
    /** Index of the PrimitiveID attribute relative to the first read
     * attribute.
@@ -140,9 +140,9 @@ enum intel_msaa_flags {
     * PrimitiveID is coming from the PerPrimitive block, written by the Mesh
     * shader.
     */
-   INTEL_MSAA_FLAG_PRIMITIVE_ID_INDEX = (1 << INTEL_MSAA_FLAG_PRIMITIVE_ID_INDEX_OFFSET),
+   INTEL_FS_CONFIG_PRIMITIVE_ID_INDEX = (1 << INTEL_FS_CONFIG_PRIMITIVE_ID_INDEX_OFFSET),
 };
-MESA_DEFINE_CPP_ENUM_BITFIELD_OPERATORS(intel_msaa_flags)
+MESA_DEFINE_CPP_ENUM_BITFIELD_OPERATORS(intel_fs_config)
 
 /**
  * @defgroup Tessellator parameter enumerations.
@@ -312,16 +312,17 @@ struct intel_vue_map {
     * additional processing is applied before storing them in the VUE), the
     * value is -1.
     */
-   signed char varying_to_slot[VARYING_SLOT_TESS_MAX];
+   int8_t varying_to_slot[NUM_TOTAL_VARYING_SLOTS];
 
    /**
     * Map from VUE slot to gl_varying_slot value.  For slots that do not
     * directly correspond to a gl_varying_slot, the value comes from
-    * brw_varying_slot.
+    * elk_varying_slot.
     *
-    * For slots that are not in use, the value is BRW_VARYING_SLOT_PAD.
+    * For slots that are not in use, the value is -1 (brw) or
+    * ELK_VARYING_SLOT_PAD.
     */
-   signed char slot_to_varying[VARYING_SLOT_TESS_MAX];
+   int8_t slot_to_varying[NUM_TOTAL_VARYING_SLOTS];
 
    /**
     * Total number of VUE slots in use
@@ -403,26 +404,26 @@ intel_tess_config(uint32_t input_vertices,
 static inline bool
 intel_fs_is_persample(enum intel_sometimes shader_persample_dispatch,
                       bool shader_per_sample_shading,
-                      enum intel_msaa_flags pushed_msaa_flags)
+                      enum intel_fs_config pushed_fs_config)
 {
    if (shader_persample_dispatch != INTEL_SOMETIMES)
       return shader_persample_dispatch;
 
-   assert(pushed_msaa_flags & INTEL_MSAA_FLAG_ENABLE_DYNAMIC);
+   assert(pushed_fs_config & INTEL_FS_CONFIG_ENABLE_DYNAMIC);
 
-   if (!(pushed_msaa_flags & INTEL_MSAA_FLAG_MULTISAMPLE_FBO))
+   if (!(pushed_fs_config & INTEL_FS_CONFIG_MULTISAMPLE_FBO))
       return false;
 
    if (shader_per_sample_shading)
-      assert(pushed_msaa_flags & INTEL_MSAA_FLAG_PERSAMPLE_DISPATCH);
+      assert(pushed_fs_config & INTEL_FS_CONFIG_PERSAMPLE_DISPATCH);
 
-   return (pushed_msaa_flags & INTEL_MSAA_FLAG_PERSAMPLE_DISPATCH) != 0;
+   return (pushed_fs_config & INTEL_FS_CONFIG_PERSAMPLE_DISPATCH) != 0;
 }
 
 static inline uint32_t
 intel_fs_barycentric_modes(enum intel_sometimes shader_persample_dispatch,
                            uint32_t shader_barycentric_modes,
-                           enum intel_msaa_flags pushed_msaa_flags)
+                           enum intel_fs_config pushed_fs_config)
 {
    /* In the non dynamic case, we can just return the computed shader_barycentric_modes from
     * compilation time.
@@ -432,10 +433,10 @@ intel_fs_barycentric_modes(enum intel_sometimes shader_persample_dispatch,
 
    uint32_t modes = shader_barycentric_modes;
 
-   assert(pushed_msaa_flags & INTEL_MSAA_FLAG_ENABLE_DYNAMIC);
+   assert(pushed_fs_config & INTEL_FS_CONFIG_ENABLE_DYNAMIC);
 
-   if (pushed_msaa_flags & INTEL_MSAA_FLAG_PERSAMPLE_INTERP) {
-      assert(pushed_msaa_flags & INTEL_MSAA_FLAG_PERSAMPLE_DISPATCH);
+   if (pushed_fs_config & INTEL_FS_CONFIG_PERSAMPLE_INTERP) {
+      assert(pushed_fs_config & INTEL_FS_CONFIG_PERSAMPLE_DISPATCH);
 
       /* Making dynamic per-sample interpolation work is a bit tricky.  The
        * hardware will hang if SAMPLE is requested but per-sample dispatch is
@@ -516,18 +517,18 @@ intel_fs_barycentric_modes(enum intel_sometimes shader_persample_dispatch,
 
 static inline bool
 intel_fs_is_coarse(enum intel_sometimes shader_coarse_pixel_dispatch,
-                   enum intel_msaa_flags pushed_msaa_flags)
+                   enum intel_fs_config pushed_fs_config)
 {
    if (shader_coarse_pixel_dispatch != INTEL_SOMETIMES)
       return shader_coarse_pixel_dispatch;
 
-   assert(pushed_msaa_flags & INTEL_MSAA_FLAG_ENABLE_DYNAMIC);
+   assert(pushed_fs_config & INTEL_FS_CONFIG_ENABLE_DYNAMIC);
 
-   assert((pushed_msaa_flags & INTEL_MSAA_FLAG_COARSE_RT_WRITES) ?
+   assert((pushed_fs_config & INTEL_FS_CONFIG_COARSE_RT_WRITES) ?
           shader_coarse_pixel_dispatch != INTEL_NEVER :
           shader_coarse_pixel_dispatch != INTEL_ALWAYS);
 
-   return (pushed_msaa_flags & INTEL_MSAA_FLAG_COARSE_RT_WRITES) != 0;
+   return (pushed_fs_config & INTEL_FS_CONFIG_COARSE_RT_WRITES) != 0;
 }
 
 struct intel_fs_params {
@@ -543,50 +544,50 @@ struct intel_fs_params {
    bool per_primitive_remapping;
 };
 
-static inline enum intel_msaa_flags
-intel_fs_msaa_flags(struct intel_fs_params params)
+static inline enum intel_fs_config
+intel_fs_config(struct intel_fs_params params)
 {
-   enum intel_msaa_flags fs_msaa_flags = INTEL_MSAA_FLAG_ENABLE_DYNAMIC;
+   enum intel_fs_config fs_config = INTEL_FS_CONFIG_ENABLE_DYNAMIC;
 
    if (params.rasterization_samples > 1) {
-      fs_msaa_flags |= INTEL_MSAA_FLAG_MULTISAMPLE_FBO;
+      fs_config |= INTEL_FS_CONFIG_MULTISAMPLE_FBO;
 
       if (params.shader_sample_shading)
-         fs_msaa_flags |= INTEL_MSAA_FLAG_PERSAMPLE_DISPATCH;
+         fs_config |= INTEL_FS_CONFIG_PERSAMPLE_DISPATCH;
 
       if (params.shader_sample_shading ||
           (params.state_sample_shading &&
            (params.shader_min_sample_shading *
             params.rasterization_samples) > 1)) {
-         fs_msaa_flags |= INTEL_MSAA_FLAG_PERSAMPLE_DISPATCH |
-                          INTEL_MSAA_FLAG_PERSAMPLE_INTERP;
+         fs_config |= INTEL_FS_CONFIG_PERSAMPLE_DISPATCH |
+                          INTEL_FS_CONFIG_PERSAMPLE_INTERP;
       }
    }
 
-   if (!(fs_msaa_flags & INTEL_MSAA_FLAG_PERSAMPLE_DISPATCH) &&
+   if (!(fs_config & INTEL_FS_CONFIG_PERSAMPLE_DISPATCH) &&
        params.coarse_pixel) {
-      fs_msaa_flags |= INTEL_MSAA_FLAG_COARSE_PI_MSG |
-                       INTEL_MSAA_FLAG_COARSE_RT_WRITES;
+      fs_config |= INTEL_FS_CONFIG_COARSE_PI_MSG |
+                       INTEL_FS_CONFIG_COARSE_RT_WRITES;
    }
 
    if (params.alpha_to_coverage)
-      fs_msaa_flags |= INTEL_MSAA_FLAG_ALPHA_TO_COVERAGE;
+      fs_config |= INTEL_FS_CONFIG_ALPHA_TO_COVERAGE;
 
-   assert(params.first_vue_slot < (1 << INTEL_MSAA_FLAG_FIRST_VUE_SLOT_SIZE));
-   fs_msaa_flags |= (enum intel_msaa_flags)(
-      params.first_vue_slot << INTEL_MSAA_FLAG_FIRST_VUE_SLOT_OFFSET);
+   assert(params.first_vue_slot < (1 << INTEL_FS_CONFIG_FIRST_VUE_SLOT_SIZE));
+   fs_config |= (enum intel_fs_config)(
+      params.first_vue_slot << INTEL_FS_CONFIG_FIRST_VUE_SLOT_OFFSET);
 
-   assert(params.primitive_id_index < (1u << INTEL_MSAA_FLAG_PRIMITIVE_ID_INDEX_SIZE));
-   fs_msaa_flags |= (enum intel_msaa_flags)(
-      params.primitive_id_index << INTEL_MSAA_FLAG_PRIMITIVE_ID_INDEX_OFFSET);
+   assert(params.primitive_id_index < (1u << INTEL_FS_CONFIG_PRIMITIVE_ID_INDEX_SIZE));
+   fs_config |= (enum intel_fs_config)(
+      params.primitive_id_index << INTEL_FS_CONFIG_PRIMITIVE_ID_INDEX_OFFSET);
 
    if (params.provoking_vertex_last)
-      fs_msaa_flags |= INTEL_MSAA_FLAG_PROVOKING_VERTEX_LAST;
+      fs_config |= INTEL_FS_CONFIG_PROVOKING_VERTEX_LAST;
 
    if (params.per_primitive_remapping)
-      fs_msaa_flags |= INTEL_MSAA_FLAG_PER_PRIMITIVE_REMAPPING;
+      fs_config |= INTEL_FS_CONFIG_PER_PRIMITIVE_REMAPPING;
 
-   return fs_msaa_flags;
+   return fs_config;
 }
 
 #define INTEL_MAX_EMBEDDED_SAMPLERS (4096)
@@ -602,6 +603,8 @@ enum intel_shader_reloc_id {
    BRW_SHADER_RELOC_RESUME_SBT_ADDR_HIGH,
    BRW_SHADER_RELOC_DESCRIPTORS_ADDR_HIGH,
    BRW_SHADER_RELOC_DESCRIPTORS_BUFFER_ADDR_HIGH,
+   BRW_SHADER_RELOC_DESCRIPTORS_VIEW_HANDLE,
+   BRW_SHADER_RELOC_DESCRIPTORS_BUFFERS_VIEW_HANDLE,
    BRW_SHADER_RELOC_INSTRUCTION_BASE_ADDR_HIGH,
    BRW_SHADER_RELOC_PRINTF_BUFFER_ADDR_LOW,
    BRW_SHADER_RELOC_PRINTF_BUFFER_ADDR_HIGH,

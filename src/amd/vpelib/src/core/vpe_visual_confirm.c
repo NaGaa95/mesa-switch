@@ -41,12 +41,19 @@ static bool should_generate_visual_confirm(enum vpe_stream_type stream_type)
     }
 }
 
-static uint16_t get_visual_confirm_segs_count(uint32_t max_seg_width, uint32_t target_rect_width)
+static uint16_t get_visual_confirm_segs_count(
+    uint32_t max_seg_width, uint32_t target_rect_width, uint32_t target_width_alignment)
 {
     // Unlike max_gaps logic in vpe10_calculate_segments, we are pure BG seg, no need to worry
     // stream splitted among one of the segment. so no need to "+1", just round up the calculated
     // number of segments.
-    uint16_t seg_cnt = (uint16_t)(max((target_rect_width + max_seg_width - 1) / max_seg_width, 1));
+
+    uint16_t seg_cnt = (uint16_t)(max(int_divide_with_ceil(target_rect_width, max_seg_width), 1));
+    uint16_t segment_width         = (uint16_t)int_divide_with_ceil(target_rect_width, seg_cnt);
+    uint32_t aligned_segment_width = vpe_align_seg(segment_width, target_width_alignment);
+    if (aligned_segment_width > max_seg_width) {
+        seg_cnt++;
+    }
 
     return seg_cnt;
 }
@@ -58,19 +65,20 @@ static uint16_t vpe_get_visual_confirm_total_seg_count(
     uint16_t             total_visual_confirm_segs = 0;
     uint16_t             stream_idx;
     struct stream_ctx   *stream_ctx;
+    uint32_t             alignment = vpe_get_recout_width_alignment(params);
 
     if (vpe_priv->init.debug.visual_confirm_params.input_format) {
         for (stream_idx = 0; stream_idx < vpe_priv->num_streams; stream_idx++) {
             stream_ctx = &vpe_priv->stream_ctx[stream_idx];
             if (should_generate_visual_confirm(stream_ctx->stream_type))
                 total_visual_confirm_segs += get_visual_confirm_segs_count(
-                    max_seg_width, stream_ctx->stream.scaling_info.dst_rect.width);
+                    max_seg_width, stream_ctx->stream.scaling_info.dst_rect.width, alignment);
         }
     }
 
     if (vpe_priv->init.debug.visual_confirm_params.output_format) {
         total_visual_confirm_segs +=
-            get_visual_confirm_segs_count(max_seg_width, params->target_rect.width);
+            get_visual_confirm_segs_count(max_seg_width, params->target_rect.width, alignment);
     }
 
     return total_visual_confirm_segs;
@@ -187,6 +195,7 @@ enum vpe_status vpe_create_visual_confirm_segs(
     uint16_t total_seg_cnt =
         vpe_get_visual_confirm_total_seg_count(vpe_priv, max_seg_width, params);
     uint16_t seg_cnt = 0;
+    uint32_t recout_alignment = vpe_get_recout_width_alignment(params);
 
     if (!total_seg_cnt)
         return VPE_STATUS_OK;
@@ -197,7 +206,7 @@ enum vpe_status vpe_create_visual_confirm_segs(
 
     current_gap = visual_confirm_gaps;
 
-    // Do visual confirm bg generation for intput format
+    // Do visual confirm bg generation for input format
     if (vpe_priv->init.debug.visual_confirm_params.input_format &&
         params->target_rect.height > 2 * VISUAL_CONFIRM_HEIGHT) {
         for (stream_idx = 0; stream_idx < params->num_streams; stream_idx++) {
@@ -206,8 +215,8 @@ enum vpe_status vpe_create_visual_confirm_segs(
             visual_confirm_rect.y += 0;
             visual_confirm_rect.height = VISUAL_CONFIRM_HEIGHT;
             seg_cnt                    = get_visual_confirm_segs_count(
-                max_seg_width, stream_ctx->stream.scaling_info.dst_rect.width);
-            vpe_full_bg_gaps(current_gap, &visual_confirm_rect, seg_cnt);
+                max_seg_width, stream_ctx->stream.scaling_info.dst_rect.width, recout_alignment);
+            vpe_full_bg_gaps(current_gap, &visual_confirm_rect, recout_alignment, seg_cnt);
             vpe_priv->resource.create_bg_segments(
                 vpe_priv, current_gap, seg_cnt, VPE_CMD_OPS_BG_VSCF_INPUT);
             current_gap += seg_cnt;
@@ -219,8 +228,9 @@ enum vpe_status vpe_create_visual_confirm_segs(
         visual_confirm_rect = params->target_rect;
         visual_confirm_rect.y += VISUAL_CONFIRM_HEIGHT;
         visual_confirm_rect.height = VISUAL_CONFIRM_HEIGHT;
-        seg_cnt = get_visual_confirm_segs_count(max_seg_width, params->target_rect.width);
-        vpe_full_bg_gaps(current_gap, &visual_confirm_rect, seg_cnt);
+        seg_cnt                    = get_visual_confirm_segs_count(
+            max_seg_width, params->target_rect.width, recout_alignment);
+        vpe_full_bg_gaps(current_gap, &visual_confirm_rect, recout_alignment, seg_cnt);
         vpe_priv->resource.create_bg_segments(
             vpe_priv, current_gap, seg_cnt, VPE_CMD_OPS_BG_VSCF_OUTPUT);
         current_gap += seg_cnt;

@@ -1,24 +1,6 @@
 /*
  * Copyright © 2006-2022 Intel Corporation
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
- * IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  */
 
 #include "brw_shader.h"
@@ -100,7 +82,6 @@ brw_tes_thread_payload::brw_tes_thread_payload(const brw_shader &v)
 
 brw_gs_thread_payload::brw_gs_thread_payload(brw_shader &v)
 {
-   struct brw_vue_prog_data *vue_prog_data = brw_vue_prog_data(v.prog_data);
    struct brw_gs_prog_data *gs_prog_data = brw_gs_prog_data(v.prog_data);
    const brw_builder bld = brw_builder(&v);
 
@@ -136,29 +117,12 @@ brw_gs_thread_payload::brw_gs_thread_payload(brw_shader &v)
    r += v.nir->info.gs.vertices_in * reg_unit(v.devinfo);
 
    num_regs = r;
-
-   /* Use a maximum of 24 registers for push-model inputs. */
-   const unsigned max_push_components = 24;
-
-   /* If pushing our inputs would take too many registers, reduce the URB read
-    * length (which is in HWords, or 8 registers), and resort to pulling.
-    *
-    * Note that the GS reads <URB Read Length> HWords for every vertex - so we
-    * have to multiply by VerticesIn to obtain the total storage requirement.
-    */
-   if (8 * vue_prog_data->urb_read_length * v.nir->info.gs.vertices_in >
-       max_push_components) {
-      vue_prog_data->urb_read_length =
-         ROUND_DOWN_TO(max_push_components / v.nir->info.gs.vertices_in, 8) / 8;
-   }
 }
 
 static inline void
-setup_fs_payload_gfx20(brw_fs_thread_payload &payload,
-                       const brw_shader &v,
-                       bool &source_depth_to_render_target)
+setup_fs_payload_gfx20(brw_fs_thread_payload &payload, const brw_shader &v)
 {
-   struct brw_wm_prog_data *prog_data = brw_wm_prog_data(v.prog_data);
+   struct brw_fs_prog_data *prog_data = brw_fs_prog_data(v.prog_data);
    const unsigned payload_width = 16;
    assert(v.dispatch_width % payload_width == 0);
    assert(v.devinfo->ver >= 20);
@@ -236,18 +200,12 @@ setup_fs_payload_gfx20(brw_fs_thread_payload &payload,
       payload.npc_bary_coef_reg = payload.num_regs;
       payload.num_regs += 2 * v.max_polygons;
    }
-
-   if (v.nir->info.outputs_written & BITFIELD64_BIT(FRAG_RESULT_DEPTH)) {
-      source_depth_to_render_target = true;
-   }
 }
 
 static inline void
-setup_fs_payload_gfx9(brw_fs_thread_payload &payload,
-                      const brw_shader &v,
-                      bool &source_depth_to_render_target)
+setup_fs_payload_gfx9(brw_fs_thread_payload &payload, const brw_shader &v)
 {
-   struct brw_wm_prog_data *prog_data = brw_wm_prog_data(v.prog_data);
+   struct brw_fs_prog_data *prog_data = brw_fs_prog_data(v.prog_data);
 
    const unsigned payload_width = MIN2(16, v.dispatch_width);
    assert(v.dispatch_width % payload_width == 0);
@@ -326,14 +284,9 @@ setup_fs_payload_gfx9(brw_fs_thread_payload &payload,
       payload.sample_offsets_reg = payload.num_regs;
       payload.num_regs++;
    }
-
-   if (v.nir->info.outputs_written & BITFIELD64_BIT(FRAG_RESULT_DEPTH)) {
-      source_depth_to_render_target = true;
-   }
 }
 
-brw_fs_thread_payload::brw_fs_thread_payload(const brw_shader &v,
-                                     bool &source_depth_to_render_target)
+brw_fs_thread_payload::brw_fs_thread_payload(const brw_shader &v)
   : subspan_coord_reg(),
     source_depth_reg(),
     source_w_reg(),
@@ -347,9 +300,9 @@ brw_fs_thread_payload::brw_fs_thread_payload(const brw_shader &v,
     sample_offsets_reg()
 {
    if (v.devinfo->ver >= 20)
-      setup_fs_payload_gfx20(*this, v, source_depth_to_render_target);
+      setup_fs_payload_gfx20(*this, v);
    else
-      setup_fs_payload_gfx9(*this, v, source_depth_to_render_target);
+      setup_fs_payload_gfx9(*this, v);
 }
 
 brw_cs_thread_payload::brw_cs_thread_payload(const brw_shader &v)
@@ -396,19 +349,9 @@ void
 brw_cs_thread_payload::load_subgroup_id(const brw_builder &bld,
                                     brw_reg &dest) const
 {
-   auto devinfo = bld.shader->devinfo;
+   assert(bld.shader->devinfo->verx10 >= 125);
    dest = retype(dest, BRW_TYPE_UD);
-
-   if (subgroup_id_.file != BAD_FILE) {
-      assert(devinfo->verx10 >= 125);
-      bld.AND(dest, subgroup_id_, brw_imm_ud(INTEL_MASK(7, 0)));
-   } else {
-      assert(devinfo->verx10 < 125);
-      assert(mesa_shader_stage_is_compute(bld.shader->stage));
-      int index = brw_get_subgroup_id_param_index(devinfo,
-                                                  bld.shader->prog_data);
-      bld.MOV(dest, brw_uniform_reg(index, BRW_TYPE_UD));
-   }
+   bld.AND(dest, subgroup_id_, brw_imm_ud(INTEL_MASK(7, 0)));
 }
 
 brw_task_mesh_thread_payload::brw_task_mesh_thread_payload(brw_shader &v)

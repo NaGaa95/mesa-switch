@@ -67,6 +67,12 @@ impl fmt::Display for SSAValue {
     }
 }
 
+impl fmt::Debug for SSAValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, f)
+    }
+}
+
 #[derive(Clone, Eq, Hash, PartialEq)]
 struct SSAValueArray<const SIZE: usize> {
     v: [SSAValue; SIZE],
@@ -308,7 +314,7 @@ fn test_ssa_ref_round_trip() {
             .collect();
 
         let ssa_ref = SSARef::new(&vec);
-        assert!(&ssa_ref[..] == &vec[..]);
+        assert_eq!(ssa_ref[..], vec[..]);
     }
 }
 
@@ -341,5 +347,17 @@ impl SSAValueAllocator {
     /// Allocates multiple SSA values and returns them as an SSA reference.
     pub fn alloc_vec(&mut self, file: RegFile, comps: u8) -> SSARef {
         SSARef::from_iter((0..comps).map(|_| self.alloc(file)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ssa_value_print() {
+        let ssa = SSAValue::new(RegFile::UPred, 42);
+        assert_eq!(format!("{}", ssa), "%up42");
+        assert_eq!(format!("{:?}", ssa), "%up42");
     }
 }

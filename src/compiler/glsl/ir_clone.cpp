@@ -140,6 +140,9 @@ ir_loop::clone(linear_ctx *linalloc, struct hash_table *ht) const
    ir_foreach_in_list(ir_instruction, ir, &this->body_instructions) {
       new_loop->body_instructions.push_tail(ir->clone(linalloc, ht));
    }
+   ir_foreach_in_list(ir_instruction, ir, &this->continue_instructions) {
+      new_loop->continue_instructions.push_tail(ir->clone(linalloc, ht));
+   }
 
    return new_loop;
 }

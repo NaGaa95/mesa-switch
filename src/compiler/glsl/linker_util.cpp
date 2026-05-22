@@ -29,6 +29,7 @@
 #include "util/set.h"
 #include "util/u_range_remap.h"
 #include "main/consts_exts.h"
+#include "main/context.h"
 
 void
 linker_error(gl_shader_program *prog, const char *fmt, ...)
@@ -75,7 +76,7 @@ link_shaders_init(struct gl_context *ctx, struct gl_shader_program *prog)
     * missing.
     */
    if (prog->NumShaders == 0) {
-      if (ctx->API != API_OPENGL_COMPAT)
+      if (!_mesa_is_desktop_gl_compat(ctx))
          linker_error(prog, "no shaders attached to the program\n");
       return;
    }

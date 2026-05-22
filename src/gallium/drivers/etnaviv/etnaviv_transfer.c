@@ -225,8 +225,10 @@ etna_texture_unmap(struct pipe_context *pctx, struct pipe_transfer *ptrans)
          /* We have a temporary resource due to either tile status or
           * tiling format. Write back the updated buffer contents.
           */
+         ctx->in_transfer_blit = true;
          etna_copy_resource_box(pctx, ptrans->resource, trans->rsc,
                                 ptrans->level, 0, &ptrans->box);
+         ctx->in_transfer_blit = false;
       } else if (trans->staging) {
          /* map buffer object */
          if (rsc->layout == ETNA_LAYOUT_TILED) {
@@ -344,7 +346,8 @@ etna_texture_map(struct pipe_context *pctx, struct pipe_resource *prsc,
       rsc = etna_resource(rsc->render);
    }
 
-   if (rsc->texture && !etna_resource_newer(rsc, etna_resource(rsc->texture))) {
+   if (rsc->texture && !etna_resource_newer(rsc, etna_resource(rsc->texture)) &&
+       !translate_pe_format_rb_swap(prsc->format)) {
       /* We have a texture resource which is the same age or newer than the
        * render resource. Use the texture resource, which avoids bouncing
        * pixels between the two resources, and we can de-tile it in s/w. */
@@ -388,8 +391,11 @@ etna_texture_map(struct pipe_context *pctx, struct pipe_resource *prsc,
          etna_align_box_for_rs(ctx->screen, rsc, &ptrans->box);
       }
 
-      if ((usage & PIPE_MAP_READ) || !(usage & ETNA_PIPE_MAP_DISCARD_LEVEL))
+      if ((usage & PIPE_MAP_READ) || !(usage & ETNA_PIPE_MAP_DISCARD_LEVEL)) {
+         ctx->in_transfer_blit = true;
          etna_copy_resource_box(pctx, trans->rsc, &rsc->base, 0, level, &ptrans->box);
+         ctx->in_transfer_blit = false;
+      }
 
       /* Switch to using the temporary resource instead */
       rsc = etna_resource(trans->rsc);

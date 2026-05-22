@@ -57,6 +57,8 @@ enum pco_debug {
    PCO_DEBUG_VAL_SKIP = BITFIELD64_BIT(0),
    PCO_DEBUG_REINDEX = BITFIELD64_BIT(1),
    PCO_DEBUG_NO_PRED_CF = BITFIELD64_BIT(2),
+   PCO_DEBUG_ALLOC_EXTRA_VTXINS = BITFIELD64_BIT(3),
+   PCO_DEBUG_INT_SMP = BITFIELD64_BIT(4),
 };
 
 extern uint64_t pco_debug;
@@ -75,6 +77,7 @@ enum pco_debug_print {
    PCO_DEBUG_PRINT_BINARY = BITFIELD64_BIT(6),
    PCO_DEBUG_PRINT_VERBOSE = BITFIELD64_BIT(7),
    PCO_DEBUG_PRINT_RA = BITFIELD64_BIT(8),
+   PCO_DEBUG_PRINT_STATS = BITFIELD64_BIT(9),
 };
 
 extern uint64_t pco_debug_print;
@@ -352,6 +355,7 @@ typedef struct _pco_func {
    unsigned next_loop; /** Next loop index. */
 
    unsigned temps; /** Number of temps allocated. */
+   unsigned vtxins; /** Number of vertex input registers used. */
 
    pco_ref emc; /** Execution mask counter register. */
 
@@ -729,6 +733,10 @@ PCO_DEFINE_CAST(pco_cf_node_as_func,
 #define pco_foreach_instr_src_hwreg(psrc, instr) \
    pco_foreach_instr_src (psrc, instr)           \
       if (pco_ref_is_hwreg(*psrc))
+
+#define pco_foreach_instr_src_vtxin_reg(psrc, instr) \
+   pco_foreach_instr_src (psrc, instr)               \
+      if (pco_ref_is_vtxin(*psrc))
 
 #define pco_cf_node_head(list) list_first_entry(list, pco_cf_node, link)
 #define pco_cf_node_tail(list) list_last_entry(list, pco_cf_node, link)
@@ -1534,6 +1542,9 @@ static inline pco_instr *pco_prev_instr(pco_instr *instr)
  */
 static inline pco_igrp *pco_first_igrp(pco_block *block)
 {
+   if (list_is_empty(&block->instrs))
+      return NULL;
+
    return list_first_entry(&block->instrs, pco_igrp, link);
 }
 
@@ -1545,7 +1556,10 @@ static inline pco_igrp *pco_first_igrp(pco_block *block)
  */
 static inline pco_igrp *pco_last_igrp(pco_block *block)
 {
-   return list_first_entry(&block->instrs, pco_igrp, link);
+   if (list_is_empty(&block->instrs))
+      return NULL;
+
+   return list_last_entry(&block->instrs, pco_igrp, link);
 }
 
 /**
@@ -1721,6 +1735,24 @@ static inline bool pco_should_print_binary(pco_shader *shader)
    return true;
 }
 
+static inline bool pco_should_print_stats(pco_shader *shader)
+{
+   if (!PCO_DEBUG_PRINT(STATS))
+      return false;
+
+   if (shader->is_internal && !PCO_DEBUG_PRINT(INTERNAL))
+      return false;
+
+   if (shader->stage == MESA_SHADER_VERTEX && !PCO_DEBUG_PRINT(VS))
+      return false;
+   else if (shader->stage == MESA_SHADER_FRAGMENT && !PCO_DEBUG_PRINT(FS))
+      return false;
+   else if (shader->stage == MESA_SHADER_COMPUTE && !PCO_DEBUG_PRINT(CS))
+      return false;
+
+   return true;
+}
+
 /* Interface with NIR. */
 typedef union PACKED _pco_smp_flags {
    struct PACKED {
@@ -1749,10 +1781,11 @@ bool pco_const_imms(pco_shader *shader);
 bool pco_bool(pco_shader *shader);
 bool pco_cf(pco_shader *shader);
 bool pco_dce(pco_shader *shader);
+bool pco_post_ra_legalize(pco_shader *shader);
+bool pco_pre_ra_legalize(pco_shader *shader);
 bool pco_end(pco_shader *shader);
 bool pco_group_instrs(pco_shader *shader);
 bool pco_index(pco_shader *shader, bool skip_ssa);
-bool pco_legalize(pco_shader *shader);
 bool pco_opt_comp_only_vecs(pco_shader *shader);
 bool pco_nir_compute_instance_check(nir_shader *shader);
 bool pco_nir_link_clip_cull_vars(nir_shader *producer, nir_shader *consumer);
@@ -1767,7 +1800,7 @@ bool pco_nir_lower_barriers(nir_shader *shader, pco_data *data);
 bool pco_nir_lower_clip_cull_vars(nir_shader *shader);
 bool pco_nir_lower_fs_intrinsics(nir_shader *shader);
 bool pco_nir_lower_vs_intrinsics(nir_shader *shader);
-bool pco_nir_lower_images(nir_shader *shader, pco_data *data);
+bool pco_nir_lower_images(nir_shader *shader, pco_data *data, pco_ctx *ctx);
 bool pco_nir_lower_interpolation(nir_shader *shader, pco_fs_data *fs);
 bool pco_nir_lower_io(nir_shader *shader);
 bool pco_nir_lower_subgroups(nir_shader *shader);
@@ -1958,6 +1991,17 @@ static inline bool pco_ref_is_drc(pco_ref ref)
 static inline bool pco_ref_is_scalar(pco_ref ref)
 {
    return !ref.chans;
+}
+
+/**
+ * \brief Return whether a reference is a vertex input register.
+ *
+ * \param[in] ref PCO reference.
+ * \return True if the reference is a vertex input register.
+ */
+static inline bool pco_ref_is_vtxin(pco_ref ref)
+{
+   return ref.type == PCO_REF_TYPE_REG && ref.reg_class == PCO_REG_CLASS_VTXIN;
 }
 
 /* PCO ref getters. */
@@ -3120,8 +3164,9 @@ static inline bool pco_should_skip_pass(const char *pass)
 /** Integer 31. */
 #define pco_31 pco_ref_hwreg(31, PCO_REG_CLASS_CONST)
 
-/** Integer -1/true/0xffffffff. */
+/** Integer -1/true/0xffffffff/u32max. */
 #define pco_true pco_ref_hwreg(143, PCO_REG_CLASS_CONST)
+#define pco_u32max pco_true
 
 /** Float 1. */
 #define pco_fone pco_ref_hwreg(64, PCO_REG_CLASS_CONST)

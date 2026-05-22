@@ -418,18 +418,16 @@ v3d_vertex_state_create(struct pipe_context *pctx, unsigned num_elements,
                                         attr.type = ATTRIBUTE_BYTE;
                                         break;
                                 default:
-                                        fprintf(stderr,
-                                                "format %s unsupported\n",
-                                                desc->name);
+                                        mesa_loge("format %s unsupported",
+                                                  desc->name);
                                         attr.type = ATTRIBUTE_BYTE;
                                         abort();
                                 }
                                 break;
 
                         default:
-                                fprintf(stderr,
-                                        "format %s unsupported\n",
-                                        desc->name);
+                                mesa_loge("format %s unsupported",
+                                          desc->name);
                                 abort();
                         }
                 }
@@ -971,11 +969,11 @@ v3d_setup_texture_shader_state(const struct v3d_device_info *devinfo,
                  rsc->slices[0].tiling == V3D_TILING_UIF_NO_XOR);
         tex->level_0_xor_enable = (rsc->slices[0].tiling == V3D_TILING_UIF_XOR);
 
-        if (tex->level_0_is_strictly_uif)
+        /* If we ever set tex.uif_xor_disable we also need to flag
+         * tex.extended here.
+         */
+        if (tex->level_0_is_strictly_uif) {
                 tex->level_0_ub_pad = rsc->slices[0].ub_pad;
-
-        if (tex->uif_xor_disable ||
-            tex->level_0_is_strictly_uif) {
                 tex->extended = true;
         }
 }
@@ -993,10 +991,9 @@ v3dX(create_texture_shader_state_bo)(struct v3d_context *v3d,
 
         assert(so->serial_id != rsc->serial_id);
 
-        v3d_bo_unreference(&so->bo);
-        so->bo = v3d_bo_alloc(v3d->screen,
-                              cl_packet_length(TEXTURE_SHADER_STATE), "sampler");
-        map = v3d_bo_map(so->bo);
+        u_upload_alloc_ref(v3d->state_uploader, 0,
+                           cl_packet_length(TEXTURE_SHADER_STATE), 32,
+                           &so->tex_state_offset, &so->tex_state, &map);
 
         v3dx_pack(map, TEXTURE_SHADER_STATE, tex) {
                 if (prsc->target != PIPE_BUFFER) {
@@ -1194,7 +1191,7 @@ v3d_sampler_view_destroy(struct pipe_context *pctx,
 {
         struct v3d_sampler_view *sview = v3d_sampler_view(psview);
 
-        v3d_bo_unreference(&sview->bo);
+        pipe_resource_reference(&sview->tex_state, NULL);
         pipe_resource_reference(&psview->texture, NULL);
         pipe_resource_reference(&sview->texture, NULL);
         free(psview);
@@ -1365,11 +1362,9 @@ v3d_create_image_view_texture_shader_state(struct v3d_context *v3d,
         struct v3d_image_view *iview = &so->si[img];
 
         void *map;
-        u_upload_alloc_ref(v3d->uploader, 0, cl_packet_length(TEXTURE_SHADER_STATE),
-                       32,
-                       &iview->tex_state_offset,
-                       &iview->tex_state,
-                       &map);
+        u_upload_alloc_ref(v3d->state_uploader, 0,
+                           cl_packet_length(TEXTURE_SHADER_STATE), 32,
+                           &iview->tex_state_offset, &iview->tex_state, &map);
 
         struct pipe_resource *prsc = iview->base.resource;
 

@@ -30,8 +30,9 @@
 
 #include "pipe/p_screen.h"
 #include "pipe/p_video_codec.h"
+#include "vl/vl_video_buffer.h"
 #include "vpelib/inc/vpelib.h"
-#include "radeon_video.h"
+#include "si_video.h"
 
 /* The buffer size of cmd_buf and emb_buf in bytes
  *
@@ -63,7 +64,7 @@ struct vpe_video_processor {
 
     uint8_t bufs_num;
     uint8_t cur_buf;
-    struct rvid_buffer *emb_buffers;
+    struct si_resource **emb_buffers;
 
     /* VPE HW version */
     uint8_t ver_major;

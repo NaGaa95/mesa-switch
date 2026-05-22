@@ -27,7 +27,7 @@ void *si_create_shader_state(struct si_context *sctx, nir_shader *nir)
       blob_finish(&blob);
    }
 
-   sctx->b.screen->finalize_nir(sctx->b.screen, nir);
+   sctx->b.screen->finalize_nir(sctx->b.screen, nir, true);
    return pipe_shader_from_nir(&sctx->b, nir);
 }
 
@@ -38,7 +38,7 @@ static void unpack_2x16(nir_builder *b, nir_def *src, nir_def **x, nir_def **y)
    *y = nir_ushr_imm(b, src, 16);
 }
 
-void *si_create_dcc_retile_cs(struct si_context *sctx, struct radeon_surf *surf)
+void *si_create_dcc_retile_cs(struct si_context *sctx, const struct radeon_surf *surf)
 {
    nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_COMPUTE, sctx->screen->nir_options,
                                                   "dcc_retile");
@@ -67,7 +67,8 @@ void *si_create_dcc_retile_cs(struct si_context *sctx, struct radeon_surf *surf)
                                              surf->u.gfx9.color.dcc_block_height));
 
    nir_def *src_offset =
-      ac_nir_dcc_addr_from_coord(&b, &sctx->screen->info, surf->bpe, &surf->u.gfx9.color.dcc_equation,
+      ac_nir_dcc_addr_from_coord(&b, sctx->screen->info.gfx_level, sctx->screen->info.gb_addr_config,
+                                 surf->bpe, &surf->u.gfx9.color.dcc_equation,
                                  src_dcc_pitch, src_dcc_height, zero, /* DCC slice size */
                                  nir_channel(&b, coord, 0), nir_channel(&b, coord, 1), /* x, y */
                                  zero, zero, zero); /* z, sample, pipe_xor */
@@ -75,7 +76,8 @@ void *si_create_dcc_retile_cs(struct si_context *sctx, struct radeon_surf *surf)
    nir_def *value = nir_load_ssbo(&b, 1, 8, zero, src_offset, .align_mul=1);
 
    nir_def *dst_offset =
-      ac_nir_dcc_addr_from_coord(&b, &sctx->screen->info, surf->bpe, &surf->u.gfx9.color.display_dcc_equation,
+      ac_nir_dcc_addr_from_coord(&b, sctx->screen->info.gfx_level, sctx->screen->info.gb_addr_config,
+                                 surf->bpe, &surf->u.gfx9.color.display_dcc_equation,
                                  dst_dcc_pitch, dst_dcc_height, zero, /* DCC slice size */
                                  nir_channel(&b, coord, 0), nir_channel(&b, coord, 1), /* x, y */
                                  zero, zero, zero); /* z, sample, pipe_xor */
@@ -112,7 +114,8 @@ void *gfx9_create_clear_dcc_msaa_cs(struct si_context *sctx, struct si_texture *
                                       tex->surface.u.gfx9.color.dcc_block_depth));
 
    nir_def *offset =
-      ac_nir_dcc_addr_from_coord(&b, &sctx->screen->info, tex->surface.bpe,
+      ac_nir_dcc_addr_from_coord(&b, sctx->screen->info.gfx_level,
+                                 sctx->screen->info.gb_addr_config, tex->surface.bpe,
                                  &tex->surface.u.gfx9.color.dcc_equation,
                                  dcc_pitch, dcc_height, zero, /* DCC slice size */
                                  nir_channel(&b, coord, 0), nir_channel(&b, coord, 1), /* x, y */
@@ -176,6 +179,7 @@ void *si_create_passthrough_tcs(struct si_context *sctx)
 
    nir_shader *tcs = nir_create_passthrough_tcs_impl(sctx->screen->nir_options, locations,
                                                      info->num_outputs, sctx->patch_vertices);
+   NIR_PASS(_, tcs, nir_lower_system_values);
 
    return si_create_shader_state(sctx, tcs);
 }

@@ -1,33 +1,10 @@
 /*
- Copyright (C) Intel Corp.  2006.  All Rights Reserved.
- Intel funded Tungsten Graphics to
- develop this 3D driver.
-
- Permission is hereby granted, free of charge, to any person obtaining
- a copy of this software and associated documentation files (the
- "Software"), to deal in the Software without restriction, including
- without limitation the rights to use, copy, modify, merge, publish,
- distribute, sublicense, and/or sell copies of the Software, and to
- permit persons to whom the Software is furnished to do so, subject to
- the following conditions:
-
- The above copyright notice and this permission notice (including the
- next paragraph) shall be included in all copies or substantial
- portions of the Software.
-
- THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
- EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
- MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
- IN NO EVENT SHALL THE COPYRIGHT OWNER(S) AND/OR ITS SUPPLIERS BE
- LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
- OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
- WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-
- **********************************************************************/
- /*
-  * Authors:
-  *   Keith Whitwell <keithw@vmware.com>
-  */
+ * Copyright © 2006 Intel Corporation
+ * SPDX-License-Identifier: MIT
+ *
+ * Intel funded Tungsten Graphics to develop this 3D driver.
+ * File originally authored by: Keith Whitwell <keithw@vmware.com>
+ */
 
 #pragma once
 
@@ -210,6 +187,7 @@ enum ENUM_PACKED opcode {
    BRW_OPCODE_RNDE,
    BRW_OPCODE_RNDZ,
    BRW_OPCODE_MAC,
+   BRW_OPCODE_MACL,
    BRW_OPCODE_MACH,
    BRW_OPCODE_LZD,
    BRW_OPCODE_FBH,
@@ -471,8 +449,6 @@ enum ENUM_PACKED opcode {
     */
    SHADER_OPCODE_CLUSTER_BROADCAST,
 
-   SHADER_OPCODE_GET_BUFFER_SIZE,
-
    SHADER_OPCODE_INTERLOCK,
 
    /** Target for a HALT
@@ -497,7 +473,8 @@ enum ENUM_PACKED opcode {
    FS_OPCODE_INTERPOLATE_AT_SAMPLE,
    FS_OPCODE_INTERPOLATE_AT_SHARED_OFFSET,
    FS_OPCODE_INTERPOLATE_AT_PER_SLOT_OFFSET,
-   FS_OPCODE_READ_ATTRIBUTE_PAYLOAD,
+
+   SHADER_OPCODE_LOAD_ATTRIBUTE_PAYLOAD,
 
    /**
     * GLSL barrier()
@@ -550,35 +527,9 @@ enum ENUM_PACKED opcode {
     * Acts as a scheduling barrier.
     */
    SHADER_OPCODE_LOAD_REG,
-};
 
-enum sampler_opcode {
-   /**
-    * Texture sampling opcodes.
-    *
-    * LOGICAL opcodes are eventually translated to SHADER_OPCODE_SEND but
-    * take parameters as individual sources.  See enum tex_logical_srcs.
-    */
-   SAMPLER_OPCODE_TEX_LOGICAL,
-   SAMPLER_OPCODE_TXD_LOGICAL,
-   SAMPLER_OPCODE_TXF_LOGICAL,
-   SAMPLER_OPCODE_TXL_LOGICAL,
-   SAMPLER_OPCODE_TXS_LOGICAL,
-   SAMPLER_OPCODE_TXB_LOGICAL,
-   SAMPLER_OPCODE_TXF_CMS_W_LOGICAL,
-   SAMPLER_OPCODE_TXF_CMS_W_GFX12_LOGICAL,
-   SAMPLER_OPCODE_TXF_MCS_LOGICAL,
-   SAMPLER_OPCODE_LOD_LOGICAL,
-   SAMPLER_OPCODE_TG4_LOGICAL,
-   SAMPLER_OPCODE_TG4_IMPLICIT_LOD_LOGICAL,
-   SAMPLER_OPCODE_TG4_EXPLICIT_LOD_LOGICAL,
-   SAMPLER_OPCODE_TG4_BIAS_LOGICAL,
-   SAMPLER_OPCODE_TG4_OFFSET_LOGICAL,
-   SAMPLER_OPCODE_TG4_OFFSET_LOD_LOGICAL,
-   SAMPLER_OPCODE_TG4_OFFSET_BIAS_LOGICAL,
-   SAMPLER_OPCODE_SAMPLEINFO_LOGICAL,
-
-   SAMPLER_OPCODE_IMAGE_SIZE_LOGICAL,
+   SHADER_OPCODE_LSC_FILL,
+   SHADER_OPCODE_LSC_SPILL,
 };
 
 enum send_srcs {
@@ -612,35 +563,41 @@ enum fb_write_logical_srcs {
 };
 
 enum tex_logical_srcs {
-   /** Texture coordinates */
-   TEX_LOGICAL_SRC_COORDINATE,
-   /** Shadow comparator */
-   TEX_LOGICAL_SRC_SHADOW_C,
-   /** dPdx if the operation takes explicit derivatives, otherwise LOD value */
-   TEX_LOGICAL_SRC_LOD,
-   /** dPdy if the operation takes explicit derivatives */
-   TEX_LOGICAL_SRC_LOD2,
-   /** Min LOD */
-   TEX_LOGICAL_SRC_MIN_LOD,
-   /** Sample index */
-   TEX_LOGICAL_SRC_SAMPLE_INDEX,
-   /** MCS data */
-   TEX_LOGICAL_SRC_MCS,
    /** REQUIRED: Texture surface index */
    TEX_LOGICAL_SRC_SURFACE,
    /** Texture sampler index */
    TEX_LOGICAL_SRC_SAMPLER,
-   /** Texel offset for gathers */
-   TEX_LOGICAL_SRC_TG4_OFFSET,
+   /** Packed offsets */
+   TEX_LOGICAL_SRC_PACKED_OFFSETS,
+   /** Sampler payloads */
+   TEX_LOGICAL_SRC_PAYLOAD0,
+   TEX_LOGICAL_SRC_PAYLOAD1,
+   TEX_LOGICAL_SRC_PAYLOAD2,
+   TEX_LOGICAL_SRC_PAYLOAD3,
+   TEX_LOGICAL_SRC_PAYLOAD4,
+   TEX_LOGICAL_SRC_PAYLOAD5,
+   TEX_LOGICAL_SRC_PAYLOAD6,
+   TEX_LOGICAL_SRC_PAYLOAD7,
+   TEX_LOGICAL_SRC_PAYLOAD8,
+   TEX_LOGICAL_SRC_PAYLOAD9,
+   TEX_LOGICAL_SRC_PAYLOAD10,
+   TEX_LOGICAL_SRC_PAYLOAD11,
+   TEX_LOGICAL_SRC_PAYLOAD12,
 
    TEX_LOGICAL_NUM_SRCS,
 };
 
 enum pull_uniform_constant_srcs {
-   /** Surface binding table index */
-   PULL_UNIFORM_CONSTANT_SRC_SURFACE,
-   /** Surface bindless handle */
-   PULL_UNIFORM_CONSTANT_SRC_SURFACE_HANDLE,
+   /** enum lsc_addr_surface_type (as UD immediate) */
+   PULL_UNIFORM_CONSTANT_SRC_BINDING_TYPE,
+   /**
+    * Where to find the surface state.  Depends on BINDING_TYPE above:
+    *
+    * - SS: pointer to surface state (relative to surface base address)
+    * - BSS: pointer to surface state (relative to bindless surface base)
+    * - BTI: binding table index
+    */
+   PULL_UNIFORM_CONSTANT_SRC_BINDING,
    /** Surface offset */
    PULL_UNIFORM_CONSTANT_SRC_OFFSET,
    /** Pull size */
@@ -650,27 +607,22 @@ enum pull_uniform_constant_srcs {
 };
 
 enum pull_varying_constant_srcs {
-   /** Surface binding table index */
-   PULL_VARYING_CONSTANT_SRC_SURFACE,
-   /** Surface bindless handle */
-   PULL_VARYING_CONSTANT_SRC_SURFACE_HANDLE,
+   /** enum lsc_addr_surface_type (as UD immediate) */
+   PULL_VARYING_CONSTANT_SRC_BINDING_TYPE,
+   /**
+    * Where to find the surface state.  Depends on BINDING_TYPE above:
+    *
+    * - SS: pointer to surface state (relative to surface base address)
+    * - BSS: pointer to surface state (relative to bindless surface base)
+    * - BTI: binding table index
+    */
+   PULL_VARYING_CONSTANT_SRC_BINDING,
    /** Surface offset */
    PULL_VARYING_CONSTANT_SRC_OFFSET,
    /** Pull alignment */
    PULL_VARYING_CONSTANT_SRC_ALIGNMENT,
 
    PULL_VARYING_CONSTANT_SRCS,
-};
-
-enum get_buffer_size_srcs {
-   /** Surface binding table index */
-   GET_BUFFER_SIZE_SRC_SURFACE,
-   /** Surface bindless handle */
-   GET_BUFFER_SIZE_SRC_SURFACE_HANDLE,
-   /** LOD */
-   GET_BUFFER_SIZE_SRC_LOD,
-
-   GET_BUFFER_SIZE_SRCS
 };
 
 enum ENUM_PACKED memory_logical_mode {
@@ -755,6 +707,23 @@ enum interpolator_logical_srcs {
    INTERP_NUM_SRCS
 };
 
+enum spill_srcs {
+   /** Register used for the address in scratch space. */
+   SPILL_SRC_PAYLOAD1,
+
+   /** Register to be spilled. */
+   SPILL_SRC_PAYLOAD2,
+
+   SPILL_NUM_SRCS
+};
+
+enum fill_srcs {
+   /** Register used for the address in scratch space. */
+   FILL_SRC_PAYLOAD1,
+
+   FILL_NUM_SRCS
+};
+
 enum brw_reduce_op {
    BRW_REDUCE_OP_ADD,
    BRW_REDUCE_OP_MUL,
@@ -806,7 +775,7 @@ enum ENUM_PACKED brw_reg_file {
    ADDRESS,
    VGRF,
    ATTR,
-   UNIFORM, /* prog_data->params[reg] */
+   UNIFORM, /* pushed constant delivered register */
 };
 
 /* Align1 support for 3-src instructions. Bit 35 of the instruction
@@ -920,12 +889,24 @@ operator&(tgl_sbid_mode x, tgl_sbid_mode y)
    return tgl_sbid_mode(unsigned(x) & unsigned(y));
 }
 
+inline tgl_sbid_mode
+operator~(tgl_sbid_mode x)
+{
+   const unsigned range = (unsigned(TGL_SBID_SET) << 1) - 1;
+   return tgl_sbid_mode(~unsigned(x) & range);
+}
+
 inline tgl_sbid_mode &
 operator|=(tgl_sbid_mode &x, tgl_sbid_mode y)
 {
    return x = x | y;
 }
 
+inline tgl_sbid_mode &
+operator&=(tgl_sbid_mode &x, tgl_sbid_mode y)
+{
+   return x = x & y;
+}
 #endif
 
 /**
@@ -963,7 +944,9 @@ struct tgl_swsb {
    enum tgl_pipe pipe : 3;
    unsigned sbid : 5;
    enum tgl_sbid_mode mode : 3;
-};
+   unsigned pad : 2;
+} PACKED;
+static_assert(sizeof(struct tgl_swsb) == 2, "packed");
 
 /**
  * Construct a scheduling annotation with a single RegDist dependency.  This
@@ -1241,9 +1224,23 @@ enum brw_sfid {
 #define GFX7_SAMPLER_MESSAGE_SAMPLE_LD_MCS       29
 #define GFX7_SAMPLER_MESSAGE_SAMPLE_LD2DMS       30
 #define GFX7_SAMPLER_MESSAGE_SAMPLE_LD2DSS       31
+#define XE2_SAMPLER_MESSAGE_SAMPLE_PO                     32
+#define XE2_SAMPLER_MESSAGE_SAMPLE_PO_BIAS                33
+#define XE2_SAMPLER_MESSAGE_SAMPLE_PO_LOD                 34
+#define XE2_SAMPLER_MESSAGE_SAMPLE_PO_COMPARE             35
+#define XE2_SAMPLER_MESSAGE_SAMPLE_PO_DERIVS              36
+#define XE3_SAMPLER_MESSAGE_SAMPLE_PO_BIAS_COMPARE        37
+#define XE2_SAMPLER_MESSAGE_SAMPLE_PO_LOD_COMPARE         38
+#define XE2_SAMPLER_MESSAGE_SAMPLE_GATHER4_PO             40
 #define XE2_SAMPLER_MESSAGE_SAMPLE_GATHER4_PO_L           45
 #define XE2_SAMPLER_MESSAGE_SAMPLE_GATHER4_PO_B           46
+#define XE2_SAMPLER_MESSAGE_SAMPLE_GATHER4_PO_I           47
+#define XE2_SAMPLER_MESSAGE_SAMPLE_GATHER4_PO_C           48
+#define XE2_SAMPLER_MESSAGE_SAMPLE_PO_D_C                 52
+#define XE2_SAMPLER_MESSAGE_SAMPLE_GATHER4_PO_I_C         53
 #define XE2_SAMPLER_MESSAGE_SAMPLE_GATHER4_PO_L_C         55
+#define XE2_SAMPLER_MESSAGE_SAMPLE_PO_LZ                  56
+#define XE2_SAMPLER_MESSAGE_SAMPLE_PO_C_LZ                57
 
 /* for GFX5 only */
 #define BRW_SAMPLER_SIMD_MODE_SIMD4X2                   0

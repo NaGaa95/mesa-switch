@@ -28,7 +28,7 @@ traces:
       checksum: 47c004fed88bed8d3d387295399f0810
   angle/libangle_restricted_traces_pubg_mobile_battle_royale.so:
     vk-radv-raven:
-      checksum: ae4e6353a18c3ea76067a8d3a8740a75
+      checksum: 95092db8df12af91de8de5463e4e4bb6
   angle/libangle_restricted_traces_temple_run_300.so:
     vk-radv-raven:
       checksum: 4fa6a73dad7d9dd747ba7cbf82aae42e

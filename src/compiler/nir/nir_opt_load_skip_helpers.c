@@ -64,9 +64,9 @@ set_src_needs_helpers(nir_src *src, void *_data)
 {
    struct helper_state *hs = _data;
    if (!BITSET_TEST(hs->needs_helpers, src->ssa->index) &&
-       !instr_never_needs_helpers(src->ssa->parent_instr)) {
+       !instr_never_needs_helpers(nir_def_instr(src->ssa))) {
       BITSET_SET(hs->needs_helpers, src->ssa->index);
-      nir_instr_worklist_push_tail(&hs->worklist, src->ssa->parent_instr);
+      nir_instr_worklist_push_tail(&hs->worklist, nir_def_instr(src->ssa));
    }
    return true;
 }
@@ -98,8 +98,7 @@ nir_opt_load_skip_helpers(nir_shader *shader, nir_opt_load_skip_helpers_options 
    nir_function_impl *impl = nir_shader_get_entrypoint(shader);
 
    struct helper_state hs = {
-      .needs_helpers = rzalloc_array(NULL, BITSET_WORD,
-                                     BITSET_WORDS(impl->ssa_alloc)),
+      .needs_helpers = BITSET_RZALLOC(NULL, impl->ssa_alloc),
       .options = options,
    };
    nir_instr_worklist_init(&hs.worklist);
@@ -162,7 +161,11 @@ nir_opt_load_skip_helpers(nir_shader *shader, nir_opt_load_skip_helpers_options 
 
          case nir_instr_type_intrinsic: {
             nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
-            if (nir_intrinsic_has_semantic(intr, NIR_INTRINSIC_SUBGROUP)) {
+            if (nir_intrinsic_has_semantic(intr, NIR_INTRINSIC_SUBGROUP) ||
+                intr->intrinsic == nir_intrinsic_store_scratch) {
+               /* Subgroup ops might access data from helper lanes and we don't
+                * know how scratch data is used without more complex tracking.
+                */
                nir_foreach_src(instr, set_src_needs_helpers, &hs);
             } else if (intr->intrinsic == nir_intrinsic_terminate_if) {
                /* Unlike demote, terminate disables invocations completely.

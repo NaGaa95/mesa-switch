@@ -1,27 +1,6 @@
 /*
  * Copyright © 2018 Red Hat
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
- * IN THE SOFTWARE.
- *
- * Authors:
- *    Rob Clark (robdclark@gmail.com)
+ * SPDX-License-Identifier: MIT
  */
 
 #include "math.h"
@@ -278,6 +257,19 @@ handle_instr(struct vtn_builder *b, uint32_t opcode,
    } else {
       vtn_assert(dest_type == NULL);
    }
+}
+
+static void
+handle_alu_instr(struct vtn_builder *b, uint32_t opcode,
+                 const uint32_t *w_src, unsigned num_srcs, const uint32_t *w_dest, nir_handler handler)
+{
+   assert(w_dest);
+
+   vtn_handle_fp_fast_math(b, vtn_untyped_value(b, w_dest[2]), vtn_untyped_value(b, w_src[0]));
+
+   handle_instr(b, opcode, w_src, num_srcs, w_dest, handler);
+
+   b->nb.fp_math_ctrl = nir_fp_fast_math;
 }
 
 static nir_op
@@ -656,16 +648,16 @@ handle_special(struct vtn_builder *b, uint32_t opcode,
           (nb->shader->options->lower_ffma32 && srcs[0]->bit_size == 32) ||
           (nb->shader->options->lower_ffma64 && srcs[0]->bit_size == 64));
 
-      const bool save_exact = nb->exact;
+      const unsigned save_math_ctrl = nb->fp_math_ctrl;
       nir_def *res;
 
-      nb->exact = true;
+      nb->fp_math_ctrl |= nir_fp_exact;
       if (lower)
          res = nir_fmad(nb, srcs[0], srcs[1], srcs[2]);
       else
          res = nir_ffma(nb, srcs[0], srcs[1], srcs[2]);
 
-      nb->exact = save_exact;
+      nb->fp_math_ctrl = save_math_ctrl;
       return res;
    }
    case OpenCLstd_Maxmag:
@@ -699,7 +691,7 @@ handle_special(struct vtn_builder *b, uint32_t opcode,
    case OpenCLstd_Native_tan:
       return nir_ftan(nb, srcs[0]);
    case OpenCLstd_Ldexp:
-      if (nb->shader->options->lower_ldexp)
+      if (!nb->shader->options->has_ldexp)
          break;
       return nir_ldexp(nb, srcs[0], srcs[1]);
    case OpenCLstd_Fma: {
@@ -709,10 +701,10 @@ handle_special(struct vtn_builder *b, uint32_t opcode,
          break;
 
       /* OpenCL FMA is not allowed to be split. */
-      const bool save_exact = nb->exact;
-      nb->exact = true;
+      const bool save_math_ctrl = nb->fp_math_ctrl;
+      nb->fp_math_ctrl |= nir_fp_exact;
       nir_def *res = nir_ffma(nb, srcs[0], srcs[1], srcs[2]);
-      nb->exact = save_exact;
+      nb->fp_math_ctrl = save_math_ctrl;
       return res;
    }
    case OpenCLstd_Rotate:
@@ -729,10 +721,7 @@ handle_special(struct vtn_builder *b, uint32_t opcode,
     * even when flush-to-zero is required. Manually flush its output.
     */
    if (opcode == OpenCLstd_Cbrt) {
-      const bool save_exact = nb->exact;
-      nb->exact = true;
-      ret = nir_fmul_imm(nb, ret, 1.0);
-      nb->exact = save_exact;
+      ret = nir_fcanonicalize(nb, ret);
    }
 
    return ret;
@@ -773,7 +762,7 @@ handle_core(struct vtn_builder *b, uint32_t opcode,
        * pointers.  Fortunately, the whole function is just a barrier.
        */
       nir_barrier(&b->nb, .execution_scope = SCOPE_WORKGROUP,
-                          .memory_scope = SCOPE_WORKGROUP,
+                          .memory_scope = SCOPE_DEVICE,
                           .memory_semantics = NIR_MEMORY_ACQUIRE |
                                               NIR_MEMORY_RELEASE,
                           .memory_modes = nir_var_mem_shared |
@@ -904,7 +893,7 @@ vtn_add_printf_string(struct vtn_builder *b, uint32_t id, u_printf_info *info)
 
    while (deref->deref_type != nir_deref_type_var) {
       nir_scalar parent = nir_scalar_resolved(deref->parent.ssa, 0);
-      if (parent.def->parent_instr->type != nir_instr_type_deref) {
+      if (!nir_def_is_deref(parent.def)) {
          deref = NULL;
          break;
       }
@@ -1127,7 +1116,7 @@ vtn_handle_opencl_instruction(struct vtn_builder *b, SpvOp ext_opcode,
    case OpenCLstd_Half_recip:
    case OpenCLstd_FMin_common:
    case OpenCLstd_FMax_common:
-      handle_instr(b, ext_opcode, w + 5, count - 5, w + 1, handle_alu);
+      handle_alu_instr(b, ext_opcode, w + 5, count - 5, w + 1, handle_alu);
       return true;
    case OpenCLstd_SAbs_diff:
    case OpenCLstd_UAbs_diff:
@@ -1234,7 +1223,7 @@ vtn_handle_opencl_instruction(struct vtn_builder *b, SpvOp ext_opcode,
    case OpenCLstd_Half_powr:
    case OpenCLstd_Half_sin:
    case OpenCLstd_Half_tan:
-      handle_instr(b, ext_opcode, w + 5, count - 5, w + 1, handle_special);
+      handle_alu_instr(b, ext_opcode, w + 5, count - 5, w + 1, handle_special);
       return true;
    case OpenCLstd_Vloadn:
    case OpenCLstd_Vload_half:

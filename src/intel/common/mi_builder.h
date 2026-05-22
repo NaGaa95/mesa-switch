@@ -1694,4 +1694,44 @@ mi_goto_target_init_and_place(struct mi_builder *b)
 
 #endif /* GFX_VER >= 9 */
 
+/* Common code for drivers to set autostrip state. */
+#if INTEL_WA_14024997852_GFX_VER
+static inline void
+mi_set_autostrip_state(struct mi_builder *b, bool enable)
+{
+   struct mi_value ff_mode_reg = mi_reg32(GENX(FF_MODE_num));
+
+   uint32_t dword;
+   struct GENX(FF_MODE) ff_mode = {
+      .MeshShaderAutostripDisable = true,
+      .MeshShaderPartialAutostripDisable = true,
+      .TEAutostripDisable = true,
+   };
+   GENX(FF_MODE_pack)(NULL, &dword, &ff_mode);
+
+   /* This bit we want to always enable with Wa_14026781792. */
+   uint32_t bugfix;
+   struct GENX(FF_MODE) ff_mode_bugfix = {
+#if INTEL_NEEDS_WA_14026781792
+     .TEPatchcontrolbugfix = true,
+#endif
+   };
+   GENX(FF_MODE_pack)(NULL, &bugfix, &ff_mode_bugfix);
+
+   if (!enable) {
+      /* Enable flags. */
+      mi_store(b, ff_mode_reg,
+               mi_ior(b,
+                      mi_imm(bugfix),
+                      mi_ior(b, ff_mode_reg, mi_imm(dword))));
+   } else {
+      /* Disable flags. */
+      mi_store(b, ff_mode_reg,
+               mi_ior(b,
+                      mi_imm(bugfix),
+                      mi_iand(b, ff_mode_reg, mi_imm(~dword))));
+   }
+}
+#endif
+
 #endif /* MI_BUILDER_H */

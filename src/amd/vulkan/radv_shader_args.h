@@ -34,7 +34,8 @@ enum radv_ud_index {
    AC_UD_NEXT_STAGE_PC = 16,
    AC_UD_EPILOG_PC = 17,
    AC_UD_DYNAMIC_DESCRIPTORS = 18,
-   AC_UD_SHADER_START = 19,
+   AC_UD_DYNAMIC_DESCRIPTORS_OFFSET_ADDR = 19,
+   AC_UD_SHADER_START = 20,
    AC_UD_VS_VERTEX_BUFFERS = AC_UD_SHADER_START,
    AC_UD_VS_BASE_VERTEX_START_INSTANCE,
    AC_UD_VS_PROLOG_INPUTS,
@@ -67,14 +68,16 @@ struct radv_userdata_info {
 
 struct radv_userdata_locations {
    struct radv_userdata_info descriptor_sets[MAX_SETS];
+   struct radv_userdata_info descriptor_heaps[RADV_MAX_HEAPS];
    struct radv_userdata_info shader_data[AC_UD_MAX_UD];
    uint32_t descriptor_sets_enabled;
+   uint32_t descriptor_heaps_enabled;
 };
 
 struct radv_shader_args {
    struct ac_shader_args ac;
 
-   struct ac_arg descriptors[MAX_SETS];
+   struct ac_arg descriptors[MAX_SETS]; /* sets or heaps */
 
    /* Streamout */
    struct ac_arg streamout_buffers;
@@ -121,7 +124,6 @@ struct radv_shader_args {
 
    bool explicit_scratch_args;
    bool remap_spi_ps_input;
-   bool load_grid_size_from_user_sgpr;
 };
 
 static inline struct radv_shader_args *
@@ -134,10 +136,12 @@ struct radv_graphics_state_key;
 struct radv_shader_info;
 struct radv_ps_epilog_key;
 struct radv_device;
+struct radv_shader_debug_info;
 
 void radv_declare_shader_args(const struct radv_device *device, const struct radv_graphics_state_key *gfx_state,
                               const struct radv_shader_info *info, mesa_shader_stage stage,
-                              mesa_shader_stage previous_stage, struct radv_shader_args *args);
+                              mesa_shader_stage previous_stage, struct radv_shader_args *args,
+                              struct radv_shader_debug_info *debug);
 
 void radv_declare_ps_epilog_args(const struct radv_device *device, const struct radv_ps_epilog_key *key,
                                  struct radv_shader_args *args);

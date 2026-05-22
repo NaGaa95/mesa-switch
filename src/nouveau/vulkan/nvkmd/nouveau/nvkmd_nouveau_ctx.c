@@ -79,14 +79,15 @@ nvkmd_nouveau_create_exec_ctx(struct nvkmd_dev *_dev,
       return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
    }
 
-   ctx->max_push = MIN2(NVKMD_NOUVEAU_MAX_PUSH, dev->ws_dev->max_push);
+   ctx->max_push = dev->ws_dev->max_push;
+   ctx->req_push = UTIL_DYNARRAY_INIT;
 
    ctx->req = (struct drm_nouveau_exec) {
       .channel = ctx->ws_ctx->channel,
       .push_count = 0,
       .wait_count = 0,
       .sig_count = 0,
-      .push_ptr = (uintptr_t)&ctx->req_push,
+      .push_ptr = 0,
       .wait_ptr = (uintptr_t)&ctx->req_wait,
       .sig_ptr = (uintptr_t)&ctx->req_sig,
    };
@@ -100,6 +101,8 @@ static void
 nvkmd_nouveau_exec_ctx_destroy(struct nvkmd_ctx *_ctx)
 {
    struct nvkmd_nouveau_exec_ctx *ctx = nvkmd_nouveau_exec_ctx(_ctx);
+
+   util_dynarray_fini(&ctx->req_push);
 
    ASSERTED int err = drmSyncobjDestroy(ctx->ws_dev->fd, ctx->syncobj);
    assert(err == 0);
@@ -140,6 +143,7 @@ nvkmd_nouveau_exec_ctx_flush(struct nvkmd_ctx *_ctx,
        ctx->req.sig_count == 0)
       return VK_SUCCESS;
 
+   ctx->req.push_ptr = (uintptr_t)util_dynarray_begin(&ctx->req_push);
    int err = drmCommandWriteRead(ctx->ws_dev->fd, DRM_NOUVEAU_EXEC,
                                  &ctx->req, sizeof(ctx->req));
    if (err) {
@@ -148,6 +152,7 @@ nvkmd_nouveau_exec_ctx_flush(struct nvkmd_ctx *_ctx,
          result = VK_ERROR_DEVICE_LOST;
       return vk_errorf(log_obj, result, "DRM_NOUVEAU_EXEC failed: %m");
    }
+   util_dynarray_clear(&ctx->req_push);
 
    ctx->req.push_count = 0;
    ctx->req.wait_count = 0;
@@ -163,6 +168,12 @@ nvkmd_nouveau_exec_ctx_exec(struct nvkmd_ctx *_ctx,
                             const struct nvkmd_ctx_exec *execs)
 {
    struct nvkmd_nouveau_exec_ctx *ctx = nvkmd_nouveau_exec_ctx(_ctx);
+   const uint32_t size_needed = MIN2(
+      ctx->req_push.size + exec_count * sizeof(struct drm_nouveau_exec_push),
+      ctx->max_push * sizeof(struct drm_nouveau_exec_push));
+
+   if (util_dynarray_ensure_cap(&ctx->req_push, size_needed) == NULL)
+      return vk_error(log_obj, VK_ERROR_OUT_OF_HOST_MEMORY);
 
    for (uint32_t i = 0; i < exec_count; i++) {
       uint32_t incomplete_count = 0;
@@ -191,11 +202,13 @@ nvkmd_nouveau_exec_ctx_exec(struct nvkmd_ctx *_ctx,
       if (execs[i].no_prefetch)
          flags |= DRM_NOUVEAU_EXEC_PUSH_NO_PREFETCH;
 
-      ctx->req_push[ctx->req.push_count++] = (struct drm_nouveau_exec_push) {
+      struct drm_nouveau_exec_push push = {
          .va = execs[i].addr,
          .va_len = execs[i].size_B,
          .flags = flags,
       };
+      util_dynarray_append(&ctx->req_push, push);
+      ctx->req.push_count++;
    }
 
    return VK_SUCCESS;

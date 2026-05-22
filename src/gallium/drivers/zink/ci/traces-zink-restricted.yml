@@ -204,7 +204,7 @@ traces:
       checksum: 5007fd6184cccf9d5d009aeefbdbea90
       text: "looks good but checksum keeps changing"
     gl-zink-anv-tgl:
-      checksum: 6e3323f5cf728a0101fc028e17054874
+      checksum: 1275d8817716bb2aa65ee5e21737d9f1
 
   plague-inc-evolved/PlagueIncEvolved-trim--f1200-v20201203-v2.trace:
     gl-zink-anv-adl:

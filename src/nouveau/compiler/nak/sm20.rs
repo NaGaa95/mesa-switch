@@ -7,7 +7,7 @@ use crate::legalize::{
 };
 use crate::sm30_instr_latencies::{
     encode_kepler_shader, instr_exec_latency, instr_latency,
-    KeplerInstructionEncoder,
+    latency_upper_bound, KeplerInstructionEncoder,
 };
 use bitview::*;
 
@@ -102,6 +102,10 @@ impl ShaderModel for ShaderModel20 {
 
     fn paw_latency(&self, _write: &Op, _dst_idx: usize) -> u32 {
         13
+    }
+
+    fn latency_upper_bound(&self) -> u32 {
+        latency_upper_bound()
     }
 
     fn worst_latency(&self, write: &Op, dst_idx: usize) -> u32 {
@@ -480,7 +484,7 @@ impl SM20Encoder<'_> {
         self.set_opcode(unit, opcode);
         self.set_dst(14..20, dst);
 
-        match AluSrc::from_src(Some(&src)) {
+        match AluSrc::from_src(Some(src)) {
             AluSrc::None => panic!("src is always Some"),
             AluSrc::Reg(reg) => {
                 self.set_reg(26..32, reg);
@@ -1445,7 +1449,7 @@ impl SM20Op for OpF2F {
         e.set_field(23..25, (self.src_type.bits() / 8).ilog2());
         e.set_rnd_mode(49..51, self.rnd_mode);
         e.set_bit(55, self.ftz);
-        e.set_bit(56, self.high);
+        e.set_bit(56, self.src.src_swizzle == SrcSwizzle::Yy);
     }
 }
 
@@ -1464,7 +1468,7 @@ impl SM20Op for OpF2I {
         e.set_field(23..25, (self.src_type.bits() / 8).ilog2());
         e.set_rnd_mode(49..51, self.rnd_mode);
         e.set_bit(55, self.ftz);
-        e.set_bit(56, false); // .high
+        e.set_bit(56, self.src.src_swizzle == SrcSwizzle::Yy);
     }
 }
 
@@ -2305,6 +2309,8 @@ impl SM20Op for OpLd {
     }
 
     fn encode(&self, e: &mut SM20Encoder<'_>) {
+        assert_eq!(self.stride, OffsetStride::X1);
+        assert!(self.pred.is_true());
         match self.access.space {
             MemSpace::Global(addr_type) => {
                 e.set_opcode(SM20Unit::Mem, 0x20);
@@ -2384,6 +2390,7 @@ impl SM20Op for OpSt {
     }
 
     fn encode(&self, e: &mut SM20Encoder<'_>) {
+        assert_eq!(self.stride, OffsetStride::X1);
         match self.access.space {
             MemSpace::Global(addr_type) => {
                 e.set_opcode(SM20Unit::Mem, 0x24);
@@ -2468,6 +2475,7 @@ impl SM20Op for OpAtom {
             panic!("SM20 only supports global atomics");
         };
         assert!(addr_type == MemAddrType::A64);
+        assert_eq!(self.addr_stride, OffsetStride::X1);
 
         if self.dst.is_none() {
             e.set_opcode(SM20Unit::Mem, 0x1);

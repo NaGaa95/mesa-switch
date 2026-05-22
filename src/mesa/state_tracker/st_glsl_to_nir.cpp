@@ -112,6 +112,25 @@ st_nir_lookup_parameter_index(struct gl_program *prog, nir_variable *var)
    return -1;
 }
 
+void
+st_update_state_param_locations(struct gl_context *ctx,
+                                struct gl_program *prog, nir_shader *nir)
+{
+   nir_foreach_variable_with_modes(uniform, nir, nir_var_uniform) {
+      if (uniform->state_slots) {
+         const gl_state_index16 *const stateTokens = uniform->state_slots[0].tokens;
+
+         int loc = _mesa_lookup_state_param_idx(prog->Parameters, stateTokens);
+         assert(loc >= 0);
+         if (ctx->Const.PackedDriverUniformStorage) {
+            uniform->data.driver_location =
+               prog->Parameters->Parameters[loc].ValueOffset;
+         } else
+            uniform->data.driver_location = loc;
+      }
+   }
+}
+
 static void
 st_nir_assign_uniform_locations(struct st_context *st,
                                 struct gl_program *prog,
@@ -135,35 +154,8 @@ st_nir_assign_uniform_locations(struct st_context *st,
             imageidx += type_size(uniform->type);
          }
       } else if (uniform->state_slots) {
-         const gl_state_index16 *const stateTokens = uniform->state_slots[0].tokens;
-         if (st->allow_st_finalize_nir_twice) {
-            /* Make sure the variant has the correct locations set */
-            loc = _mesa_lookup_state_param_idx(prog->Parameters, stateTokens);
-            if (loc >= 0) {
-               if (ctx->Const.PackedDriverUniformStorage) {
-                  uniform->data.driver_location =
-                     prog->Parameters->Parameters[loc].ValueOffset;
-               } else
-                  uniform->data.driver_location = loc;
-            }
-
-            continue;
-         }
-
-         unsigned comps;
-         if (glsl_type_is_struct_or_ifc(type)) {
-            comps = 4;
-         } else {
-            comps = glsl_get_vector_elements(type);
-         }
-
-         if (ctx->Const.PackedDriverUniformStorage) {
-            loc = _mesa_add_sized_state_reference(prog->Parameters,
-                                                  stateTokens, comps, false);
-            loc = prog->Parameters->Parameters[loc].ValueOffset;
-         } else {
-            loc = _mesa_add_state_reference(prog->Parameters, stateTokens);
-         }
+         /* State vars should have been handled already */
+         continue;
       } else {
          loc = st_nir_lookup_parameter_index(prog, uniform);
 
@@ -295,8 +287,6 @@ st_glsl_to_nir_post_opts(struct st_context *st, struct gl_program *prog,
    if (!screen->caps.nir_atomics_as_deref)
       NIR_PASS(_, nir, gl_nir_lower_atomics, shader_program, true);
 
-   NIR_PASS(_, nir, nir_opt_intrinsics);
-
    /* Lower 64-bit ops. */
    if (nir->options->lower_int64_options ||
        nir->options->lower_doubles_options) {
@@ -319,16 +309,23 @@ st_glsl_to_nir_post_opts(struct st_context *st, struct gl_program *prog,
          subgroup_opts.lower_vote_feq = true;
          subgroup_opts.lower_reduce = true;
 
-         if (nir->options->lower_doubles_options & nir_lower_fp64_full_software)
-            NIR_PASS(lowered_64bit_ops, nir, nir_lower_subgroups, &subgroup_opts);
-
          /* nir_lower_doubles is not prepared for vector ops, so if the backend doesn't
           * request lower_alu_to_scalar until now, lower all 64 bit ops, and try to
           * vectorize them afterwards again */
-         if (!nir->options->lower_to_scalar) {
+         bool scalarize = !nir->options->lower_to_scalar;
+
+         if (nir->options->lower_doubles_options & nir_lower_fp64_full_software) {
+            NIR_PASS(lowered_64bit_ops, nir, nir_lower_subgroups, &subgroup_opts);
+            /* Subgroup lowering may generate 64-bit vector ALU operations. */
+            if (lowered_64bit_ops)
+               scalarize = true;
+         }
+
+         if (scalarize) {
             NIR_PASS(revectorize, nir, nir_lower_alu_to_scalar, filter_64_bit_instr, nullptr);
             NIR_PASS(revectorize, nir, nir_lower_phis_to_scalar, NULL, NULL);
          }
+
          /* doubles lowering requires frexp to be lowered first if it will be,
           * since the pass generates other 64-bit ops.  Most backends lower
           * frexp, and using doubles is rare, and using frexp is even more rare
@@ -365,15 +362,18 @@ st_glsl_to_nir_post_opts(struct st_context *st, struct gl_program *prog,
       NIR_PASS(_, nir, nir_lower_atomics_to_ssbo, align_offset_state);
    }
 
+   NIR_PASS(_, nir, nir_opt_intrinsics);
+
    st_set_prog_affected_state_flags(prog);
    nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
+   st_update_state_param_locations(st->ctx, prog, nir);
 
    if (st->allow_st_finalize_nir_twice) {
       st_serialize_base_nir(prog, nir);
       st_finalize_nir(st, prog, shader_program, nir, true, false);
 
       if (screen->finalize_nir)
-         screen->finalize_nir(screen, nir);
+         screen->finalize_nir(screen, nir, false);
    }
 
    if (st->ctx->_Shader->Flags & GLSL_DUMP) {
@@ -494,6 +494,8 @@ st_link_glsl_to_nir(struct gl_context *ctx,
           */
          if (_mesa_is_desktop_gl(st->ctx) && st->ctx->Const.GLSLVersion >= 400)
             st->ctx->SoftFP64 = glsl_float64_funcs_to_nir(st->ctx, options);
+         else
+            _mesa_warning(NULL, "Mesa full software implementation of FP64 requires OpenGL >= 4.0\n");
       }
    }
 
@@ -540,7 +542,7 @@ st_link_glsl_to_nir(struct gl_context *ctx,
             (nir_variable_mode)0;
 
          if (mode)
-            nir_lower_indirect_derefs(nir, mode, UINT32_MAX);
+            nir_lower_indirect_derefs_to_if_else_trees(nir, mode, UINT32_MAX);
       }
 
       /* This needs to run after the initial pass of nir_lower_vars_to_ssa, so

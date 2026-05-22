@@ -72,6 +72,7 @@ opt_shrink_store_instr(nir_builder *b, nir_intrinsic_instr *instr, bool shrink_i
    case nir_intrinsic_bindless_image_store:
    case nir_intrinsic_image_deref_store:
    case nir_intrinsic_image_store:
+   case nir_intrinsic_image_heap_store:
       return shrink_image_store && opt_shrink_vectors_image_store(b, instr);
    default:
       return false;

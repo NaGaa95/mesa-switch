@@ -70,7 +70,6 @@ enum URegLatencySM80 {
     VoteU,
 }
 
-#[allow(dead_code)]
 #[derive(Debug)]
 enum UPredLatencySM80 {
     Coupled,
@@ -145,18 +144,14 @@ impl RegLatencySM80 {
             Op::HSet2(_) | Op::HSetP2(_) | Op::HMnMx2(_) => FP16_Alu,
             // let in for documentation purposes
             Op::Hmma(h) => match (h.mat_size, h.dst_type, h.src_type) {
-                (HmmaSize::M16N8K16, FloatType::F32, FloatType::F16) => {
-                    MMA_2x_collect
-                }
-                // (HmmaSize::M16N8K16, FloatType::F32, FloatType::BF16) => MMA_2x_collect,
                 // (HmmaSize::M16N8K8, FloatType::F32, FloatType::TF32) => MMA_2x_collect,
                 (HmmaSize::M16N8K8, FloatType::F32, FloatType::F16) => {
                     MMA_1x_collect
                 }
                 // (HmmaSize::M16N8K8, FloatType::F32, FloatType::BF16) => MMA_1x_collect,
                 // (HmmaSize::M16N8K4, FloatType::F32, FloatType::TF32) => MMA_1x_collect,
-                (HmmaSize::M16N8K16, FloatType::F16, _) => MMA_2x_collect,
                 (HmmaSize::M16N8K8, FloatType::F16, _) => MMA_1x_collect,
+                (HmmaSize::M16N8K16, _, _) => MMA_2x_collect,
                 _ => panic!("Illegal HMMA in reg category {}", h),
             },
             Op::Ipa(_) => DecoupledAgu,
@@ -170,6 +165,7 @@ impl RegLatencySM80 {
             Op::AL2P(_) => Decoupled,
 
             Op::Mov(_) => CoupledAlu,
+            Op::Movm(_) => DecoupledAgu,
             Op::Sel(_) => CoupledAlu,
             Op::BRev(_) => Decoupled,
             // P2R => CoupledAlu,
@@ -189,7 +185,7 @@ impl RegLatencySM80 {
                 }
             }
             Op::CS2R(cs2r) => {
-                if cs2r.dst.as_reg().unwrap().comps() == 2 {
+                if cs2r.dst.comps() == 2 {
                     CoupledDisp64
                 } else {
                     CoupledAlu
@@ -247,6 +243,7 @@ impl RegLatencySM80 {
             Op::SuAtom(_) => Decoupled,
             Op::PixLd(_) => DecoupledAgu,
             Op::Isberd(_) => DecoupledAgu,
+            Op::Isbewr(_) => DecoupledAgu,
             Op::LdTram(_) => DecoupledAgu,
             Op::Shfl(_) => DecoupledAgu,
             Op::Ldsm(_) => DecoupledAgu,
@@ -351,34 +348,52 @@ impl RegLatencySM80 {
                     panic!("Illegal writer in sm80 raw");
                 }
             },
-            FP16 | FP16_Alu => {
-                match writer {
-                    CoupledAlu => 5,
-                    CoupledDisp64 => 6,
-                    CoupledFMA => 5,
-                    IMADWideWriteDL => 3,
-                    IMADWideWriteDH => 5,
-                    // these next two are 4 in the spreadsheet, 5 passes test
-                    // dEQP-VK.spirv_assembly.instruction.graphics.float16.arithmetic_1.fsign_vert
-                    // dEQP-VK.glsl.builtin.precision_fp16_storage16b.faceforward.compute.vec3
-                    FP16 => 5,
-                    FP16_Alu => 5,
-                    FP16_F32 => 5,
-                    HFMA2_MMA => 10,
-                    RedirectedFP64 => 10,
-                    Clmad => 12,
-                    IMMA_88 => 13,
-                    MMA_1x_collect => 16,
-                    MMA_2x_collect => 24,
-                    DMMA => 25,
-                    Cbu => 1,
-                    Decoupled => 1,
-                    DecoupledAgu => 1,
-                    _ => {
-                        panic!("Illegal writer in sm80 raw");
-                    }
+            FP16 => match writer {
+                CoupledAlu => 5,
+                CoupledDisp64 => 6,
+                CoupledFMA => 5,
+                IMADWideWriteDL => 3,
+                IMADWideWriteDH => 5,
+                FP16 => 4,
+                FP16_Alu => 5,
+                FP16_F32 => 5,
+                HFMA2_MMA => 10,
+                RedirectedFP64 => 10,
+                Clmad => 12,
+                IMMA_88 => 13,
+                MMA_1x_collect => 16,
+                MMA_2x_collect => 24,
+                DMMA => 25,
+                Cbu => 1,
+                Decoupled => 1,
+                DecoupledAgu => 1,
+                _ => {
+                    panic!("Illegal writer in sm80 raw");
                 }
-            }
+            },
+            FP16_Alu => match writer {
+                CoupledAlu => 5,
+                CoupledDisp64 => 6,
+                CoupledFMA => 5,
+                IMADWideWriteDL => 3,
+                IMADWideWriteDH => 5,
+                FP16 => 5,
+                FP16_Alu => 4,
+                FP16_F32 => 5,
+                HFMA2_MMA => 10,
+                RedirectedFP64 => 10,
+                Clmad => 12,
+                IMMA_88 => 13,
+                MMA_1x_collect => 16,
+                MMA_2x_collect => 24,
+                DMMA => 25,
+                Cbu => 1,
+                Decoupled => 1,
+                DecoupledAgu => 1,
+                _ => {
+                    panic!("Illegal writer in sm80 raw");
+                }
+            },
             FP16_F32 => match writer {
                 CoupledAlu => 5,
                 CoupledDisp64 => 6,
@@ -1067,6 +1082,13 @@ impl URegLatencySM80 {
 
             Op::IMad64(_) => vcoupled,
             Op::ISetP(_) => vcoupled,
+            Op::ALd(_)
+            | Op::ASt(_)
+            | Op::Ld(_)
+            | Op::Ldsm(_)
+            | Op::St(_)
+            | Op::Atom(_) => vdecoupled,
+            Op::SuLd(_) | Op::SuSt(_) | Op::SuAtom(_) => vdecoupled,
             Op::Ldc(_) => {
                 if uniform_op {
                     Uldc
@@ -1432,23 +1454,23 @@ pub struct SM80Latency {}
 impl SM80Latency {
     pub fn needs_scoreboards(op: &Op) -> bool {
         if op.is_uniform() {
-            match URegLatencySM80::op_category(op, false, 0) {
-                URegLatencySM80::ToUr => true,
-                _ => false,
-            }
+            matches!(
+                URegLatencySM80::op_category(op, false, 0),
+                URegLatencySM80::ToUr
+            )
         } else {
-            match RegLatencySM80::op_category(op, false, 0) {
+            matches!(
+                RegLatencySM80::op_category(op, false, 0),
                 RegLatencySM80::RedirectedFP64
-                | RegLatencySM80::Clmad
-                | RegLatencySM80::IMMA_88
-                | RegLatencySM80::MMA_1x_collect
-                | RegLatencySM80::MMA_2x_collect
-                | RegLatencySM80::DMMA
-                | RegLatencySM80::Cbu
-                | RegLatencySM80::Decoupled
-                | RegLatencySM80::DecoupledAgu => true,
-                _ => false,
-            }
+                    | RegLatencySM80::Clmad
+                    | RegLatencySM80::IMMA_88
+                    | RegLatencySM80::MMA_1x_collect
+                    | RegLatencySM80::MMA_2x_collect
+                    | RegLatencySM80::DMMA
+                    | RegLatencySM80::Cbu
+                    | RegLatencySM80::Decoupled
+                    | RegLatencySM80::DecoupledAgu
+            )
         }
     }
 
@@ -1458,10 +1480,8 @@ impl SM80Latency {
         read: Option<&Op>,
         src_idx: usize,
     ) -> u32 {
-        let dst_file = match &write.dsts_as_slice()[dst_idx] {
-            Dst::None => return 0,
-            Dst::SSA(vec) => vec.file(),
-            Dst::Reg(reg) => reg.file(),
+        let Some(dst_file) = write.dsts_as_slice()[dst_idx].file() else {
+            return 0;
         };
 
         match dst_file {
@@ -1515,10 +1535,8 @@ impl SM80Latency {
     }
 
     pub fn war(read: &Op, src_idx: usize, write: &Op, dst_idx: usize) -> u32 {
-        let dst_file = match &write.dsts_as_slice()[dst_idx] {
-            Dst::None => return 0,
-            Dst::SSA(vec) => vec.file(),
-            Dst::Reg(reg) => reg.file(),
+        let Some(dst_file) = write.dsts_as_slice()[dst_idx].file() else {
+            return 0;
         };
 
         match dst_file {
@@ -1567,10 +1585,8 @@ impl SM80Latency {
         b_dst_idx: usize,
         a_op_pred: bool,
     ) -> u32 {
-        let dst_file = match &a.dsts_as_slice()[a_dst_idx] {
-            Dst::None => return 0,
-            Dst::SSA(vec) => vec.file(),
-            Dst::Reg(reg) => reg.file(),
+        let Some(dst_file) = a.dsts_as_slice()[a_dst_idx].file() else {
+            return 0;
         };
 
         match dst_file {

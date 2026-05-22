@@ -360,7 +360,6 @@ static enum vpe_status populate_bg_stream(struct vpe_priv *vpe_priv, const struc
 
     if (param->dst_surface.plane_size.surface_size.width < VPE_MIN_VIEWPORT_SIZE ||
         param->dst_surface.plane_size.surface_size.height < VPE_MIN_VIEWPORT_SIZE ||
-        param->dst_surface.plane_size.surface_pitch < 256 / 4 || // 256bytes, 4bpp
         param->target_rect.width < VPE_MIN_VIEWPORT_SIZE ||
         param->target_rect.height < VPE_MIN_VIEWPORT_SIZE) {
         return VPE_STATUS_ERROR;
@@ -370,26 +369,16 @@ static enum vpe_status populate_bg_stream(struct vpe_priv *vpe_priv, const struc
     surface_info                      = &stream->surface_info;
     scaling_info                      = &stream->scaling_info;
     polyphaseCoeffs                   = &stream->polyphase_scaling_coeffs;
-    surface_info->address.type        = param->dst_surface.address.type;
-    surface_info->address.tmz_surface = param->dst_surface.address.tmz_surface;
-    surface_info->address.grph.addr.quad_part =
-        param->dst_surface.address.grph.addr.quad_part;
 
-    surface_info->swizzle                   = param->dst_surface.swizzle; // treat it as linear for simple
+    memcpy(surface_info, &param->dst_surface, sizeof(struct vpe_surface_info));
+
     surface_info->plane_size.surface_size.x = 0;
     surface_info->plane_size.surface_size.y = 0;
-    // min width & height in pixels
     surface_info->plane_size.surface_size.width     = VPE_MIN_VIEWPORT_SIZE;
     surface_info->plane_size.surface_size.height    = VPE_MIN_VIEWPORT_SIZE;
-    surface_info->plane_size.surface_pitch          = param->dst_surface.plane_size.surface_pitch;
-    surface_info->plane_size.surface_aligned_height = param->dst_surface.plane_size.surface_aligned_height;
     surface_info->dcc.enable                        = false;
-    surface_info->format                            = param->dst_surface.format;
-    surface_info->cs.encoding                       = param->dst_surface.cs.encoding;
-    surface_info->cs.range                          = param->dst_surface.cs.range;
-    surface_info->cs.tf                             = param->dst_surface.cs.tf;
-    surface_info->cs.cositing                       = param->dst_surface.cs.cositing;
-    surface_info->cs.primaries                      = param->dst_surface.cs.primaries;
+
+    // min width & height in pixels
     scaling_info->src_rect.x                        = 0;
     scaling_info->src_rect.y                        = 0;
     scaling_info->src_rect.width                    = VPE_MIN_VIEWPORT_SIZE;
@@ -510,27 +499,6 @@ static enum vpe_status populate_virtual_streams(struct vpe_priv* vpe_priv, const
     return result;
 }
 
-static enum vpe_status check_blending_support(
-    struct vpe_priv *vpe_priv, const struct vpe_build_param *param)
-{
-    enum vpe_status result = VPE_STATUS_OK;
-    uint32_t        i;
-
-    for (i = 0; i < vpe_priv->num_input_streams; i++) {
-        /* if top-bottom blending is not supported,
-         * the 1st stream still can support blending with background,
-         * however, the 2nd stream and onward can not enable blending.
-         */
-        if (i && param->streams[i].blend_info.blending &&
-            !vpe_priv->pub.caps->color_caps.mpc.top_bottom_blending) {
-            result = VPE_STATUS_ALPHA_BLENDING_NOT_SUPPORTED;
-            break;
-        }
-    }
-
-    return result;
-}
-
 enum vpe_status vpe_check_support(
     struct vpe *vpe, const struct vpe_build_param *param, struct vpe_bufs_req *req)
 {
@@ -585,7 +553,7 @@ enum vpe_status vpe_check_support(
     }
 
 
-    if (status == VPE_STATUS_OK) {  
+    if (status == VPE_STATUS_OK) {
         // output checking - check per asic support
         status = vpe_check_output_support(vpe, param);
         if (status != VPE_STATUS_OK) {
@@ -601,17 +569,19 @@ enum vpe_status vpe_check_support(
                 vpe_log("fail input support check. status %d\n", (int)status);
                 break;
             }
-        }
-    }
-
-    if (status == VPE_STATUS_OK) {
-        // input checking - check tone map support
-        for (i = 0; i < param->num_streams; i++) {
+            // input checking - check tone map support
             status = vpe_check_tone_map_support(vpe, &param->streams[i], param);
             if (status != VPE_STATUS_OK) {
                 vpe_log("fail tone map support check. status %d\n", (int)status);
                 break;
             }
+            // blending support check
+            status = vpe_check_blending_support(vpe, &param->streams[i], i);
+            if (status != VPE_STATUS_OK) {
+                vpe_log("fail blending support check. status %d\n", (int)status);
+                break;
+            }
+
         }
     }
 
@@ -630,13 +600,6 @@ enum vpe_status vpe_check_support(
         output_ctx->clamping_params = vpe_priv->init.debug.clamping_params;
     }
 
-
-    if (status == VPE_STATUS_OK) {
-        // blending support check
-        status = check_blending_support(vpe_priv, param);
-        if (status != VPE_STATUS_OK)
-            vpe_log("fail input stream population. status %d\n", (int)status);
-    }
 
     if (status == VPE_STATUS_OK) {
         status = populate_input_streams(vpe_priv, param, vpe_priv->stream_ctx);
@@ -737,7 +700,9 @@ enum vpe_status vpe_build_commands(
     vpe_priv->config_writer.reused_config_count = 0;
 #endif
     if (!vpe_priv->ops_support) {
-        VPE_ASSERT(vpe_priv->ops_support);
+        if (vpe_priv->init.debug.assert_when_not_support) {
+            VPE_ASSERT(vpe_priv->ops_support);
+        }
         status = VPE_STATUS_NOT_SUPPORTED;
     }
 
@@ -748,8 +713,6 @@ enum vpe_status vpe_build_commands(
     }
 
     if (status == VPE_STATUS_OK) {
-        vpe_geometric_scaling_feature_skip(vpe_priv, param);
-
         if (bufs->cmd_buf.size == 0 || bufs->emb_buf.size == 0) {
             /* Here we directly return without setting ops_support to false
              *  becaues the supported check is already passed
@@ -763,6 +726,8 @@ enum vpe_status vpe_build_commands(
                    (bufs->emb_buf.size < vpe_priv->bufs_required.emb_buf_size)) {
             status = VPE_STATUS_INVALID_BUFFER_SIZE;
         }
+
+        vpe_geometric_scaling_feature_skip(vpe_priv, param);
     }
 
     builder = &vpe_priv->resource.cmd_builder;
@@ -898,16 +863,6 @@ enum vpe_status vpe_build_commands(
         }
     }
 
-    if (status == VPE_STATUS_OK) {
-        bufs->cmd_buf.size   = cmd_buf_size - curr_bufs.cmd_buf.size; // used cmd buffer size
-        bufs->cmd_buf.gpu_va = cmd_buf_gpu_a;
-        bufs->cmd_buf.cpu_va = cmd_buf_cpu_a;
-
-        bufs->emb_buf.size   = emb_buf_size - curr_bufs.emb_buf.size; // used emb buffer size
-        bufs->emb_buf.gpu_va = emb_buf_gpu_a;
-        bufs->emb_buf.cpu_va = emb_buf_cpu_a;
-    }
-
     if (status == VPE_STATUS_OK && param->predication_info.enable == true) {
         status = vpe_build_set_predication(bufs->cmd_buf.cpu_va, param->predication_info.polarity,
             param->predication_info.gpu_va,
@@ -917,6 +872,16 @@ enum vpe_status vpe_build_commands(
         if (status != VPE_STATUS_OK) {
             vpe_log("failed in building vpe predication cmd %d\n", (int)status);
         }
+    }
+
+    if (status == VPE_STATUS_OK) {
+        bufs->cmd_buf.size   = cmd_buf_size - curr_bufs.cmd_buf.size; // used cmd buffer size
+        bufs->cmd_buf.gpu_va = cmd_buf_gpu_a;
+        bufs->cmd_buf.cpu_va = cmd_buf_cpu_a;
+
+        bufs->emb_buf.size   = emb_buf_size - curr_bufs.emb_buf.size; // used emb buffer size
+        bufs->emb_buf.gpu_va = emb_buf_gpu_a;
+        bufs->emb_buf.cpu_va = emb_buf_cpu_a;
     }
 
     vpe_priv->ops_support = false;
@@ -1011,7 +976,7 @@ enum vpe_status vpe_build_resolve_query(
     return result;
 }
 
-const struct vpe_engine *vpe_create_engine(struct vpe_init_data *params)
+struct vpe_engine *vpe_create_engine(struct vpe_init_data *params)
 {
     struct vpe_engine_priv *engine_priv;
     struct vpe_engine      *engine_handle;

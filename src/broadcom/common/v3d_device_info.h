@@ -70,8 +70,8 @@ struct v3d_device_info {
          */
         uint32_t cle_readahead;
 
-        /** Minimum size for a buffer storing the Control List Executor (CLE) */
-        uint32_t cle_buffer_min_size;
+        /** OS page size. It's the minimum allocation size for a v3d buffer. */
+        uint32_t page_size;
 };
 
 /* TFU has a 64-bytes readhead. To avoid the unit reading unmaped memory

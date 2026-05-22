@@ -51,7 +51,7 @@ _mesa_Hint( GLenum target, GLenum mode )
 
    switch (target) {
       case GL_FOG_HINT:
-         if (ctx->API != API_OPENGL_COMPAT && ctx->API != API_OPENGLES)
+         if (!_mesa_is_desktop_gl_compat(ctx) && !_mesa_is_gles1(ctx))
             goto invalid_target;
          if (ctx->Hint.Fog == mode)
 	    return;
@@ -59,7 +59,7 @@ _mesa_Hint( GLenum target, GLenum mode )
          ctx->Hint.Fog = mode;
          break;
       case GL_LINE_SMOOTH_HINT:
-         if (!_mesa_is_desktop_gl(ctx) && ctx->API != API_OPENGLES)
+         if (!_mesa_is_desktop_gl(ctx) && !_mesa_is_gles1(ctx))
             goto invalid_target;
          if (ctx->Hint.LineSmooth == mode)
 	    return;
@@ -67,7 +67,7 @@ _mesa_Hint( GLenum target, GLenum mode )
          ctx->Hint.LineSmooth = mode;
          break;
       case GL_PERSPECTIVE_CORRECTION_HINT:
-         if (ctx->API != API_OPENGL_COMPAT && ctx->API != API_OPENGLES)
+         if (!_mesa_is_desktop_gl_compat(ctx) && !_mesa_is_gles1(ctx))
             goto invalid_target;
          if (ctx->Hint.PerspectiveCorrection == mode)
 	    return;
@@ -75,7 +75,7 @@ _mesa_Hint( GLenum target, GLenum mode )
          ctx->Hint.PerspectiveCorrection = mode;
          break;
       case GL_POINT_SMOOTH_HINT:
-         if (ctx->API != API_OPENGL_COMPAT && ctx->API != API_OPENGLES)
+         if (!_mesa_is_desktop_gl_compat(ctx) && !_mesa_is_gles1(ctx))
             goto invalid_target;
          if (ctx->Hint.PointSmooth == mode)
 	    return;

@@ -354,6 +354,9 @@ init_texture(struct d3d12_screen *screen,
             D3D12_HEAP_FLAG_CREATE_NOT_RESIDENT : D3D12_HEAP_FLAG_NONE;
          init_residency = screen->support_create_not_resident ? d3d12_evicted : d3d12_resident;
 
+         if (templ->bind & PIPE_BIND_SHARED)
+            heap_flags |= D3D12_HEAP_FLAG_SHARED;
+
          hres = screen->dev10->CreateCommittedResource3(&heap_pris,
                                                         heap_flags,
                                                         &desc1,
@@ -381,6 +384,9 @@ init_texture(struct d3d12_screen *screen,
          D3D12_HEAP_FLAGS heap_flags = screen->support_create_not_resident ?
             D3D12_HEAP_FLAG_CREATE_NOT_RESIDENT : D3D12_HEAP_FLAG_NONE;
          init_residency = screen->support_create_not_resident ? d3d12_evicted : d3d12_resident;
+
+         if (templ->bind & PIPE_BIND_SHARED)
+            heap_flags |= D3D12_HEAP_FLAG_SHARED;
 
          hres = screen->dev->CreateCommittedResource(&heap_pris,
                                                      heap_flags,
@@ -507,7 +513,8 @@ d3d12_resource_create_or_place(struct d3d12_screen *screen,
    init_valid_range(res);
    threaded_resource_init(&res->base.b,
       templ->usage == PIPE_USAGE_DEFAULT &&
-      templ->target == PIPE_BUFFER);
+      templ->target == PIPE_BUFFER &&
+      templ->width0 < 0x1000);
 
    memset(&res->bind_counts, 0, sizeof(d3d12_resource::bind_counts));
 
@@ -598,11 +605,18 @@ d3d12_resource_from_handle(struct pipe_screen *pscreen,
    if (res->bo) {
       d3d12_res = res->bo->res;
    } else if (handle->type == WINSYS_HANDLE_TYPE_D3D12_RES) {
+#ifdef _GAMING_XBOX
       if (handle->modifier == 1) {
          d3d12_heap = (ID3D12Heap *) handle->com_obj;
       } else {
          d3d12_res = (ID3D12Resource *) handle->com_obj;
       }
+#else
+      IUnknown *obj = (IUnknown *) handle->com_obj;
+      (void)obj->QueryInterface(&d3d12_res);
+      (void)obj->QueryInterface(&d3d12_heap);
+      obj->Release();
+#endif
    } else {
       screen->dev->OpenSharedHandle(d3d_handle, IID_PPV_ARGS(&d3d12_res));
    }
@@ -1064,12 +1078,17 @@ d3d12_memobj_create_from_handle(struct pipe_screen *pscreen, struct winsys_handl
    }
    memobj->base.dedicated = dedicated;
 
+#ifdef _GAMING_XBOX
    obj->AddRef();
    if (handle->modifier == 1) {
       memobj->heap = (ID3D12Heap *) obj;
    } else {
       memobj->res = (ID3D12Resource *) obj;
    }
+#else
+   (void)obj->QueryInterface(&memobj->heap);
+   (void)obj->QueryInterface(&memobj->res);
+#endif
 
    obj->Release();
    if (!memobj->res && !memobj->heap) {
@@ -1117,7 +1136,9 @@ d3d12_resource_from_memobj(struct pipe_screen *pscreen,
 
    whandle.offset = static_cast<unsigned int>(offset);
    whandle.format = templ->format;
+#ifdef _GAMING_XBOX
    whandle.modifier = memobj->res ? 0 : 1;
+#endif
 
    // WINSYS_HANDLE_TYPE_D3D12_RES implies taking ownership of the reference
    ((IUnknown *)whandle.com_obj)->AddRef();
@@ -1193,11 +1214,11 @@ fill_buffer_location(struct d3d12_context *ctx,
       buf_loc.PlacedFootprint.Footprint.Height = res->base.b.height0;
       buf_loc.PlacedFootprint.Footprint.Depth = res->base.b.depth0;
    } else {
-      buf_loc.PlacedFootprint.Footprint.Width = ALIGN(trans->base.b.box.width,
+      buf_loc.PlacedFootprint.Footprint.Width = align(trans->base.b.box.width,
                                                       util_format_get_blockwidth(res->base.b.format));
-      buf_loc.PlacedFootprint.Footprint.Height = ALIGN(trans->base.b.box.height,
+      buf_loc.PlacedFootprint.Footprint.Height = align(trans->base.b.box.height,
                                                        util_format_get_blockheight(res->base.b.format));
-      buf_loc.PlacedFootprint.Footprint.Depth = ALIGN(depth,
+      buf_loc.PlacedFootprint.Footprint.Depth = align(depth,
                                                       util_format_get_blockdepth(res->base.b.format));
    }
 

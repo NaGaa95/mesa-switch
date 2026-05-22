@@ -26,7 +26,7 @@
 #include "nir_clc_helpers.h"
 #include "nir_serialize.h"
 #include "nir_spirv.h"
-#include "util/mesa-sha1.h"
+#include "util/mesa-blake3.h"
 
 #ifdef DYNAMIC_LIBCLC_PATH
 #include <fcntl.h>
@@ -88,7 +88,7 @@ get_libclc_file(unsigned ptr_bit_size)
 struct clc_data {
    const struct clc_file *file;
 
-   unsigned char cache_key[20];
+   unsigned char cache_key[BLAKE3_KEY_LEN];
 
    int fd;
    const void *data;
@@ -122,15 +122,15 @@ open_clc_data(struct clc_data *clc, unsigned ptr_bit_size)
          return false;
       }
 
-      struct mesa_sha1 ctx;
-      _mesa_sha1_init(&ctx);
-      _mesa_sha1_update(&ctx, clc->file->sys_path, strlen(clc->file->sys_path));
+      blake3_hasher ctx;
+      _mesa_blake3_init(&ctx);
+      _mesa_blake3_update(&ctx, clc->file->sys_path, strlen(clc->file->sys_path));
 #if defined(__APPLE__) || defined(__MACOSX)
-      _mesa_sha1_update(&ctx, &stat.st_mtime, sizeof(stat.st_mtime));
+      _mesa_blake3_update(&ctx, &stat.st_mtime, sizeof(stat.st_mtime));
 #else
-      _mesa_sha1_update(&ctx, &stat.st_mtim, sizeof(stat.st_mtim));
+      _mesa_blake3_update(&ctx, &stat.st_mtim, sizeof(stat.st_mtim));
 #endif
-      _mesa_sha1_final(&ctx, clc->cache_key);
+      _mesa_blake3_final(&ctx, clc->cache_key);
 
       clc->fd = fd;
 
@@ -321,7 +321,7 @@ libclc_add_generic_variants(nir_shader *shader)
 static bool
 mark_exact(nir_builder *b, nir_alu_instr *alu, UNUSED void *_)
 {
-   alu->exact = true;
+   alu->fp_math_ctrl |= nir_op_valid_fp_math_ctrl(alu->op, nir_fp_exact);
    return true;
 }
 
@@ -404,7 +404,7 @@ nir_load_libclc_shader(unsigned ptr_bit_size,
          NIR_PASS(progress, nir, nir_opt_copy_prop_vars);
          NIR_PASS(progress, nir, nir_lower_var_copies);
          NIR_PASS(progress, nir, nir_lower_vars_to_ssa);
-         NIR_PASS(progress, nir, nir_copy_prop);
+         NIR_PASS(progress, nir, nir_opt_copy_prop);
          NIR_PASS(progress, nir, nir_opt_remove_phis);
          NIR_PASS(progress, nir, nir_opt_dce);
          NIR_PASS(progress, nir, nir_opt_if, false);

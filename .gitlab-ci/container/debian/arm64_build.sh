@@ -69,6 +69,7 @@ DEPS=(
     libxshmfence-dev
     libxtensor-dev
     libxxf86vm-dev
+    libwayland-bin
     libwayland-dev
     libwayland-egl-backend-dev
     "llvm-${LLVM_VERSION}-dev"
@@ -84,6 +85,7 @@ DEPS=(
     python3-venv
     shellcheck
     u-boot-tools
+    wayland-protocols
     xz-utils
     yamllint
     zlib1g-dev
@@ -108,8 +110,6 @@ arch=armhf
 . .gitlab-ci/container/container_pre_build.sh
 
 . .gitlab-ci/container/build-mold.sh
-
-. .gitlab-ci/container/build-wayland.sh
 
 . .gitlab-ci/container/build-llvm-spirv.sh
 

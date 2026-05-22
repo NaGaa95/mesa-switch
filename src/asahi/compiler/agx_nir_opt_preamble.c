@@ -16,13 +16,10 @@
 static nir_preamble_class
 preamble_class(nir_def *def)
 {
-   nir_instr *instr = def->parent_instr;
-   if (instr->type != nir_instr_type_intrinsic)
+   nir_intrinsic_instr *intr = nir_def_as_intrinsic_or_null(def);
+   if (!intr || (nir_intrinsic_has_desc_set(intr) &&
+                 nir_intrinsic_desc_set(intr) >= 32 /* encoding restriction */))
       return nir_preamble_class_general;
-
-   nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
-   if (nir_intrinsic_has_desc_set(intr) && nir_intrinsic_desc_set(intr) >= 32)
-      return nir_preamble_class_general /* encoding restriction */;
 
    if (intr->intrinsic == nir_intrinsic_bindless_image_agx)
       return nir_preamble_class_image;
@@ -199,8 +196,6 @@ alu_cost(nir_alu_instr *alu)
    case nir_op_fneg:
    case nir_op_fabs:
    case nir_op_f2f32:
-   case nir_op_unpack_half_2x16_split_x:
-   case nir_op_unpack_half_2x16_split_y:
       /* Float source modifiers will be propagated */
       return all_uses_float(&alu->def) ? 0.0 : 1.0;
 
@@ -405,7 +400,7 @@ lower_preamble(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 
          if (ts) {
             nir_rewrite_image_intrinsic(pintr, nir_imm_intN_t(b, base / 2, 16),
-                                        false);
+                                        nir_image_intrinsic_type_default);
          } else if (new_ != NULL &&
                     pintr->intrinsic != nir_intrinsic_bindless_image_agx) {
             nir_src_rewrite(use, new_);

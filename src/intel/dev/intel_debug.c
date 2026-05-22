@@ -34,6 +34,7 @@
 #include <string.h>
 
 #include "dev/intel_debug.h"
+#include "dev/intel_device_info.h"
 #include "util/macros.h"
 #include "util/u_debug.h"
 #include "util/u_math.h"
@@ -75,6 +76,7 @@ static const struct debug_control_bitset debug_control[] = {
    OPT1("ann",               DEBUG_ANNOTATION),
    OPT1("no8",               DEBUG_NO8),
    OPT1("no-oaconfig",       DEBUG_NO_OACONFIG),
+   OPT1("no-fill-opt",       DEBUG_NO_FILL_OPT),
    OPT1("spill_fs",          DEBUG_SPILL_FS),
    OPT1("spill_vec4",        DEBUG_SPILL_VEC4),
    OPT1("cs",                DEBUG_CS),
@@ -88,6 +90,7 @@ static const struct debug_control_bitset debug_control[] = {
    OPT1("do32",              DEBUG_DO32),
    OPT1("norbc",             DEBUG_NO_CCS),
    OPT1("noccs",             DEBUG_NO_CCS),
+   OPT1("noccs-modifier",    DEBUG_NO_CCS_MODIFIER),
    OPT1("nohiz",             DEBUG_NO_HIZ),
    OPT1("color",             DEBUG_COLOR),
    OPT1("reemit",            DEBUG_REEMIT),
@@ -109,6 +112,7 @@ static const struct debug_control_bitset debug_control[] = {
    OPT1("task",              DEBUG_TASK),
    OPT1("mesh",              DEBUG_MESH),
    OPT1("stall",             DEBUG_STALL),
+   OPT1("no-resource-barrier", DEBUG_NO_RESOURCE_BARRIER),
    OPT1("capture-all",       DEBUG_CAPTURE_ALL),
    OPT1("perf-symbol-names", DEBUG_PERF_SYMBOL_NAMES),
    OPT1("swsb-stall",        DEBUG_SWSB_STALL),
@@ -124,7 +128,6 @@ static const struct debug_control_bitset debug_control[] = {
    OPT1("no-send-gather",    DEBUG_NO_SEND_GATHER),
    OPT1("no-vrt",            DEBUG_NO_VRT),
    OPT1("shaders-lineno",    DEBUG_SHADERS_LINENO),
-   OPT1("show_shader_stage", DEBUG_SHOW_SHADER_STAGE),
    { NULL, }
 #undef OPT1
 #undef OPT2
@@ -300,6 +303,31 @@ process_intel_debug_variable_once(void)
    BITSET_CLEAR(intel_debug, DEBUG_NO32);
 }
 
+static const struct debug_named_value use_jay_options[] = {
+   { "vs", BITFIELD_BIT(MESA_SHADER_VERTEX),   "Use jay for vertex shaders"   },
+   { "fs", BITFIELD_BIT(MESA_SHADER_FRAGMENT), "Use jay for fragment shaders" },
+   { "cs", BITFIELD_BIT(MESA_SHADER_COMPUTE),  "Use jay for compute shaders"  },
+   DEBUG_NAMED_VALUE_END
+};
+
+DEBUG_GET_ONCE_FLAGS_OPTION(use_jay, "INTEL_JAY", use_jay_options, 0);
+static int use_jay = 0;
+
+bool
+intel_use_jay(const struct intel_device_info *devinfo, mesa_shader_stage stage)
+{
+   if (stage == MESA_SHADER_KERNEL)
+      stage = MESA_SHADER_COMPUTE;
+
+   return devinfo->ver == 20 && (use_jay & BITFIELD_BIT(stage));
+}
+
+bool
+intel_use_jay_any_stage(const struct intel_device_info *devinfo)
+{
+   return devinfo->ver == 20 && use_jay;
+}
+
 void
 process_intel_debug_variable(void)
 {
@@ -307,4 +335,12 @@ process_intel_debug_variable(void)
 
    call_once(&process_intel_debug_variable_flag,
              process_intel_debug_variable_once);
+
+   /* Jay is under heavy development and is not considered released. It is
+    * available in upstream Mesa for developers to hack on but is not part of
+    * the 26.1 release. This comment acts like a chicken bit to fuse off the
+    * compiler while minimizing conflicts with backports (which is why we don't
+    * remove Jay wholesale from the release).
+    */
+   // use_jay = debug_get_option_use_jay();
 }

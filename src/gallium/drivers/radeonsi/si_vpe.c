@@ -373,6 +373,22 @@ si_vpe_maps_vpe_to_gm_transfer_function(const enum vpe_transfer_function vpe_tf)
    }
 }
 
+static enum ToneMapColorPrimaries
+si_vpe_mpes_vpe_to_gm_primary(enum vpe_color_primaries vpe_pri)
+{
+   switch (vpe_pri) {
+   case VPE_PRIMARIES_BT601:
+      return TMG_CP_BT601;
+   case VPE_PRIMARIES_BT709:
+      return TMG_CP_BT709;
+   case VPE_PRIMARIES_BT2020:
+      return TMG_CP_BT2020;
+   default:
+      SIVPE_PRINT("[FIXIT] No GMLIB Primary mapped\n");
+      return TMG_CP_BT709;
+   }
+}
+
 static void
 si_vpe_load_default_primaries(struct vpe_hdr_metadata* vpe_hdr, enum vpe_color_primaries primaries)
 {
@@ -477,7 +493,8 @@ si_vpe_set_plane_info(struct vpe_video_processor *vpeproc,
                       const struct pipe_vpp_desc *process_properties,
                       struct pipe_surface *surfaces,
                       int which_surface,
-                      struct vpe_surface_info *surface_info)
+                      struct vpe_surface_info *surface_info,
+                      bool is_geometric_scaling_round)
 {
    struct vpe_plane_address *plane_address = &surface_info->address;
    struct vpe_plane_size *plane_size = &surface_info->plane_size;
@@ -485,9 +502,16 @@ si_vpe_set_plane_info(struct vpe_video_processor *vpeproc,
    struct si_texture *si_tex_1;
    enum pipe_format format;
 
-   if (which_surface == USE_SRC_SURFACE)
-      format = vpeproc->src_buffer->buffer_format;
-   else
+   /* When is_geometric_scaling_round is true,
+    * means that we are handling the 2nd-final rounds of geometric scaling.
+    * the fromat of source frame should be set to format of dst_buffer.
+    */
+   if (which_surface == USE_SRC_SURFACE) {
+      if (is_geometric_scaling_round)
+         format = vpeproc->dst_buffer->buffer_format;
+      else
+         format = vpeproc->src_buffer->buffer_format;
+   } else
       format = vpeproc->dst_buffer->buffer_format;
 
    /* Trusted memory not supported now */
@@ -509,7 +533,7 @@ si_vpe_set_plane_info(struct vpe_video_processor *vpeproc,
       return VPE_STATUS_NOT_SUPPORTED;
 
    /* 1st plane ret setting */
-   uint16_t width, height;
+   unsigned width, height;
    pipe_surface_size(&surfaces[0], &width, &height);
    plane_size->surface_size.x         = 0;
    plane_size->surface_size.y         = 0;
@@ -540,12 +564,13 @@ si_vpe_set_surface_info(struct vpe_video_processor *vpeproc,
                         const struct pipe_vpp_desc *process_properties,
                         struct pipe_surface *surfaces,
                         int which_surface,
-                        struct vpe_surface_info *surface_info)
+                        struct vpe_surface_info *surface_info,
+                        bool is_geometric_scaling_round)
 {
    assert(surface_info);
 
    /* Set up surface pitch, plane address, color space */
-   if (VPE_STATUS_OK != si_vpe_set_plane_info(vpeproc, process_properties, surfaces, which_surface, surface_info))
+   if (VPE_STATUS_OK != si_vpe_set_plane_info(vpeproc, process_properties, surfaces, which_surface, surface_info, is_geometric_scaling_round))
       return VPE_STATUS_NOT_SUPPORTED;
 
    struct si_texture *tex = (struct si_texture *)surfaces[0].texture;
@@ -657,7 +682,8 @@ si_vpe_init_polyphase_filter(struct vpe_video_processor *vpeproc,
 static void
 si_vpe_set_stream_in_param(struct vpe_video_processor *vpeproc,
                            const struct pipe_vpp_desc *process_properties,
-                           struct vpe_stream *stream)
+                           struct vpe_stream *stream,
+                           bool is_geometric_scaling_round)
 {
    struct vpe *vpe_handle = vpeproc->vpe_handle;
    struct vpe_scaling_info *scaling_info = &stream->scaling_info;
@@ -733,7 +759,7 @@ si_vpe_set_stream_in_param(struct vpe_video_processor *vpeproc,
    stream->upper_luma_bound        = 0.5;
 
    stream->flags.reserved          = 0;
-   stream->flags.geometric_scaling = 0;
+   stream->flags.geometric_scaling = is_geometric_scaling_round;
    stream->flags.hdr_metadata      = 0;
 
    /* TO-DO: support HDR10 Metadata */
@@ -783,9 +809,10 @@ si_vpe_set_stream_out_param(struct vpe_video_processor *vpeproc,
 }
 
 static inline int
-si_vpe_is_tonemappingstream(enum vpe_transfer_function tf)
+si_vpe_is_tonemappingstream(enum vpe_transfer_function tf, unsigned int in_lum, unsigned int out_lum)
 {
-   return (tf == VPE_TF_HLG || tf == VPE_TF_G10 || tf == VPE_TF_PQ);
+   return ((tf == VPE_TF_HLG) ||
+          ((tf == VPE_TF_G10 || tf == VPE_TF_PQ) && (in_lum > out_lum)));
 }
 
 static void
@@ -793,11 +820,16 @@ si_vpe_set_tonemap(struct vpe_video_processor *vpeproc,
                    const struct pipe_vpp_desc *process_properties,
                    struct vpe_build_param *build_param)
 {
-   if (!debug_get_bool_option("AMDGPU_SIVPE_HDR_TONEMAPPING", false))
+   if (!debug_get_bool_option("AMDGPU_SIVPE_HDR_TONEMAPPING", true))
       return;
 
    /* Check if source is tone mapping stream */
-   if (si_vpe_is_tonemappingstream(build_param->streams[0].surface_info.cs.tf)) {
+   if (si_vpe_is_tonemappingstream(
+               build_param->streams[0].surface_info.cs.tf,
+               build_param->streams[0].hdr_metadata.max_mastering,
+               build_param->hdr_metadata.max_mastering)) {
+
+      SIVPE_DBG(vpeproc->log_level, "Handling Tone mapping stream...\n");
 
       if (!vpeproc->gm_handle) {
          vpeproc->gm_handle = tm_create();
@@ -849,6 +881,7 @@ si_vpe_set_tonemap(struct vpe_video_processor *vpeproc,
          tm_par.dstMetaData.maxContentLightLevel         = build_param->hdr_metadata.max_content;
          tm_par.dstMetaData.maxFrameAverageLightLevel    = build_param->hdr_metadata.avg_content;
          tm_par.outputContainerGamma                     = si_vpe_maps_vpe_to_gm_transfer_function(build_param->dst_surface.cs.tf);
+         tm_par.outputContainerPrimaries                 = si_vpe_mpes_vpe_to_gm_primary(build_param->dst_surface.cs.primaries);
 
          /* If the tone mapping of source is changed during playback, it must be recalculated.
           * Now assume that the tone mapping is fixed.
@@ -863,18 +896,20 @@ si_vpe_set_tonemap(struct vpe_video_processor *vpeproc,
       build_param->streams[0].flags.hdr_metadata             = 1;
       build_param->streams[0].tm_params.enable_3dlut         = 1;
       build_param->streams[0].tm_params.UID                  = 1;
+      SIVPE_DBG(vpeproc->log_level, "Enable Tone mapping 3DLut\n");
    } else {
       build_param->streams[0].flags.hdr_metadata             = 0;
       build_param->streams[0].tm_params.enable_3dlut         = 0;
       build_param->streams[0].tm_params.UID                  = 0;
+      SIVPE_DBG(vpeproc->log_level, "Disable Tone mapping 3DLut\n");
    }
    build_param->streams[0].tm_params.lut_data                = vpeproc->lut_data;
    build_param->streams[0].tm_params.lut_dim                 = VPE_LUT_DIM;
    build_param->streams[0].tm_params.input_pq_norm_factor    = 0;
+   build_param->streams[0].tm_params.shaper_tf               = build_param->streams[0].surface_info.cs.tf;
    build_param->streams[0].tm_params.lut_in_gamut            = build_param->streams[0].surface_info.cs.primaries;
+   build_param->streams[0].tm_params.lut_out_tf              = build_param->dst_surface.cs.tf;
    build_param->streams[0].tm_params.lut_out_gamut           = build_param->dst_surface.cs.primaries;
-   build_param->streams[0].tm_params.lut_out_tf              = build_param->streams[0].surface_info.cs.tf;
-   build_param->streams[0].tm_params.shaper_tf               = build_param->dst_surface.cs.tf;
 }
 
 static void
@@ -897,14 +932,13 @@ si_vpe_processor_destroy(struct pipe_video_codec *codec)
 
    if (vpeproc->emb_buffers) {
       for (i = 0; i < vpeproc->bufs_num; i++)
-         if (vpeproc->emb_buffers[i].res)
-            si_vid_destroy_buffer(&vpeproc->emb_buffers[i]);
+         si_resource_reference(&vpeproc->emb_buffers[i], NULL);
       FREE(vpeproc->emb_buffers);
    }
 
    if (vpeproc->gm_handle)
       tm_destroy(&vpeproc->gm_handle);
-   
+
    FREE(vpeproc->lut_data);
 
    FREE(vpeproc->geometric_scaling_ratios);
@@ -1042,7 +1076,8 @@ static enum vpe_status
 si_vpe_processor_check_and_build_settins(struct vpe_video_processor *vpeproc,
                                          const struct pipe_vpp_desc *process_properties,
                                          struct pipe_surface *src_surfaces,
-                                         struct pipe_surface *dst_surfaces)
+                                         struct pipe_surface *dst_surfaces,
+                                         bool is_geometric_scaling_round)
 {
    enum vpe_status result = VPE_STATUS_OK;
    struct vpe *vpe_handle = vpeproc->vpe_handle;
@@ -1061,7 +1096,8 @@ si_vpe_processor_check_and_build_settins(struct vpe_video_processor *vpeproc,
                                     process_properties,
                                     src_surfaces,
                                     USE_SRC_SURFACE,
-                                    &build_param->streams[0].surface_info);
+                                    &build_param->streams[0].surface_info,
+                                    is_geometric_scaling_round);
    if (VPE_STATUS_OK != result) {
       SIVPE_WARN(vpeproc->log_level, "Set Src surface failed with result: %d\n", result);
       return result;
@@ -1071,14 +1107,16 @@ si_vpe_processor_check_and_build_settins(struct vpe_video_processor *vpeproc,
    si_vpe_set_stream_in_param(
                vpeproc,
                process_properties,
-               &build_param->streams[0]);
+               &build_param->streams[0],
+               is_geometric_scaling_round);
 
    /* Init output surface setting */
    result = si_vpe_set_surface_info(vpeproc,
                                     process_properties,
                                     dst_surfaces,
                                     USE_DST_SURFACE,
-                                    &build_param->dst_surface);
+                                    &build_param->dst_surface,
+                                    is_geometric_scaling_round);
    if (VPE_STATUS_OK != result) {
       SIVPE_WARN(vpeproc->log_level, "Set Dst surface failed with result: %d\n", result);
       return result;
@@ -1126,13 +1164,14 @@ static enum vpe_status
 si_vpe_construct_blt(struct vpe_video_processor *vpeproc,
                      const struct pipe_vpp_desc *process_properties,
                      struct pipe_surface *src_surfaces,
-                     struct pipe_surface *dst_surfaces)
+                     struct pipe_surface *dst_surfaces,
+                     bool is_geometric_scaling_round)
 {
    enum vpe_status result = VPE_STATUS_OK;
    struct vpe *vpe_handle = vpeproc->vpe_handle;
    struct vpe_build_param *build_param = vpeproc->vpe_build_param;
    struct vpe_build_bufs *build_bufs = vpeproc->vpe_build_bufs;
-   struct rvid_buffer *emb_buf;
+   struct si_resource *emb_buf;
    uint64_t *vpe_ptr;
 
    assert(process_properties);
@@ -1142,7 +1181,7 @@ si_vpe_construct_blt(struct vpe_video_processor *vpeproc,
    /* Check if the blt operation is supported and build related settings.
     * Command settings will be is stored in vpeproc->vpe_build_param.
     */
-   result = si_vpe_processor_check_and_build_settins(vpeproc, process_properties, src_surfaces, dst_surfaces);
+   result = si_vpe_processor_check_and_build_settins(vpeproc, process_properties, src_surfaces, dst_surfaces, is_geometric_scaling_round);
    if (VPE_STATUS_OK != result) {
       return result;
    }
@@ -1156,10 +1195,10 @@ si_vpe_construct_blt(struct vpe_video_processor *vpeproc,
    build_bufs->cmd_buf.tmz = false;
 
    /* Init EmbBuf address and size information */
-   emb_buf = &vpeproc->emb_buffers[vpeproc->cur_buf];
+   emb_buf = vpeproc->emb_buffers[vpeproc->cur_buf];
    /* Map EmbBuf for CPU access */
    vpe_ptr = (uint64_t *)vpeproc->ws->buffer_map(vpeproc->ws,
-                                                 emb_buf->res->buf,
+                                                 emb_buf->buf,
                                                  NULL,
                                                  PIPE_MAP_WRITE | RADEON_MAP_TEMPORARY);
    if (!vpe_ptr) {
@@ -1167,14 +1206,14 @@ si_vpe_construct_blt(struct vpe_video_processor *vpeproc,
       return 1;
    }
    build_bufs->emb_buf.cpu_va = (uintptr_t)vpe_ptr;
-   build_bufs->emb_buf.gpu_va = vpeproc->ws->buffer_get_virtual_address(emb_buf->res->buf);
+   build_bufs->emb_buf.gpu_va = vpeproc->ws->buffer_get_virtual_address(emb_buf->buf);
    build_bufs->emb_buf.size = VPE_EMBBUF_SIZE;
    build_bufs->emb_buf.tmz = false;
 
    result = vpe_build_commands(vpe_handle, build_param, build_bufs);
 
    /* Un-map Emb_buf */
-   vpeproc->ws->buffer_unmap(vpeproc->ws, emb_buf->res->buf);
+   vpeproc->ws->buffer_unmap(vpeproc->ws, emb_buf->buf);
 
    if (VPE_STATUS_OK != result) {
       SIVPE_ERR("Build commands failed with result: %d\n", result);
@@ -1198,7 +1237,7 @@ si_vpe_construct_blt(struct vpe_video_processor *vpeproc,
    vpeproc->cs.current.cdw += (vpeproc->vpe_build_bufs->cmd_buf.size / 4);
 
    /* Add embbuf into bo_handle list */
-   vpeproc->ws->cs_add_buffer(&vpeproc->cs, emb_buf->res->buf, RADEON_USAGE_READ | RADEON_USAGE_SYNCHRONIZED, RADEON_DOMAIN_GTT);
+   vpeproc->ws->cs_add_buffer(&vpeproc->cs, emb_buf->buf, RADEON_USAGE_READ | RADEON_USAGE_SYNCHRONIZED, RADEON_DOMAIN_GTT);
 
    /* Add surface buffers into bo_handle list */
    si_vpe_cs_add_surface_buffer(vpeproc, src_surfaces, RADEON_USAGE_READ);
@@ -1320,7 +1359,7 @@ si_vpe_processor_process_frame(struct pipe_video_codec *codec,
 
    /* Perform general processing */
    if ((scaling_ratio[0] <= VPE_MAX_GEOMETRIC_DOWNSCALE) && (scaling_ratio[1] <= VPE_MAX_GEOMETRIC_DOWNSCALE)) {
-      result = si_vpe_construct_blt(vpeproc, process_properties, vpeproc->src_surfaces, vpeproc->dst_surfaces);
+      result = si_vpe_construct_blt(vpeproc, process_properties, vpeproc->src_surfaces, vpeproc->dst_surfaces, false);
       return result == VPE_STATUS_OK ? 0 : 1;
    }
 
@@ -1430,7 +1469,10 @@ si_vpe_processor_process_frame(struct pipe_video_codec *codec,
       src_surfaces = vpeproc->src_surfaces;
       dst_surfaces = tmp_geo_scaling_surf_1;
 
-      result = si_vpe_construct_blt(vpeproc, &process_geoscl, src_surfaces, dst_surfaces);
+      /* Fitst Round, no need to change the format of input and output frames
+       * Set is_geometric_scaling_round = false
+       */
+      result = si_vpe_construct_blt(vpeproc, &process_geoscl, src_surfaces, dst_surfaces, false);
       if (VPE_STATUS_OK != result) {
          SIVPE_ERR("Failed in Geometric Scaling first blt command\n");
          return result;
@@ -1441,6 +1483,7 @@ si_vpe_processor_process_frame(struct pipe_video_codec *codec,
       /* Second to Final Round:
        * The source format should be reset to the format of DstFormat.
        * And other option should be cleaned.
+       * Set is_geometric_scaling_round = true to force the format of source format to the format of DstFormat.
        */
       process_geoscl.orientation                  = PIPE_VIDEO_VPP_ORIENTATION_DEFAULT;
       process_geoscl.blend.global_alpha           = 1.0f;
@@ -1462,7 +1505,7 @@ si_vpe_processor_process_frame(struct pipe_video_codec *codec,
          src_surfaces = dst_surfaces;
          dst_surfaces = tmp_surfaces;
 
-         result = si_vpe_construct_blt(vpeproc, &process_geoscl, src_surfaces, dst_surfaces);
+         result = si_vpe_construct_blt(vpeproc, &process_geoscl, src_surfaces, dst_surfaces, true);
          if (VPE_STATUS_OK != result) {
             SIVPE_ERR("Failed in Geometric Scaling first blt command\n");
             return result;
@@ -1486,7 +1529,7 @@ si_vpe_processor_process_frame(struct pipe_video_codec *codec,
 
       src_surfaces = dst_surfaces;
       dst_surfaces = vpeproc->dst_surfaces;
-      result = si_vpe_construct_blt(vpeproc, &process_geoscl, src_surfaces, dst_surfaces);
+      result = si_vpe_construct_blt(vpeproc, &process_geoscl, src_surfaces, dst_surfaces, true);
       if (VPE_STATUS_OK != result) {
          SIVPE_ERR("Failed in Geometric Scaling first blt command\n");
          return result;
@@ -1610,7 +1653,7 @@ si_vpe_create_processor(struct pipe_context *context, const struct pipe_video_co
     */
    vpeproc->bufs_num = (uint8_t)debug_get_num_option("AMDGPU_SIVPE_BUF_NUM", VPE_BUFFERS_NUM);
    vpeproc->cur_buf = 0;
-   vpeproc->emb_buffers = (struct rvid_buffer *)CALLOC(vpeproc->bufs_num, sizeof(struct rvid_buffer));
+   vpeproc->emb_buffers = CALLOC(vpeproc->bufs_num, sizeof(struct si_resource *));
    if (!vpeproc->emb_buffers) {
       SIVPE_ERR("Allocate command buffer list failed\n");
       goto fail;
@@ -1618,11 +1661,11 @@ si_vpe_create_processor(struct pipe_context *context, const struct pipe_video_co
       SIVPE_INFO(vpeproc->log_level, "Number of emb_buf is %d\n", vpeproc->bufs_num);
 
    for (i = 0; i < vpeproc->bufs_num; i++) {
-      if (!si_vid_create_buffer(vpeproc->screen, &vpeproc->emb_buffers[i], VPE_EMBBUF_SIZE, PIPE_USAGE_DEFAULT)) {
+      vpeproc->emb_buffers[i] = si_resource(pipe_buffer_create(vpeproc->screen, 0, PIPE_USAGE_DEFAULT, VPE_EMBBUF_SIZE));
+      if (!vpeproc->emb_buffers[i]) {
           SIVPE_ERR("Can't allocated emb_buf buffers.\n");
           goto fail;
       }
-      si_vid_clear_buffer(context, &vpeproc->emb_buffers[i]);
    }
 
    /* Create VPE parameters structure */

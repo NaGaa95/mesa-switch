@@ -244,7 +244,6 @@ static bool do_winsys_init(struct radeon_drm_winsys *ws)
 #define CHIPSET(pci_id, cfamily) \
    case pci_id: \
    ws->info.family = CHIP_##cfamily; \
-   ws->info.name = #cfamily; \
    ws->gen = DRV_SI; \
    break;
 #include "pci_ids/radeonsi_pci_ids.h"
@@ -466,13 +465,13 @@ static bool do_winsys_init(struct radeon_drm_winsys *ws)
                4 << ((tiling_config & 0xf0) >> 4) :
                     4 << ((tiling_config & 0x30) >> 4);
 
-      ws->info.pipe_interleave_bytes =
+      ws->info.r600_pipe_interleave_bytes =
             ws->info.gfx_level >= EVERGREEN ?
                256 << ((tiling_config & 0xf00) >> 8) :
                       256 << ((tiling_config & 0xc0) >> 6);
 
-      if (!ws->info.pipe_interleave_bytes)
-         ws->info.pipe_interleave_bytes =
+      if (!ws->info.r600_pipe_interleave_bytes)
+         ws->info.r600_pipe_interleave_bytes =
                ws->info.gfx_level >= EVERGREEN ? 512 : 256;
 
       radeon_get_drm_value(ws->fd, RADEON_INFO_NUM_TILE_PIPES, NULL,
@@ -627,16 +626,11 @@ static bool do_winsys_init(struct radeon_drm_winsys *ws)
                                      ws->accel_working2 < 3);
    ws->info.has_cp_dma = true;
    ws->info.tcc_cache_line_size = 64; /* TC L2 line size on GCN */
-   ws->info.has_bo_metadata = false;
    ws->info.has_eqaa_surface_allocator = false;
-   ws->info.has_sparse_vm_mappings = false;
+   ws->info.has_sparse = false;
    ws->info.max_alignment = 1024*1024;
    ws->info.has_graphics = true;
    ws->info.cpdma_prefetch_writes_memory = true;
-   ws->info.max_waves_per_simd = 10;
-   ws->info.num_physical_sgprs_per_simd = 512;
-   ws->info.num_physical_wave64_vgprs_per_simd = 256;
-   ws->info.has_3d_cube_border_color_mipmap = true;
    ws->info.has_image_opcodes = true;
    ws->info.spi_cu_en_has_effect = false;
    ws->info.spi_cu_en = 0xffff;
@@ -645,14 +639,11 @@ static bool do_winsys_init(struct radeon_drm_winsys *ws)
    ws->info.max_gflops = 128 * ws->info.num_cu * ws->info.max_gpu_freq_mhz / 1000;
    ws->info.num_tcc_blocks = ws->info.max_tcc_blocks;
    ws->info.tcp_cache_size = 16 * 1024;
-   ws->info.num_simd_per_compute_unit = 4;
-   ws->info.min_sgpr_alloc = 8;
-   ws->info.max_sgpr_alloc = 104;
-   ws->info.sgpr_alloc_granularity = 8;
-   ws->info.min_wave64_vgpr_alloc = 4;
-   ws->info.max_vgpr_alloc = 256;
-   ws->info.wave64_vgpr_alloc_granularity = 4;
    ws->info.lds_size_per_workgroup = ws->info.gfx_level == GFX7 ? 64 * 1024 : 32 * 1024;
+
+#ifdef HAVE_GALLIUM_RADEONSI
+   ac_fill_compiler_info(&ws->info, NULL);
+#endif
 
    for (unsigned se = 0; se < ws->info.max_se; se++) {
       for (unsigned sa = 0; sa < ws->info.max_sa_per_se; sa++)

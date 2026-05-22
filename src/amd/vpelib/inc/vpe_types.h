@@ -206,6 +206,7 @@ struct mpc_color_caps {
     uint32_t shared_3d_lut       : 1; /**< can be in either dpp or mpc, but single instance */
     uint32_t global_alpha        : 1; /**< e.g. top plane 30 %. bottom 70 % */
     uint32_t top_bottom_blending : 1; /**< two-layer blending */
+
 };
 
 /** @struct vpe_color_caps
@@ -235,6 +236,8 @@ struct vpe_caps {
     uint32_t v_mirror_support       : 1; /**< vertical mirror support */
     uint32_t is_apu                 : 1; /**< is APU */
     uint32_t bg_color_check_support : 1; /**< background color check support */
+
+    uint32_t prefer_external_scaler_coef : 1; /**< prefer external scaler coeff */
 
     /** resource capability */
     struct {
@@ -653,7 +656,9 @@ struct vpe_color_adjust {
 struct vpe_surface_info {
 
     struct vpe_plane_address     address;     /**< Address */
-    enum vpe_swizzle_mode_values swizzle;     /**< Swizzle mode */
+    union {
+        enum vpe_swizzle_mode_values swizzle; /**< Swizzle mode */
+    };
 
     struct vpe_plane_size         plane_size; /**< Pitch */
     struct vpe_plane_dcc_param    dcc;        /**< DCC parameters */

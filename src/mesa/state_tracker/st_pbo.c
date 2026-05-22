@@ -57,6 +57,10 @@ st_pbo_addresses_setup(struct st_context *st,
 {
    unsigned skip_pixels;
 
+   /* image_size is int32_t */
+   if ((size_t)addr->pixels_per_row * addr->image_height > INT32_MAX)
+      return false;
+
    /* Check alignment against texture buffer requirements. */
    {
       unsigned ofs = (buf_offset * addr->bytes_per_pixel) % st->ctx->Const.TextureBufferOffsetAlignment;
@@ -76,7 +80,7 @@ st_pbo_addresses_setup(struct st_context *st,
    addr->buffer = buf;
    addr->first_element = buf_offset;
    addr->last_element = buf_offset + skip_pixels + addr->width - 1
-         + (addr->height - 1 + (addr->depth - 1) * addr->image_height) * addr->pixels_per_row;
+         + (addr->height - 1 + (size_t)(addr->depth - 1) * addr->image_height) * addr->pixels_per_row;
 
    if (addr->last_element - addr->first_element > st->ctx->Const.MaxTextureBufferSize - 1)
       return false;
@@ -210,7 +214,6 @@ st_pbo_draw(struct st_context *st, const struct st_pbo_addresses *addr,
 
    cso_set_tesseval_shader_handle(cso, NULL);
 
-   cso_set_task_shader_handle(cso, NULL);
    cso_set_mesh_shader_handle(cso, NULL);
 
    /* Upload vertices */
@@ -566,7 +569,7 @@ create_fs(struct st_context *st, bool download,
                             .image_dim = GLSL_SAMPLER_DIM_BUF);
    } else {
       nir_store_output(&b, result, nir_imm_int(&b, 0),
-                       .io_semantics.location = FRAG_RESULT_COLOR);
+                       .io_semantics.location = FRAG_RESULT_COLOR, .src_type = tex->dest_type);
    }
 
    return st_nir_finish_builtin_shader(st, b.shader);

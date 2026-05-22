@@ -188,9 +188,6 @@ static uint32_t profile2stream_type(struct ruvd_decoder *dec, unsigned family)
 	case PIPE_VIDEO_FORMAT_MPEG12:
 		return RUVD_CODEC_MPEG2;
 
-	case PIPE_VIDEO_FORMAT_MPEG4:
-		return RUVD_CODEC_MPEG4;
-
 	case PIPE_VIDEO_FORMAT_JPEG:
 		return RUVD_CODEC_MJPEG;
 
@@ -306,19 +303,6 @@ static unsigned calc_dpb_size(struct ruvd_decoder *dec)
 	case PIPE_VIDEO_FORMAT_MPEG12:
 		// reference picture buffer, must be big enough for all frames
 		dpb_size = image_size * NUM_MPEG2_REFS;
-		break;
-
-	case PIPE_VIDEO_FORMAT_MPEG4:
-		// reference picture buffer
-		dpb_size = image_size * max_references;
-
-		// CM
-		dpb_size += width_in_mb * height_in_mb * 64;
-
-		// IT surface buffer
-		dpb_size += align(width_in_mb * height_in_mb * 32, 64);
-
-		dpb_size = MAX2(dpb_size, 30 * 1024 * 1024);
 		break;
 
 	case PIPE_VIDEO_FORMAT_JPEG:
@@ -570,67 +554,6 @@ static struct ruvd_mpeg2 get_mpeg2_msg(struct ruvd_decoder *dec,
 	result.q_scale_type = pic->q_scale_type;
 	result.intra_vlc_format = pic->intra_vlc_format;
 	result.alternate_scan = pic->alternate_scan;
-
-	return result;
-}
-
-/* get mpeg4 specific msg bits */
-static struct ruvd_mpeg4 get_mpeg4_msg(struct ruvd_decoder *dec,
-				       struct pipe_mpeg4_picture_desc *pic)
-{
-	struct ruvd_mpeg4 result;
-	unsigned i;
-
-	memset(&result, 0, sizeof(result));
-	result.decoded_pic_idx = dec->frame_number;
-	for (i = 0; i < 2; ++i)
-		result.ref_pic_idx[i] = get_ref_pic_idx(dec, pic->ref[i]);
-
-	result.variant_type = 0;
-	result.profile_and_level_indication = 0xF0; // ASP Level0
-
-	result.video_object_layer_verid = 0x5; // advanced simple
-	result.video_object_layer_shape = 0x0; // rectangular
-
-	result.video_object_layer_width = dec->base.width;
-	result.video_object_layer_height = dec->base.height;
-
-	result.vop_time_increment_resolution = pic->vop_time_increment_resolution;
-
-	result.flags |= pic->short_video_header << 0;
-	//result.flags |= obmc_disable << 1;
-	result.flags |= pic->interlaced << 2;
-        result.flags |= 1 << 3; // load_intra_quant_mat
-	result.flags |= 1 << 4; // load_nonintra_quant_mat
-	result.flags |= pic->quarter_sample << 5;
-	result.flags |= 1 << 6; // complexity_estimation_disable
-	result.flags |= pic->resync_marker_disable << 7;
-	//result.flags |= data_partitioned << 8;
-	//result.flags |= reversible_vlc << 9;
-	result.flags |= 0 << 10; // newpred_enable
-	result.flags |= 0 << 11; // reduced_resolution_vop_enable
-	//result.flags |= scalability << 12;
-	//result.flags |= is_object_layer_identifier << 13;
-	//result.flags |= fixed_vop_rate << 14;
-	//result.flags |= newpred_segment_type << 15;
-
-	result.quant_type = pic->quant_type;
-
-	for (i = 0; i < 64; ++i) {
-		result.intra_quant_mat[i] = pic->intra_matrix[vl_zscan_normal[i]];
-		result.nonintra_quant_mat[i] = pic->non_intra_matrix[vl_zscan_normal[i]];
-	}
-
-	/*
-	int32_t 	trd [2]
-	int32_t 	trb [2]
-	uint8_t 	vop_coding_type
-	uint8_t 	vop_fcode_forward
-	uint8_t 	vop_fcode_backward
-	uint8_t 	rounding_control
-	uint8_t 	alternate_vertical_scan_flag
-	uint8_t 	top_field_first
-	*/
 
 	return result;
 }
@@ -956,10 +879,6 @@ static int ruvd_end_frame(struct pipe_video_codec *decoder,
 		dec->msg->body.decode.codec.mpeg2 = get_mpeg2_msg(dec, (struct pipe_mpeg12_picture_desc*)picture);
 		break;
 
-	case PIPE_VIDEO_FORMAT_MPEG4:
-		dec->msg->body.decode.codec.mpeg4 = get_mpeg4_msg(dec, (struct pipe_mpeg4_picture_desc*)picture);
-		break;
-
 	case PIPE_VIDEO_FORMAT_JPEG:
 		break;
 
@@ -1034,7 +953,6 @@ struct pipe_video_codec *ruvd_create_decoder(struct pipe_context *context,
 
 	switch(u_reduce_video_profile(templ->profile)) {
 	case PIPE_VIDEO_FORMAT_MPEG12:
-	case PIPE_VIDEO_FORMAT_MPEG4:
 		width = align(width, VL_MACROBLOCK_WIDTH);
 		height = align(height, VL_MACROBLOCK_HEIGHT);
 		break;

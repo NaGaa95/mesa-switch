@@ -18,6 +18,8 @@
 #include "tensorflow/lite/c/c_api.h"
 #include "test_executor.h"
 
+#include "util/os_misc.h"
+
 #define TEST_CONV2D          1
 #define TEST_DEPTHWISE       1
 #define TEST_ADD             1
@@ -55,7 +57,7 @@ test_model(void *buf, size_t buf_size, std::string cache_dir, unsigned tolerance
    run_model(model, EXECUTOR_CPU, &input, &num_inputs, &cpu_output, &output_sizes, &output_types, &num_outputs, cache_dir);
    run_model(model, EXECUTOR_NPU, &input, &num_inputs, &npu_output, &output_sizes, &output_types, &num_outputs, cache_dir);
 
-   char *dump_output = getenv("TEFLON_DUMP_OUTPUT");
+   const char *dump_output = os_get_option("TEFLON_DUMP_OUTPUT");
    if (dump_output && atoi(dump_output) == 1) {
       for (unsigned i = 0; i < num_outputs; i++) {
          char name[250];
@@ -131,8 +133,76 @@ test_model(void *buf, size_t buf_size, std::string cache_dir, unsigned tolerance
             }
             break;
          }
+         case kTfLiteInt16: {
+            int16_t *cpu = ((int16_t **)cpu_output)[i];
+            int16_t *npu = ((int16_t **)npu_output)[i];
+            if (abs(cpu[j] - npu[j]) > tolerance) {
+               std::cout << "CPU: ";
+               for (int k = 0; k < std::min(int(output_sizes[i]), 24); k++)
+                  std::cout << std::setfill('0') << std::setw(4) << std::hex << int(cpu[k] & 0xffff) << " ";
+               std::cout << "\n";
+               std::cout << "NPU: ";
+               for (int k = 0; k < std::min(int(output_sizes[i]), 24); k++)
+                  std::cout << std::setfill('0') << std::setw(4) << std::hex << int(npu[k] & 0xffff) << " ";
+               std::cout << "\n";
+
+               FAIL() << "Output at " << j << " from the NPU (" << std::setfill('0') << std::setw(4) << std::hex << int(npu[j] & 0xffff) << ") doesn't match that from the CPU (" << std::setfill('0') << std::setw(4) << std::hex << int(cpu[j] & 0xffff) << ").";
+            }
+            break;
+         }
+         case kTfLiteUInt16: {
+            uint16_t *cpu = ((uint16_t **)cpu_output)[i];
+            uint16_t *npu = ((uint16_t **)npu_output)[i];
+            if (abs(cpu[j] - npu[j]) > tolerance) {
+               std::cout << "CPU: ";
+               for (int k = 0; k < std::min(int(output_sizes[i]), 24); k++)
+                  std::cout << std::setfill('0') << std::setw(4) << std::hex << int(cpu[k]) << " ";
+               std::cout << "\n";
+               std::cout << "NPU: ";
+               for (int k = 0; k < std::min(int(output_sizes[i]), 24); k++)
+                  std::cout << std::setfill('0') << std::setw(4) << std::hex << int(npu[k]) << " ";
+               std::cout << "\n";
+
+               FAIL() << "Output at " << j << " from the NPU (" << std::setfill('0') << std::setw(4) << std::hex << int(npu[j]) << ") doesn't match that from the CPU (" << std::setfill('0') << std::setw(4) << std::hex << int(cpu[j]) << ").";
+            }
+            break;
+         }
+         case kTfLiteInt32: {
+            int32_t *cpu = ((int32_t **)cpu_output)[i];
+            int32_t *npu = ((int32_t **)npu_output)[i];
+            if (abs(cpu[j] - npu[j]) > tolerance) {
+               std::cout << "CPU: ";
+               for (int k = 0; k < std::min(int(output_sizes[i]), 24); k++)
+                  std::cout << std::setfill('0') << std::setw(8) << std::hex << int(cpu[k] & 0xffffffff) << " ";
+               std::cout << "\n";
+               std::cout << "NPU: ";
+               for (int k = 0; k < std::min(int(output_sizes[i]), 24); k++)
+                  std::cout << std::setfill('0') << std::setw(8) << std::hex << int(npu[k] & 0xffffffff) << " ";
+               std::cout << "\n";
+
+               FAIL() << "Output at " << j << " from the NPU (" << std::setfill('0') << std::setw(4) << std::hex << int(npu[j] & 0xffffffff) << ") doesn't match that from the CPU (" << std::setfill('0') << std::setw(8) << std::hex << int(cpu[j] & 0xffffffff) << ").";
+            }
+            break;
+         }
+         case kTfLiteUInt32: {
+            uint16_t *cpu = ((uint16_t **)cpu_output)[i];
+            uint16_t *npu = ((uint16_t **)npu_output)[i];
+            if (abs(cpu[j] - npu[j]) > tolerance) {
+               std::cout << "CPU: ";
+               for (int k = 0; k < std::min(int(output_sizes[i]), 24); k++)
+                  std::cout << std::setfill('0') << std::setw(8) << std::hex << int(cpu[k]) << " ";
+               std::cout << "\n";
+               std::cout << "NPU: ";
+               for (int k = 0; k < std::min(int(output_sizes[i]), 24); k++)
+                  std::cout << std::setfill('0') << std::setw(8) << std::hex << int(npu[k]) << " ";
+               std::cout << "\n";
+
+               FAIL() << "Output at " << j << " from the NPU (" << std::setfill('0') << std::setw(8) << std::hex << int(npu[j]) << ") doesn't match that from the CPU (" << std::setfill('0') << std::setw(8) << std::hex << int(cpu[j]) << ").";
+            }
+            break;
+         }
          default:
-            assert(!"Unsupported data type for output tensor");
+            FAIL() << "Unsupported data type for output tensor";
          }
       }
    }
@@ -506,8 +576,8 @@ TEST_P(Models, Op)
    std::ostringstream file_path;
    auto test_name = GetParam();
    test_name.replace(test_name.find("_"), 1, "/");
-   assert(getenv("TEFLON_TEST_DATA"));
-   file_path << getenv("TEFLON_TEST_DATA") << "/models/" << test_name << ".tflite";
+   assert(os_get_option("TEFLON_TEST_DATA"));
+   file_path << os_get_option("TEFLON_TEST_DATA") << "/models/" << test_name << ".tflite";
 
    test_model_file(file_path.str(), TOLERANCE, true);
 }
@@ -515,9 +585,9 @@ TEST_P(Models, Op)
 std::vector<std::string>
 get_model_files(void)
 {
-   assert(getenv("TEFLON_TEST_DATA"));
+   assert(os_get_option("TEFLON_TEST_DATA"));
    std::stringstream dir;
-   dir << getenv("TEFLON_TEST_DATA") << "/models";
+   dir << os_get_option("TEFLON_TEST_DATA") << "/models";
 
    std::vector<std::string> paths;
    std::filesystem::recursive_directory_iterator b(dir.str());

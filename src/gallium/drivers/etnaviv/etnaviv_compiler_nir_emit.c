@@ -263,7 +263,7 @@ etna_emit_discard(struct etna_compile *c, struct etna_inst_src condition)
    }
 
    struct etna_inst inst = {
-      .opcode = ISA_OPC_TEXKILL,
+      .opcode = ISA_OPC_TEXKILL_UNARY,
       .cond = ISA_COND_NZ,
       .type = (c->info->halti < 2) ? ISA_TYPE_F32 : ISA_TYPE_U32,
       .src[0] = condition,

@@ -301,7 +301,7 @@ blorp_exec_on_render(struct blorp_batch *batch,
    BITSET_CLEAR(dyn_dirty, MESA_VK_DYNAMIC_RS_LINE_STIPPLE);
    BITSET_CLEAR(dyn_dirty, MESA_VK_DYNAMIC_FSR);
    BITSET_CLEAR(dyn_dirty, MESA_VK_DYNAMIC_MS_SAMPLE_LOCATIONS);
-   if (!params->wm_prog_data) {
+   if (!params->fs_prog_data) {
       BITSET_CLEAR(dyn_dirty, MESA_VK_DYNAMIC_CB_COLOR_WRITE_ENABLES);
       BITSET_CLEAR(dyn_dirty, MESA_VK_DYNAMIC_CB_LOGIC_OP);
    }

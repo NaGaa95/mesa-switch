@@ -116,6 +116,10 @@ create_engine(struct anv_device *device,
       .property = DRM_XE_EXEC_QUEUE_SET_PROPERTY_PRIORITY,
       .value = anv_vk_priority_to_drm_sched_priority(priority),
    };
+   struct drm_xe_ext_set_property state_cache_perf_ext = {
+      .property = DRM_XE_EXEC_QUEUE_SET_DISABLE_STATE_CACHE_PERF_FIX,
+      .value = true,
+   };
    struct drm_xe_ext_set_property pxp_ext = {
       .property = DRM_XE_EXEC_QUEUE_SET_PROPERTY_PXP_TYPE,
       .value = DRM_XE_PXP_TYPE_HWDRM,
@@ -126,14 +130,26 @@ create_engine(struct anv_device *device,
          .vm_id = device->vm_id,
          .width = 1,
          .num_placements = count,
+         .flags = 0,
    };
    intel_xe_gem_add_ext((uint64_t *)&create.extensions,
                         DRM_XE_EXEC_QUEUE_EXTENSION_SET_PROPERTY,
                         &priority_ext.base);
-   if (pxp_needed)
+   if (pxp_needed) {
       intel_xe_gem_add_ext((uint64_t *)&create.extensions,
                            DRM_XE_EXEC_QUEUE_EXTENSION_SET_PROPERTY,
                            &pxp_ext.base);
+   }
+   if (queue_family->engine_class == INTEL_ENGINE_CLASS_RENDER &&
+       !device->physical->rt_change_needs_flush) {
+      intel_xe_gem_add_ext((uint64_t *)&create.extensions,
+                           DRM_XE_EXEC_QUEUE_EXTENSION_SET_PROPERTY,
+                           &state_cache_perf_ext.base);
+   }
+   if (device->physical->instance->force_guc_low_latency &&
+       physical->info.supports_low_latency_hint)
+      create.flags |= DRM_XE_EXEC_QUEUE_LOW_LATENCY_HINT;
+
    int ret;
    bool retry;
    do {

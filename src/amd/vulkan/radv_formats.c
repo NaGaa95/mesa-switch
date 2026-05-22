@@ -110,16 +110,12 @@ radv_is_atomic_format_supported(VkFormat format)
 bool
 radv_is_storage_image_format_supported(const struct radv_physical_device *pdev, VkFormat format)
 {
-   const struct radv_instance *instance = radv_physical_device_instance(pdev);
    const struct util_format_description *desc = radv_format_description(format);
    unsigned data_format, num_format;
    if (format == VK_FORMAT_UNDEFINED)
       return false;
 
-   if (vk_format_has_stencil(format))
-      return false;
-
-   if (instance->drirc.debug.disable_depth_storage && vk_format_has_depth(format))
+   if (vk_format_is_depth_or_stencil(format))
       return false;
 
    data_format = radv_translate_tex_dataformat(pdev, desc, vk_format_get_first_non_void_channel(format));
@@ -259,6 +255,24 @@ radv_is_filter_minmax_format_supported(const struct radv_physical_device *pdev, 
    return ac_is_reduction_mode_supported(&pdev->info, radv_format_to_pipe_format(format), false);
 }
 
+static bool
+radv_is_copy_image_indirect_format_supported(const struct radv_physical_device *pdev, VkFormat format)
+{
+   const struct util_format_description *desc = radv_format_description(format);
+
+   /* GFX9-GFX11.5 have issues with BCn formats and mipmaps which isn't really possible to support
+    * with indirect image copies.
+    */
+   if (vk_format_is_block_compressed(format) && (pdev->info.gfx_level >= GFX9 && pdev->info.gfx_level < GFX12))
+      return false;
+
+   /* No ASTC emulation with indirect image copies yet. */
+   if (desc->layout == UTIL_FORMAT_LAYOUT_ASTC)
+      return false;
+
+   return true;
+}
+
 bool
 radv_is_format_emulated(const struct radv_physical_device *pdev, VkFormat format)
 {
@@ -301,6 +315,12 @@ radv_physical_device_get_format_properties(struct radv_physical_device *pdev, Vk
          if (radv_is_filter_minmax_format_supported(pdev, emulation_format))
             tiled |= VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_FILTER_MINMAX_BIT;
       }
+
+      if (radv_is_copy_image_indirect_format_supported(pdev, format)) {
+         tiled |= VK_FORMAT_FEATURE_2_COPY_IMAGE_INDIRECT_DST_BIT_KHR;
+         linear |= VK_FORMAT_FEATURE_2_COPY_IMAGE_INDIRECT_DST_BIT_KHR;
+      }
+
       out_properties->linearTilingFeatures = linear;
       out_properties->optimalTilingFeatures = tiled;
       out_properties->bufferFeatures = buffer;
@@ -386,6 +406,16 @@ radv_physical_device_get_format_properties(struct radv_physical_device *pdev, Vk
          /* Don't support blitting surfaces with depth/stencil. */
          if (vk_format_has_depth(format) && vk_format_has_stencil(format))
             tiled &= ~VK_FORMAT_FEATURE_2_BLIT_DST_BIT;
+
+         if (radv_compute_queue_enabled(pdev)) {
+            tiled |= VK_FORMAT_FEATURE_2_DEPTH_COPY_ON_COMPUTE_QUEUE_BIT_KHR |
+                     VK_FORMAT_FEATURE_2_STENCIL_COPY_ON_COMPUTE_QUEUE_BIT_KHR;
+         }
+
+         if (radv_transfer_queue_enabled(pdev)) {
+            tiled |= VK_FORMAT_FEATURE_2_DEPTH_COPY_ON_TRANSFER_QUEUE_BIT_KHR |
+                     VK_FORMAT_FEATURE_2_STENCIL_COPY_ON_TRANSFER_QUEUE_BIT_KHR;
+         }
 
          /* Don't support linear depth surfaces */
          linear = 0;
@@ -501,6 +531,11 @@ radv_physical_device_get_format_properties(struct radv_physical_device *pdev, Vk
       }
    }
 
+   if (radv_is_copy_image_indirect_format_supported(pdev, format)) {
+      tiled |= VK_FORMAT_FEATURE_2_COPY_IMAGE_INDIRECT_DST_BIT_KHR;
+      linear |= VK_FORMAT_FEATURE_2_COPY_IMAGE_INDIRECT_DST_BIT_KHR;
+   }
+
    out_properties->linearTilingFeatures = linear;
    out_properties->optimalTilingFeatures = tiled;
    out_properties->bufferFeatures = buffer;
@@ -582,7 +617,7 @@ radv_format_pack_clear_color(VkFormat format, uint32_t clear_vals[2], VkClearCol
             else
                f -= 0.5f;
 
-            v = (uint64_t)f;
+            v = (uint64_t)(int64_t)f;
          }
       } else if (channel->type == UTIL_FORMAT_TYPE_FLOAT) {
          if (channel->size == 32) {
@@ -632,20 +667,29 @@ radv_get_modifier_flags(struct radv_physical_device *pdev, VkFormat format, uint
    /* Unconditionally disable HOST_TRANSFER support for modifiers for now */
    features &= ~VK_FORMAT_FEATURE_2_HOST_IMAGE_TRANSFER_BIT_EXT;
 
+   /* Unconditionally disable COPY_IMAGE_INDIRECT_DST support for modifiers for now */
+   features &= ~VK_FORMAT_FEATURE_2_COPY_IMAGE_INDIRECT_DST_BIT_KHR;
+
+   if (!ac_modifier_supports_video(&pdev->info, modifier))
+      features &= ~(VK_FORMAT_FEATURE_2_VIDEO_DECODE_OUTPUT_BIT_KHR |
+                    VK_FORMAT_FEATURE_2_VIDEO_DECODE_DPB_BIT_KHR |
+                    VK_FORMAT_FEATURE_2_VIDEO_ENCODE_INPUT_BIT_KHR |
+                    VK_FORMAT_FEATURE_2_VIDEO_ENCODE_DPB_BIT_KHR |
+                    VK_FORMAT_FEATURE_2_VIDEO_ENCODE_QUANTIZATION_DELTA_MAP_BIT_KHR);
+
    if (ac_modifier_has_dcc(modifier)) {
-      /* We don't enable DCC for multi-planar formats */
-      if (vk_format_get_plane_count(format) > 1)
+      /* We don't enable DCC for multi-planar formats before GFX12 */
+      if (pdev->info.gfx_level < GFX12 && vk_format_get_plane_count(format) > 1)
          return 0;
 
       /* Only disable support for STORAGE_IMAGE on modifiers that
        * do not support DCC image stores or when explicitly disabled.
        */
       if (!ac_modifier_supports_dcc_image_stores(pdev->info.gfx_level, modifier) ||
-          radv_is_atomic_format_supported(format) ||
-          (instance->drirc.debug.disable_dcc_stores && pdev->info.gfx_level < GFX12))
+          radv_is_atomic_format_supported(format) || radv_are_dcc_stores_disabled(pdev))
          features &= ~VK_FORMAT_FEATURE_2_STORAGE_IMAGE_BIT;
 
-      if (instance->debug_flags & (RADV_DEBUG_NO_DCC | RADV_DEBUG_NO_DISPLAY_DCC))
+      if (radv_is_dcc_disabled(pdev) || instance->debug_flags & RADV_DEBUG_NO_DISPLAY_DCC)
          return 0;
    }
 
@@ -893,7 +937,6 @@ radv_get_image_format_properties(struct radv_physical_device *pdev, const VkPhys
    uint32_t maxArraySize;
    VkSampleCountFlags sampleCounts = VK_SAMPLE_COUNT_1_BIT;
    const struct util_format_description *desc = radv_format_description(format);
-   enum amd_gfx_level gfx_level = pdev->info.gfx_level;
    VkImageTiling tiling = info->tiling;
    const VkPhysicalDeviceImageDrmFormatModifierInfoEXT *mod_info =
       vk_find_struct_const(info->pNext, PHYSICAL_DEVICE_IMAGE_DRM_FORMAT_MODIFIER_INFO_EXT);
@@ -922,33 +965,28 @@ radv_get_image_format_properties(struct radv_physical_device *pdev, const VkPhys
    default:
       UNREACHABLE("bad vkimage type\n");
    case VK_IMAGE_TYPE_1D:
-      maxExtent.width = 16384;
+      maxExtent.width = pdev->image_props.max_dims.width;
       maxExtent.height = 1;
       maxExtent.depth = 1;
-      maxMipLevels = 15; /* log2(maxWidth) + 1 */
-      maxArraySize = gfx_level >= GFX10 ? 8192 : 2048;
+      maxArraySize = pdev->image_props.max_array_layers;
       break;
    case VK_IMAGE_TYPE_2D:
-      maxExtent.width = 16384;
-      maxExtent.height = 16384;
+      maxExtent.width = pdev->image_props.max_dims.width;
+      maxExtent.height = pdev->image_props.max_dims.height;
       maxExtent.depth = 1;
-      maxMipLevels = 15; /* log2(maxWidth) + 1 */
-      maxArraySize = gfx_level >= GFX10 ? 8192 : 2048;
+      maxArraySize = pdev->image_props.max_array_layers;
       break;
-   case VK_IMAGE_TYPE_3D:
-      if (gfx_level >= GFX10) {
-         maxExtent.width = 8192;
-         maxExtent.height = 8192;
-         maxExtent.depth = 8192;
-      } else {
-         maxExtent.width = 2048;
-         maxExtent.height = 2048;
-         maxExtent.depth = 2048;
-      }
-      maxMipLevels = util_logbase2(maxExtent.width) + 1;
+   case VK_IMAGE_TYPE_3D: {
+      const uint32_t extent = pdev->image_props.max_dims.depth;
+      maxExtent.width = extent;
+      maxExtent.height = extent;
+      maxExtent.depth = extent;
       maxArraySize = 1;
       break;
    }
+   }
+
+   maxMipLevels = util_logbase2(maxExtent.width) + 1;
 
    if (desc->layout == UTIL_FORMAT_LAYOUT_SUBSAMPLED) {
       /* Might be able to support but the entire format support is
@@ -1056,7 +1094,7 @@ radv_get_image_format_properties(struct radv_physical_device *pdev, const VkPhys
    }
 
    if (info->flags & VK_IMAGE_CREATE_SPARSE_BINDING_BIT) {
-      if (!pdev->info.has_sparse_vm_mappings)
+      if (!radv_sparse_enabled(pdev))
          goto unsupported;
 
       /* Sparse resources with multi-planar formats are unsupported. */
@@ -1069,8 +1107,10 @@ radv_get_image_format_properties(struct radv_physical_device *pdev, const VkPhys
    }
 
    if (info->flags & VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT) {
-      /* Sparse textures are only supported on GFX8+. */
-      if (pdev->info.gfx_level < GFX8)
+      if (!radv_sparse_enabled(pdev))
+         goto unsupported;
+
+      if (info->type == VK_IMAGE_TYPE_3D && !pdev->info.has_sparse_image_3d)
          goto unsupported;
 
       if (vk_format_get_plane_count(format) > 1 || info->type == VK_IMAGE_TYPE_1D ||
@@ -1188,7 +1228,6 @@ radv_GetPhysicalDeviceImageFormatProperties2(VkPhysicalDevice physicalDevice,
                                              VkImageFormatProperties2 *base_props)
 {
    VK_FROM_HANDLE(radv_physical_device, pdev, physicalDevice);
-   const struct radv_instance *instance = radv_physical_device_instance(pdev);
    const VkPhysicalDeviceExternalImageFormatInfo *external_info = NULL;
    VkExternalImageFormatProperties *external_props = NULL;
    struct VkAndroidHardwareBufferUsageANDROID *android_usage = NULL;
@@ -1295,10 +1334,9 @@ radv_GetPhysicalDeviceImageFormatProperties2(VkPhysicalDevice physicalDevice,
          image_compression_props->imageCompressionFlags =
             pdev->use_hiz ? VK_IMAGE_COMPRESSION_DEFAULT_EXT : VK_IMAGE_COMPRESSION_DISABLED_EXT;
       } else {
-         image_compression_props->imageCompressionFlags =
-            ((instance->debug_flags & RADV_DEBUG_NO_DCC) || pdev->info.gfx_level < GFX8)
-               ? VK_IMAGE_COMPRESSION_DISABLED_EXT
-               : VK_IMAGE_COMPRESSION_DEFAULT_EXT;
+         image_compression_props->imageCompressionFlags = (radv_is_dcc_disabled(pdev) || pdev->info.gfx_level < GFX8)
+                                                             ? VK_IMAGE_COMPRESSION_DISABLED_EXT
+                                                             : VK_IMAGE_COMPRESSION_DEFAULT_EXT;
       }
    }
 
@@ -1309,7 +1347,7 @@ radv_GetPhysicalDeviceImageFormatProperties2(VkPhysicalDevice physicalDevice,
          might_enable_compression |= pdev->use_hiz && (base_info->usage & VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT);
       } else {
          might_enable_compression |=
-            !(instance->debug_flags & RADV_DEBUG_NO_DCC) && (base_info->usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
+            !radv_is_dcc_disabled(pdev) && (base_info->usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
       }
 
       /**

@@ -150,10 +150,10 @@ device_select_CreateInstance(const VkInstanceCreateInfo *pCreateInfo,
    info->xserver = !strcmp(applicationName, "Xorg") || !strcmp(applicationName, "Xephyr");
 
 #ifdef VK_USE_PLATFORM_WAYLAND_KHR
-   bool has_wayland = getenv("WAYLAND_DISPLAY") || getenv("WAYLAND_SOCKET");
+   bool has_wayland = os_get_option("WAYLAND_DISPLAY") || os_get_option("WAYLAND_SOCKET");
 #endif
 #ifdef VK_USE_PLATFORM_XCB_KHR
-   bool has_xcb = !!getenv("DISPLAY");
+   bool has_xcb = !!os_get_option("DISPLAY");
 #endif
 
    for (unsigned i = 0; i < pCreateInfo->enabledExtensionCount; i++) {
@@ -182,12 +182,10 @@ device_select_CreateInstance(const VkInstanceCreateInfo *pCreateInfo,
 
    info->debug = debug_get_bool_option("MESA_VK_DEVICE_SELECT_DEBUG", false) ||
                  debug_get_bool_option("DRI_PRIME_DEBUG", false);
-   info->selection = getenv("MESA_VK_DEVICE_SELECT");
-   info->dri_prime = getenv("DRI_PRIME");
+   info->selection = os_get_option_dup("MESA_VK_DEVICE_SELECT");
+   info->dri_prime = os_get_option_dup("DRI_PRIME");
    info->force_default_device =
       debug_get_bool_option("MESA_VK_DEVICE_SELECT_FORCE_DEFAULT_DEVICE", false);
-   info->selection = info->selection ? strdup(info->selection) : NULL;
-   info->dri_prime = info->dri_prime ? strdup(info->dri_prime) : NULL;
 
 #define DEVSEL_GET_CB(func)                                                                        \
    info->func = (PFN_vk##func)info->GetInstanceProcAddr(*pInstance, "vk" #func)
@@ -221,11 +219,10 @@ void
 device_select_get_properties(const struct instance_info *info, VkPhysicalDevice device,
                              VkPhysicalDeviceProperties2 *properties)
 {
-   info->GetPhysicalDeviceProperties(device, &properties->properties);
-
-   if (info->GetPhysicalDeviceProperties2 &&
-       properties->properties.apiVersion >= VK_API_VERSION_1_1)
+   if (info->GetPhysicalDeviceProperties2 && info->has_vulkan11)
       info->GetPhysicalDeviceProperties2(device, properties);
+   else
+      info->GetPhysicalDeviceProperties(device, &properties->properties);
 }
 
 static void

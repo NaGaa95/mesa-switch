@@ -62,12 +62,35 @@ struct nvk_image_plane {
    /** Reserved VA for sparse images and tiled images. */
    struct nvkmd_va *va;
 
+   /* Byte offset of the plane. Calculated and stashed at image create time
+    * so that we don't have to constantly calculate it with every bind and
+    * sparse bind, and so that we can respect explicit modifier offsets for
+    * linear modifiers.
+    */
+   uint64_t plane_offset_B;
+
+   /* Plane alignment in bytes. This isn't always the same as nil->align_B
+    * because sparse and tiled images have a minimum.
+    */
+   uint32_t plane_align_B;
+
    /* Needed for EXT_Host_Image_Copy. We get GPU addresses from the API,
     * so we stash in the memory object and the offset in the plane to be able
     * to retrieve CPU addresses for host copies.
     */
    struct nvk_device_memory *host_mem;
-   uint64_t host_offset;
+
+   /* This is not the same as the plane offset above because this includes the
+    * memory offset given by the client at bind time in VkBindImageMemoryInfo:
+    * host_offset_B = plane_offset_B + memoryOffset
+    */
+   uint64_t host_offset_B;
+};
+
+struct nvk_zcull_plane {
+   struct nil_zcull nil;
+   uint64_t addr;
+   uint64_t plane_offset_B;
 };
 
 struct nvk_image {
@@ -88,6 +111,8 @@ struct nvk_image {
    uint8_t plane_count;
    struct nvk_image_plane planes[NVK_MAX_IMAGE_PLANES];
 
+   struct nvk_zcull_plane zcull;
+
    /* In order to support D32_SFLOAT_S8_UINT, a temp area is
     * needed. The stencil plane can't be a copied using the DMA
     * engine in a single pass since it would need 8 components support.
@@ -100,9 +125,32 @@ struct nvk_image {
     * under certain conditions, so to support DRM_FORMAT_MOD_LINEAR
     * rendering in the general case, we need to keep a tiled copy, which would
     * be used to fake support if the conditions aren't satisfied.
+    * 
+    * In order to avoid needlessly paying the memory cost of the tiled shadows
+    * even if they aren't needed (imports for texturing or rendering with the
+    * conditions satisfied), we hold a mutex at image create time to guard the
+    * memory object and defer the memory allocation till draw time, where we
+    * check if it's needed per-plane and selectively allocate memory for it.
     */
-   struct nvk_image_plane linear_tiled_shadow;
-   struct nvkmd_mem *linear_tiled_shadow_mem;
+   simple_mtx_t tiled_shadow_mutex;
+   struct nvk_image_plane linear_tiled_shadows[NVK_MAX_IMAGE_PLANES];
+   struct nvkmd_mem *linear_tiled_shadow_mem[NVK_MAX_IMAGE_PLANES];
+
+   /* This indicates that we would like to compress the image and would prefer
+    * larger pages and a dedicated allocation.
+    */
+   bool can_compress;
+   /* This indicates that we actually have compressed the image. This is set at
+    * bind time.
+    */
+   bool is_compressed;
+
+   /* Total image size and alignment for all planes combined, used by
+    * GetImageMemoryRequirements(). Set to 0 for disjoint images as size and
+    * alignment have to be calculated per plane in that case.
+    */
+   uint64_t image_size_B;
+   uint32_t image_align_B;
 };
 
 VK_DEFINE_NONDISP_HANDLE_CASTS(nvk_image, vk.base, VkImage, VK_OBJECT_TYPE_IMAGE)

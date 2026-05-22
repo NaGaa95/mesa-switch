@@ -382,6 +382,7 @@ bool vpe_is_limited_cs(enum color_space cs)
 
     switch (cs)
     {
+    case COLOR_SPACE_RGB601:
     case COLOR_SPACE_SRGB:
     case COLOR_SPACE_2020_RGB_FULLRANGE:
     case COLOR_SPACE_MSREF_SCRGB:
@@ -392,6 +393,7 @@ bool vpe_is_limited_cs(enum color_space cs)
     case COLOR_SPACE_2020_YCBCR:
         is_limited = false;
         break;
+    case COLOR_SPACE_RGB601_LIMITED:
     case COLOR_SPACE_SRGB_LIMITED:
     case COLOR_SPACE_YCBCR601_LIMITED:
     case COLOR_SPACE_YCBCR709_LIMITED:

@@ -22,7 +22,7 @@ pass(nir_builder *b, nir_intrinsic_instr *intr, void *data)
    b->cursor = nir_before_instr(&intr->instr);
 
    nir_def *replacement = NULL;
-   if (intr->intrinsic == nir_intrinsic_load_front_face) {
+   if (intr->intrinsic == nir_intrinsic_load_front_face || intr->intrinsic == nir_intrinsic_load_front_face_fsign) {
       int force_front_face = 0;
 
       switch (state->vgt_outprim_type) {
@@ -41,8 +41,13 @@ pass(nir_builder *b, nir_intrinsic_instr *intr, void *data)
          break;
       }
 
-      if (force_front_face)
-         replacement = nir_imm_bool(b, force_front_face == 1);
+      if (force_front_face) {
+         if (intr->intrinsic == nir_intrinsic_load_front_face) {
+            replacement = nir_imm_bool(b, force_front_face == 1);
+         } else {
+            replacement = nir_imm_float(b, force_front_face == 1 ? 1.0 : -1.0);
+         }
+      }
    } else if (intr->intrinsic == nir_intrinsic_load_sample_id) {
       if (!state->gfx->dynamic_rasterization_samples && state->gfx->ms.rasterization_samples == 0) {
          replacement = nir_imm_intN_t(b, 0, intr->def.bit_size);

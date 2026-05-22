@@ -51,9 +51,9 @@ lower_base_workgroup_id(nir_builder *b, nir_intrinsic_instr *intrin,
 static void
 check_sends(struct genisa_stats *stats, unsigned send_count)
 {
-   assert(stats->spill_count == 0);
-   assert(stats->fill_count == 0);
-   assert(stats->send_messages == send_count);
+   assert(stats->spills == 0);
+   assert(stats->fills == 0);
+   assert(stats->sends == send_count);
 }
 
 static struct anv_shader_internal *
@@ -104,10 +104,7 @@ compile_shader(struct anv_device *device,
 
    if (stage == MESA_SHADER_FRAGMENT) {
       NIR_PASS(_, nir, nir_lower_input_attachments,
-                 &(nir_input_attachment_options) {
-                    .use_fragcoord_sysval = true,
-                    .use_layer_id_sysval = true,
-                 });
+                 &(nir_input_attachment_options) { });
    } else {
       nir_lower_compute_system_values_options options = {
          .has_base_workgroup_id = true,
@@ -125,7 +122,7 @@ compile_shader(struct anv_device *device,
    nir->info.shared_size = 0;
    nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
 
-   NIR_PASS(_, nir, nir_copy_prop);
+   NIR_PASS(_, nir, nir_opt_copy_prop);
    NIR_PASS(_, nir, nir_opt_constant_folding);
    NIR_PASS(_, nir, nir_opt_dce);
 
@@ -136,6 +133,11 @@ compile_shader(struct anv_device *device,
    memset(&prog_data, 0, sizeof(prog_data));
 
    if (stage == MESA_SHADER_COMPUTE) {
+      /* Pick SIMD16, it shouldn't spill prior Xe2 and it's the native size
+       * after.
+       */
+      nir->info.min_subgroup_size = nir->info.max_subgroup_size = 16;
+
       NIR_PASS(_, nir, brw_nir_lower_cs_intrinsics,
                  device->info, &prog_data.cs);
    }
@@ -150,14 +152,9 @@ compile_shader(struct anv_device *device,
    };
    NIR_PASS(_, nir, nir_opt_load_store_vectorize, &options);
 
-   nir->num_uniforms = uniform_size;
+   prog_data.base.push_sizes[0] = uniform_size;
 
    void *temp_ctx = ralloc_context(NULL);
-
-   prog_data.base.nr_params = nir->num_uniforms / 4;
-   prog_data.base.param = rzalloc_array(temp_ctx, uint32_t, prog_data.base.nr_params);
-
-   brw_nir_analyze_ubo_ranges(compiler, nir, prog_data.base.ubo_ranges);
 
    const unsigned *program;
    if (stage == MESA_SHADER_FRAGMENT) {
@@ -170,25 +167,29 @@ compile_shader(struct anv_device *device,
             .stats = stats,
             .mem_ctx = temp_ctx,
          },
-         .key = &key.wm,
-         .prog_data = &prog_data.wm,
+         .key = &key.fs,
+         .prog_data = &prog_data.fs,
       };
+      prog_data.base.push_sizes[0] = align(prog_data.base.push_sizes[0], REG_SIZE);
       program = brw_compile_fs(compiler, &params);
 
       if (!INTEL_DEBUG(DEBUG_SHADER_PRINT)) {
          unsigned stat_idx = 0;
-         if (prog_data.wm.dispatch_8) {
+         if (prog_data.fs.dispatch_8) {
             check_sends(&stats[stat_idx++], sends_count_expectation);
          }
-         if (prog_data.wm.dispatch_16) {
+         if (prog_data.fs.dispatch_16) {
             check_sends(&stats[stat_idx++], sends_count_expectation);
          }
-         if (prog_data.wm.dispatch_32) {
+         if (prog_data.fs.dispatch_32) {
             check_sends(&stats[stat_idx++], sends_count_expectation *
                                             (device->info->ver < 20 ? 2 : 1));
          }
       }
    } else {
+      brw_cs_fill_push_const_info(device->info, &prog_data.cs, -1);
+      prog_data.base.push_sizes[0] = align(prog_data.base.push_sizes[0], REG_SIZE);
+
       struct genisa_stats stats;
       struct brw_compile_cs_params params = {
          .base = {

@@ -648,7 +648,7 @@ _mesa_Materialfv(GLenum face, GLenum pname, const GLfloat *params)
          MAT_ATTR(VBO_ATTRIB_MAT_BACK_SHININESS, 1, params);
       break;
    case GL_COLOR_INDEXES:
-      if (ctx->API != API_OPENGL_COMPAT) {
+      if (!_mesa_is_desktop_gl_compat(ctx)) {
          _mesa_error(ctx, GL_INVALID_ENUM, "glMaterialfv(pname)");
          return;
       }
@@ -685,6 +685,9 @@ vbo_exec_FlushVertices_internal(struct vbo_exec_context *exec, unsigned flags)
    struct gl_context *ctx = gl_context_from_vbo_exec(exec);
 
    if (flags & FLUSH_STORED_VERTICES) {
+      /* Update the flag before entering the flush to prevent re-entering. */
+      ctx->Driver.NeedFlush = 0;
+
       if (exec->vtx.vert_count) {
          vbo_exec_vtx_flush(exec);
       }
@@ -693,19 +696,15 @@ vbo_exec_FlushVertices_internal(struct vbo_exec_context *exec, unsigned flags)
          vbo_exec_copy_to_current(exec);
          vbo_reset_all_attr(ctx);
       }
-
-      /* All done. */
-      ctx->Driver.NeedFlush = 0;
    } else {
       assert(flags == FLUSH_UPDATE_CURRENT);
+      /* Only FLUSH_UPDATE_CURRENT is done. */
+      ctx->Driver.NeedFlush = ~FLUSH_UPDATE_CURRENT;
 
       /* Note that the vertex size is unchanged.
        * (vbo_reset_all_attr isn't called)
        */
       vbo_exec_copy_to_current(exec);
-
-      /* Only FLUSH_UPDATE_CURRENT is done. */
-      ctx->Driver.NeedFlush = ~FLUSH_UPDATE_CURRENT;
    }
 }
 

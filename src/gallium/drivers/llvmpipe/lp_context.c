@@ -30,6 +30,8 @@
  *    Keith Whitwell <keithw@vmware.com>
  */
 
+#include <sys/stat.h>
+
 #include "draw/draw_context.h"
 #include "draw/draw_vbuf.h"
 #include "pipe/p_defines.h"
@@ -174,26 +176,70 @@ llvmpipe_texture_barrier(struct pipe_context *pipe, unsigned flags)
 static void
 lp_draw_disk_cache_find_shader(void *cookie,
                                struct lp_cached_code *cache,
-                               unsigned char ir_sha1_cache_key[20])
+                               unsigned char ir_blake3_cache_key[BLAKE3_KEY_LEN])
 {
    struct llvmpipe_screen *screen = cookie;
-   lp_disk_cache_find_shader(screen, cache, ir_sha1_cache_key);
+   lp_disk_cache_find_shader(screen, cache, ir_blake3_cache_key);
 }
 
 
 static void
 lp_draw_disk_cache_insert_shader(void *cookie,
                                  struct lp_cached_code *cache,
-                                 unsigned char ir_sha1_cache_key[20])
+                                 unsigned char ir_blake3_cache_key[BLAKE3_KEY_LEN])
 {
    struct llvmpipe_screen *screen = cookie;
-   lp_disk_cache_insert_shader(screen, cache, ir_sha1_cache_key);
+   lp_disk_cache_insert_shader(screen, cache, ir_blake3_cache_key);
 }
 
 
 static enum pipe_reset_status
 llvmpipe_get_device_reset_status(struct pipe_context *pipe)
 {
+#if !DETECT_OS_WINDOWS
+   struct llvmpipe_context *llvmpipe = llvmpipe_context(pipe);
+   struct stat st_reset_file;
+   struct timespec ts_now;
+   int64_t now_ns;
+
+   if (!(llvmpipe->flags & PIPE_CONTEXT_LOSE_CONTEXT_ON_RESET) ||
+       llvmpipe->context_reset_file_path == NULL)
+      return PIPE_NO_RESET;
+
+   clock_gettime(CLOCK_REALTIME, &ts_now);
+   now_ns = (int64_t)ts_now.tv_sec * 1000000000LL + ts_now.tv_nsec;
+
+   /*
+    * Only return a *RESET* status for ~0.5 milliseconds. From the spec:
+    *
+    * 5. How should the application react to a reset context event?
+    *
+    * RESOLVED: For this extension, the application is expected to query
+    * the reset status until NO_ERROR is returned. If a reset is encountered,
+    * at least one *RESET* status will be returned. Once NO_ERROR is again
+    * encountered, the application can safely destroy the old context and
+    * create a new one.
+    */
+   if (llvmpipe->context_reset_time_ns > 0)
+      return now_ns - llvmpipe->context_reset_time_ns < 500000 ?
+         PIPE_UNKNOWN_CONTEXT_RESET : PIPE_NO_RESET;
+
+   if (stat(llvmpipe->context_reset_file_path, &st_reset_file) == 0) {
+#if defined(__APPLE__)
+      int64_t file_mod_time_ns = (int64_t)st_reset_file.st_mtimespec.tv_sec *
+         1000000000LL + st_reset_file.st_mtimespec.tv_nsec;
+#else
+      int64_t file_mod_time_ns = (int64_t)st_reset_file.st_mtim.tv_sec *
+         1000000000LL + st_reset_file.st_mtim.tv_nsec;
+#endif
+
+      if (llvmpipe->context_creation_time_ns < file_mod_time_ns) {
+         llvmpipe->context_reset_time_ns = now_ns;
+         return PIPE_UNKNOWN_CONTEXT_RESET;
+      }
+   }
+
+#endif
    return PIPE_NO_RESET;
 }
 
@@ -213,6 +259,20 @@ llvmpipe_create_context(struct pipe_screen *screen, void *priv,
       return NULL;
 
    memset(llvmpipe, 0, sizeof *llvmpipe);
+
+   llvmpipe->flags = flags;
+#if !DETECT_OS_WINDOWS
+   llvmpipe->context_reset_file_path =
+      os_get_option_secure("LP_CONTEXT_RESET_FILE");
+   if (llvmpipe->flags & PIPE_CONTEXT_LOSE_CONTEXT_ON_RESET &&
+       llvmpipe->context_reset_file_path != NULL) {
+      struct timespec ts_now;
+
+      clock_gettime(CLOCK_REALTIME, &ts_now);
+      llvmpipe->context_creation_time_ns =
+         (int64_t)ts_now.tv_sec * 1000000000LL + ts_now.tv_nsec;
+   }
+#endif
 
    list_inithead(&llvmpipe->fs_variants_list.list);
 

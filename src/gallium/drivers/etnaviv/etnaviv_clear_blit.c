@@ -83,6 +83,7 @@ etna_clear_blit_pack_rgba(enum pipe_format format, const union pipe_color_union 
 {
    union util_color uc;
 
+   format = translate_pe_internal_format(format);
    util_pack_color_union(format, &uc, color);
 
    switch (util_format_get_blocksize(format)) {
@@ -98,6 +99,33 @@ etna_clear_blit_pack_rgba(enum pipe_format format, const union pipe_color_union 
    default:
       return (uint64_t) uc.ui[1] << 32 | uc.ui[0];
    }
+}
+
+static void
+etna_blit_stencil_fallback(struct pipe_context *pctx,
+                           const struct pipe_blit_info *info)
+{
+   struct etna_context *ctx = etna_context(pctx);
+   struct pipe_surface dst_templ;
+
+   util_blitter_default_dst_texture(&dst_templ, info->dst.resource,
+                                    info->dst.level, info->dst.box.z);
+
+   etna_blit_save_state(ctx, info->render_condition_enable);
+   util_blitter_clear_depth_stencil(ctx->blitter, &dst_templ,
+                                    PIPE_CLEAR_STENCIL, 0, 0,
+                                    info->dst.box.x, info->dst.box.y,
+                                    info->dst.box.width,
+                                    info->dst.box.height);
+
+   etna_blit_save_state(ctx, info->render_condition_enable);
+   util_blitter_stencil_fallback(ctx->blitter,
+                                 info->dst.resource, info->dst.level,
+                                 &info->dst.box,
+                                 info->src.resource, info->src.level,
+                                 &info->src.box,
+                                 info->scissor_enable ? &info->scissor
+                                                      : NULL);
 }
 
 static void
@@ -138,8 +166,22 @@ etna_blit(struct pipe_context *pctx, const struct pipe_blit_info *blit_info)
       goto success;
 
    if (info.mask & PIPE_MASK_S) {
-      DBG("cannot blit stencil, skipping");
-      info.mask &= ~PIPE_MASK_S;
+      enum pipe_format stencil_format = util_format_stencil_only(info.src.format);
+      struct pipe_screen *screen = pctx->screen;
+
+      if (stencil_format != PIPE_FORMAT_NONE &&
+          screen->is_format_supported(screen, stencil_format,
+                                      info.src.resource->target,
+                                      info.src.resource->nr_samples,
+                                      info.src.resource->nr_storage_samples,
+                                      PIPE_BIND_SAMPLER_VIEW)) {
+         etna_blit_stencil_fallback(pctx, &info);
+         info.mask &= ~PIPE_MASK_S;
+         if (!info.mask)
+            goto success;
+      } else {
+         DBG("cannot blit stencil, skipping");
+      }
    }
 
    if (!util_blitter_is_blit_supported(ctx->blitter, &info)) {

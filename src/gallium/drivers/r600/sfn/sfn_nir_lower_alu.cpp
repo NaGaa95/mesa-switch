@@ -39,9 +39,9 @@ Lower2x16::lower(nir_instr *instr)
    switch (alu->op) {
    case nir_op_unpack_half_2x16: {
       nir_def *packed = nir_ssa_for_alu_src(b, alu, 0);
-      return nir_vec2(b,
-                      nir_unpack_half_2x16_split_x(b, packed),
-                      nir_unpack_half_2x16_split_y(b, packed));
+      nir_def *lo = nir_u2u16(b, packed);
+      nir_def *hi = nir_u2u16(b, nir_ushr_imm(b, packed, 16));
+      return nir_vec2(b, nir_f2f32(b, lo), nir_f2f32(b, hi));
    }
    case nir_op_pack_half_2x16: {
       nir_def *src_vec2 = nir_ssa_for_alu_src(b, alu, 0);
@@ -102,9 +102,9 @@ LowerSinCos::lower(nir_instr *instr)
          : nir_ffma_imm12(b, fract, 2.0f * M_PI, -M_PI);
 
    if (alu->op == nir_op_fsin)
-      return nir_fsin_amd(b, normalized);
+      return nir_fsin_normalized_2_pi(b, normalized);
    else
-      return nir_fcos_amd(b, normalized);
+      return nir_fcos_normalized_2_pi(b, normalized);
 }
 
 class FixKcacheIndirectRead : public NirLowerInstruction {

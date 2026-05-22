@@ -13,21 +13,6 @@
 #include "dev/intel_debug.h"
 #include "util/macros.h"
 
-static void
-brw_assign_tes_urb_setup(brw_shader &s)
-{
-   assert(s.stage == MESA_SHADER_TESS_EVAL);
-
-   struct brw_vue_prog_data *vue_prog_data = brw_vue_prog_data(s.prog_data);
-
-   s.first_non_payload_grf += 8 * vue_prog_data->urb_read_length;
-
-   /* Rewrite all ATTR file references to HW_REGs. */
-   foreach_block_and_inst(block, brw_inst, inst, s.cfg) {
-      s.convert_attr_sources_to_hw_regs(inst);
-   }
-}
-
 static bool
 run_tes(brw_shader &s)
 {
@@ -40,14 +25,14 @@ run_tes(brw_shader &s)
    if (s.failed)
       return false;
 
-   s.emit_urb_writes();
-
    brw_calculate_cfg(s);
+
+   s.emit_tes_terminate();
 
    brw_optimize(s);
 
    s.assign_curb_setup();
-   brw_assign_tes_urb_setup(s);
+   brw_assign_urb_setup(s);
 
    brw_lower_3src_null_dest(s);
    brw_workaround_emit_dummy_mov_instruction(s);
@@ -88,7 +73,15 @@ brw_compile_tes(const struct brw_compiler *compiler,
 
    const bool debug_enabled = brw_should_print_shader(nir, DEBUG_TES, params->base.source_hash);
 
-   brw_debug_archive_nir(params->base.archiver, nir, dispatch_width, "first");
+   brw_pass_tracker pt_ = {
+      .nir = nir,
+      .dispatch_width = dispatch_width,
+      .compiler = compiler,
+      .key = &key->base,
+      .archiver = params->base.archiver,
+   }, *pt = &pt_;
+
+   BRW_NIR_SNAPSHOT("first");
 
    brw_prog_data_init(&prog_data->base.base, &params->base);
 
@@ -105,13 +98,6 @@ brw_compile_tes(const struct brw_compiler *compiler,
                                key->separate_tess_vue_layout);
    }
 
-   brw_nir_apply_key(nir, compiler, &key->base, dispatch_width);
-   brw_nir_lower_tes_inputs(nir, &input_vue_map);
-   brw_nir_lower_vue_outputs(nir);
-   NIR_PASS(_, nir, intel_nir_lower_patch_vertices_tes);
-   brw_postprocess_nir(nir, compiler, dispatch_width, params->base.archiver,
-                       debug_enabled, key->base.robust_flags);
-
    const uint32_t pos_slots =
       (nir->info.per_view_outputs & VARYING_BIT_POS) ?
       MAX2(1, util_bitcount(key->base.view_mask)) : 1;
@@ -119,6 +105,19 @@ brw_compile_tes(const struct brw_compiler *compiler,
    brw_compute_vue_map(devinfo, &prog_data->base.vue_map,
                        nir->info.outputs_written,
                        key->base.vue_layout, pos_slots);
+
+   brw_nir_apply_key(pt, &key->base, dispatch_width);
+   brw_nir_lower_tes_inputs(nir, devinfo, &input_vue_map);
+   brw_nir_lower_vue_outputs(nir);
+   BRW_NIR_SNAPSHOT("after_lower_io");
+
+   brw_nir_opt_vectorize_urb(pt);
+   BRW_NIR_PASS(intel_nir_lower_patch_vertices_tes);
+
+   brw_postprocess_nir(pt, debug_enabled);
+
+   BRW_NIR_PASS(brw_nir_lower_deferred_urb_writes, devinfo,
+                &prog_data->base.vue_map, 0, 0);
 
    unsigned output_size_bytes = prog_data->base.vue_map.num_slots * 4 * 4;
 
@@ -133,7 +132,7 @@ brw_compile_tes(const struct brw_compiler *compiler,
       BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_PRIMITIVE_ID);
 
    /* URB entry sizes are stored as a multiple of 64 bytes. */
-   prog_data->base.urb_entry_size = ALIGN(output_size_bytes, 64) / 64;
+   prog_data->base.urb_entry_size = align(output_size_bytes, 64) / 64;
 
    prog_data->base.urb_read_length = 0;
 

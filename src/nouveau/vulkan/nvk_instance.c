@@ -14,7 +14,7 @@
 #include "util/build_id.h"
 #include "util/detect_os.h"
 #include "util/driconf.h"
-#include "util/mesa-sha1.h"
+#include "util/mesa-blake3.h"
 #include "util/u_debug.h"
 
 VKAPI_ATTR VkResult VKAPI_CALL
@@ -31,6 +31,7 @@ static const struct vk_instance_extension_table instance_extensions = {
 #ifdef NVK_USE_WSI_PLATFORM
    .KHR_get_surface_capabilities2 = true,
    .KHR_surface = true,
+   .KHR_surface_maintenance1 = true,
    .KHR_surface_protected_capabilities = true,
    .EXT_surface_maintenance1 = true,
    .EXT_swapchain_colorspace = true,
@@ -128,10 +129,11 @@ nvk_init_debug_flags(struct nvk_instance *instance)
       { "no_cbuf", NVK_DEBUG_NO_CBUF },
       { "edb_bview", NVK_DEBUG_FORCE_EDB_BVIEW },
       { "gart", NVK_DEBUG_FORCE_GART },
+      { "coherent", NVK_DEBUG_FORCE_COHERENT },
       { NULL, 0 },
    };
 
-   instance->debug_flags = parse_debug_string(getenv("NVK_DEBUG"), flags);
+   instance->debug_flags = parse_debug_string(os_get_option("NVK_DEBUG"), flags);
 }
 
 static const driOptionDescription nvk_dri_options[] = {
@@ -148,6 +150,7 @@ static const driOptionDescription nvk_dri_options[] = {
       DRI_CONF_VK_WSI_FORCE_SWAPCHAIN_TO_CURRENT_EXTENT(false)
       DRI_CONF_VK_X11_IGNORE_SUBOPTIMAL(false)
       DRI_CONF_VK_ZERO_VRAM(false)
+      DRI_CONF_NVK_APP_LAYER()
    DRI_CONF_SECTION_END
 };
 
@@ -164,6 +167,8 @@ nvk_init_dri_options(struct nvk_instance *instance)
 
    if (driQueryOptionb(&instance->dri_options, "vk_zero_vram"))
       instance->debug_flags |= NVK_DEBUG_ZERO_MEMORY;
+
+   instance->app_layer = driQueryOptionstr(&instance->dri_options, "nvk_app_layer");
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL
@@ -216,24 +221,24 @@ nvk_CreateInstance(const VkInstanceCreateInfo *pCreateInfo,
    }
 
    unsigned build_id_len = build_id_length(note);
-   if (build_id_len < SHA1_DIGEST_LENGTH) {
+   if (build_id_len < BUILD_ID_EXPECTED_HASH_LENGTH) {
       result = vk_errorf(NULL, VK_ERROR_INITIALIZATION_FAILED,
                         "build-id too short.  It needs to be a SHA");
       goto fail_init;
    }
 
-   STATIC_ASSERT(sizeof(instance->driver_build_sha) == SHA1_DIGEST_LENGTH);
-   memcpy(instance->driver_build_sha, build_id_data(note), SHA1_DIGEST_LENGTH);
+   STATIC_ASSERT(sizeof(instance->driver_build_sha) == BLAKE3_KEY_LEN);
+   copy_build_id_to_sha1(instance->driver_build_sha, note);
 #else
    /* No dl_iterate_phdr (e.g. Switch / static-only platforms): use a fixed
     * pseudo build-id derived from the package version. The shader cache
     * UUID will be stable for a given driver build but won't change between
     * incremental rebuilds. */
-   STATIC_ASSERT(sizeof(instance->driver_build_sha) == SHA1_DIGEST_LENGTH);
-   memset(instance->driver_build_sha, 0, SHA1_DIGEST_LENGTH);
+   STATIC_ASSERT(sizeof(instance->driver_build_sha) == BLAKE3_KEY_LEN);
+   memset(instance->driver_build_sha, 0, BLAKE3_KEY_LEN);
    const char fallback_id[] = "nvk-" PACKAGE_VERSION;
    memcpy(instance->driver_build_sha, fallback_id,
-          MIN2(sizeof(fallback_id) - 1, (size_t)SHA1_DIGEST_LENGTH));
+          MIN2(sizeof(fallback_id) - 1, (size_t)BLAKE3_KEY_LEN));
 #endif
 
    *pInstance = nvk_instance_to_handle(instance);

@@ -86,7 +86,6 @@ static const nir_shader_compiler_options sp_compiler_options = {
    .lower_flrp64 = true,
    .lower_fmod = true,
    .lower_uniforms_to_ubo = true,
-   .lower_vector_cmp = true,
    .lower_int64_options = nir_lower_imul_2x32_64,
    .max_unroll_iterations = 32,
 

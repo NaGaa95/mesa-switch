@@ -38,6 +38,7 @@
 #include "pipe/p_defines.h"
 #include "util/u_thread.h"
 #include "util/list.h"
+#include "util/mesa-blake3.h"
 #include "util/vma.h"
 #include "gallivm/lp_bld.h"
 #include "gallivm/lp_bld_misc.h"
@@ -92,13 +93,13 @@ struct llvmpipe_screen
 void
 lp_disk_cache_find_shader(struct llvmpipe_screen *screen,
                           struct lp_cached_code *cache,
-                          unsigned char ir_sha1_cache_key[20]);
+                          unsigned char ir_blake3_cache_key[BLAKE3_KEY_LEN]);
 
 
 void
 lp_disk_cache_insert_shader(struct llvmpipe_screen *screen,
                             struct lp_cached_code *cache,
-                            unsigned char ir_sha1_cache_key[20]);
+                            unsigned char ir_blake3_cache_key[BLAKE3_KEY_LEN]);
 
 bool
 llvmpipe_screen_late_init(struct llvmpipe_screen *screen);

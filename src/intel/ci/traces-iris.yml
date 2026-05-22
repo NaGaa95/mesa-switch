@@ -1,7 +1,7 @@
 %YAML 1.2
 ---
 traces-db:
-  download-url: "https://s3.freedesktop.org/mesa-tracie-public/"
+  download-url: https://s3.freedesktop.org/mesa-tracie-public/
 
 traces:
   behdad-glyphy/glyphy-v2.trace:
@@ -36,20 +36,20 @@ traces:
       checksum: f53ac20e17da91c0359c31f2fa3f401e
   0ad/0ad-v2.trace:
     gl-intel-apl:
-      checksum: b25b9dfce05def046f6277d05b3cba98
+      checksum: 6c9f66db38f03847574c543de48fa203
     gl-intel-glk:
-      checksum: b25b9dfce05def046f6277d05b3cba98
+      checksum: 6c9f66db38f03847574c543de48fa203
     gl-intel-amly:
-      checksum: b25b9dfce05def046f6277d05b3cba98
+      checksum: 6c9f66db38f03847574c543de48fa203
     gl-intel-kbl:
-      checksum: b25b9dfce05def046f6277d05b3cba98
+      checksum: 6c9f66db38f03847574c543de48fa203
     gl-intel-whl:
       checksum: e67b7a93bac02e41de0326419ee17a3e
     gl-intel-cml:
-      checksum: b25b9dfce05def046f6277d05b3cba98
+      checksum: 6c9f66db38f03847574c543de48fa203
     gl-intel-adl:
       label: [no-perf]
-      checksum: b25b9dfce05def046f6277d05b3cba98
+      checksum: 6c9f66db38f03847574c543de48fa203
   pathfinder/demo-v2.trace:
     gl-intel-apl:
       checksum: d9b33f0a2efe17c21b7933242afd9ec7
@@ -187,13 +187,13 @@ traces:
       checksum: f56761af17be6231bce480115cde3cec
   gputest/pixmark-volplosion-v2.trace:
     gl-intel-apl:
-      checksum: 9c891fd21b0cdc79f7071001d95d549c
+      checksum: 8463a40fbc699c9cf887b97dae831786
     gl-intel-glk:
-      checksum: 9c891fd21b0cdc79f7071001d95d549c
+      checksum: 8463a40fbc699c9cf887b97dae831786
     gl-intel-amly:
       checksum: 9c891fd21b0cdc79f7071001d95d549c
     gl-intel-kbl:
-      checksum: 9c891fd21b0cdc79f7071001d95d549c
+      checksum: 8463a40fbc699c9cf887b97dae831786
     gl-intel-whl:
       checksum: 9c891fd21b0cdc79f7071001d95d549c
     gl-intel-cml:
@@ -483,13 +483,13 @@ traces:
       checksum: dde3a4118bca61afdb5fcd94c30e61cd
   valve/counterstrike-source-v2.trace:
     gl-intel-apl:
-      checksum: 7d736f5ab20cf3cd29d97a40c2144229
+      checksum: 4404bbc13a44be178699a47e33ff0ca5
     gl-intel-glk:
-      checksum: 7d736f5ab20cf3cd29d97a40c2144229
+      checksum: 4404bbc13a44be178699a47e33ff0ca5
     gl-intel-amly:
       checksum: 7d736f5ab20cf3cd29d97a40c2144229
     gl-intel-kbl:
-      checksum: 7d736f5ab20cf3cd29d97a40c2144229
+      checksum: 4404bbc13a44be178699a47e33ff0ca5
     gl-intel-whl:
       checksum: 838ed7482efd5e9d7bde2b67e62314c4
     gl-intel-cml:
@@ -499,13 +499,13 @@ traces:
       checksum: 7d736f5ab20cf3cd29d97a40c2144229
   valve/half-life-2-v2.trace:
     gl-intel-apl:
-      checksum: 21fb5eeb7215f6856d9af6827788ad77
+      checksum: a50f5f1e004d17261c2e9e1dea2801f8
     gl-intel-glk:
-      checksum: 21fb5eeb7215f6856d9af6827788ad77
+      checksum: a50f5f1e004d17261c2e9e1dea2801f8
     gl-intel-amly:
       checksum: 21fb5eeb7215f6856d9af6827788ad77
     gl-intel-kbl:
-      checksum: 21fb5eeb7215f6856d9af6827788ad77
+      checksum: a50f5f1e004d17261c2e9e1dea2801f8
     gl-intel-whl:
       checksum: c4ba4cdc96396b354b0040278b374b15
     gl-intel-cml:
@@ -557,7 +557,7 @@ traces:
       checksum: 85b4f3279fde206dace85ffd727057ea
     gl-intel-kbl:
       label: [no-perf]
-      checksum: 85b4f3279fde206dace85ffd727057ea
+      checksum: efab5903f88f7f34e7c948cfcfb54cd9
     gl-intel-whl:
       label: [no-perf]
       checksum: 6a0e17d98eca33e80810b6158e998aa1

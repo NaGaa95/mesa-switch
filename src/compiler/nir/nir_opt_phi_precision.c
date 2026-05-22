@@ -237,7 +237,7 @@ try_move_narrowing_dst(nir_builder *b, nir_phi_instr *phi)
    /* Push the conversion into the new phi sources: */
    nir_foreach_phi_src(src, phi) {
       /* insert new conversion instr in block of original phi src: */
-      b->cursor = nir_after_instr_and_phis(src->src.ssa->parent_instr);
+      b->cursor = nir_after_instr_and_phis(nir_def_instr(src->src.ssa));
       nir_def *old_src = src->src.ssa;
       nir_def *new_src = nir_build_alu(b, op, old_src, NULL, NULL, NULL);
 
@@ -255,6 +255,7 @@ try_move_narrowing_dst(nir_builder *b, nir_phi_instr *phi)
        */
       nir_alu_instr *alu = nir_instr_as_alu(nir_src_parent_instr(use));
       alu->op = nir_op_mov;
+      alu->fp_math_ctrl = nir_op_valid_fp_math_ctrl(alu->op, alu->fp_math_ctrl);
    }
    nir_def_rewrite_uses(&phi->def, &new_phi->def);
 
@@ -309,7 +310,7 @@ find_widening_op(nir_phi_instr *phi, unsigned *bit_size)
    *bit_size = 0;
 
    nir_foreach_phi_src(src, phi) {
-      nir_instr *instr = src->src.ssa->parent_instr;
+      nir_instr *instr = nir_def_instr(src->src.ssa);
       if (instr->type == nir_instr_type_load_const) {
          has_load_const = true;
          continue;
@@ -338,6 +339,9 @@ find_widening_op(nir_phi_instr *phi, unsigned *bit_size)
    if ((op == INVALID_OP) || !has_load_const)
       return op;
 
+   if (*bit_size != 16)
+      return INVALID_OP;
+
    /* If we could otherwise move widening sources, but load_const is
     * one of the phi sources (and does not have a widening conversion,
     * but could have a narrowing->widening sequence inserted without
@@ -345,7 +349,7 @@ find_widening_op(nir_phi_instr *phi, unsigned *bit_size)
     * sequence to make the rest of the transformation possible:
     */
    nir_foreach_phi_src(src, phi) {
-      nir_instr *instr = src->src.ssa->parent_instr;
+      nir_instr *instr = nir_def_instr(src->src.ssa);
       if (instr->type != nir_instr_type_load_const)
          continue;
 
@@ -379,7 +383,7 @@ try_move_widening_src(nir_builder *b, nir_phi_instr *phi)
 
    /* Remove the widening conversions from the phi sources: */
    nir_foreach_phi_src(src, phi) {
-      nir_instr *instr = src->src.ssa->parent_instr;
+      nir_instr *instr = nir_def_instr(src->src.ssa);
       nir_def *new_src;
 
       b->cursor = nir_after_instr(instr);

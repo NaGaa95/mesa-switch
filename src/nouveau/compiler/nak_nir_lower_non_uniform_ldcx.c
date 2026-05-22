@@ -55,19 +55,15 @@ lower_ldcx_to_global(nir_builder *b, nir_intrinsic_instr *load,
    /* At this point we can assume the offset is aligned so we only need a
     * simple less-than check here.
     */
-   nir_def *zero = nir_imm_zero(b, load->def.num_components,
-                                   load->def.bit_size);
-   nir_def *val;
-   nir_push_if(b, nir_ilt(b, offset, size));
-   {
-      val = nir_build_load_global_constant(b,
-         load->def.num_components, load->def.bit_size,
-         nir_iadd(b, addr, nir_u2u64(b, offset)),
-         .align_mul = nir_intrinsic_align_mul(load),
-         .align_offset = nir_intrinsic_align_offset(load));
-   }
-   nir_pop_if(b, NULL);
-   val = nir_if_phi(b, val, zero);
+   nir_def *cond = nir_ilt(b, offset, size);
+   nir_def *val = nir_load_global_nv(b,
+      load->def.num_components, load->def.bit_size,
+      nir_iadd(b, addr, nir_u2u64(b, offset)),
+      cond,
+      .align_mul = nir_intrinsic_align_mul(load),
+      .align_offset = nir_intrinsic_align_offset(load),
+      .access = ACCESS_CAN_REORDER,
+      .base = nir_intrinsic_base(load));
 
    nir_def_replace(&load->def, val);
 }
@@ -132,7 +128,7 @@ can_hoist_def(nir_def *def, nir_block *target)
    if (!def_needs_hoist(def, target))
       return true;
 
-   nir_instr *instr = def->parent_instr;
+   nir_instr *instr = nir_def_instr(def);
    switch (instr->type) {
    case nir_instr_type_alu: {
       nir_alu_instr *alu = nir_instr_as_alu(instr);
@@ -171,7 +167,7 @@ hoist_def(nir_def *def, nir_block *target)
    if (!def_needs_hoist(def, target))
       return false;
 
-   nir_instr *instr = def->parent_instr;
+   nir_instr *instr = nir_def_instr(def);
    switch (instr->type) {
    case nir_instr_type_alu: {
       nir_alu_instr *alu = nir_instr_as_alu(instr);
@@ -217,7 +213,7 @@ try_hoist_ldcx_handles_block(nir_block *block, struct non_uniform_section *nus)
           */
          nir_alu_instr *alu = nir_instr_as_alu(instr);
          for (uint8_t i = 0; i < nir_op_infos[alu->op].num_inputs; i++) {
-            nir_instr *src_instr = alu->src[i].src.ssa->parent_instr;
+            nir_instr *src_instr = nir_def_instr(alu->src[i].src.ssa);
             if (src_instr->type != nir_instr_type_intrinsic)
                continue;
 
@@ -331,7 +327,7 @@ static bool
 try_remat_ldcx_alu_use(nir_builder *b, nir_alu_instr *alu, uint8_t src_idx,
                        struct non_uniform_section *nus)
 {
-   nir_instr *src_instr = alu->src[src_idx].src.ssa->parent_instr;
+   nir_instr *src_instr = nir_def_instr(alu->src[src_idx].src.ssa);
    if (src_instr->type != nir_instr_type_intrinsic)
       return false;
 

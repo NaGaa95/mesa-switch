@@ -18,8 +18,9 @@ struct nvk_instance {
 
    struct driOptionCache dri_options;
    struct driOptionCache available_dri_options;
+   char *app_layer;
 
-   uint8_t driver_build_sha[20];
+   uint8_t driver_build_sha[BLAKE3_KEY_LEN];
    uint32_t force_vk_vendor;
 };
 

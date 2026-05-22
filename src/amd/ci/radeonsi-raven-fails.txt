@@ -46,7 +46,6 @@ api@clgetdeviceinfo,Fail
 api@clgetextensionfunctionaddressforplatform,Fail
 api@clgetkernelarginfo,Fail
 api@cllinkprogram,Fail
-custom@r600 create release buffer bug,Fail
 program@build@vector-data-types,Fail
 program@execute@builtin@builtin-float-nextafter-1.0.generated,Fail
 program@execute@builtin@builtin-float-nextafter-1.0.generated@nextafter float1,Fail
@@ -63,6 +62,7 @@ program@execute@builtin@builtin-float-sign-1.0.generated@sign float8,Fail
 program@execute@global-offset,Fail
 program@execute@global-offset@3d- input dependent,Fail
 program@execute@vector-conversion,Fail
+api@clgetmemobjectinfo,Fail
 
 # piglit bug, pigligt checks the global limits, but radeonsi advertises
 # only half the threads if the work group size is variable...
@@ -71,5 +71,4 @@ program@run kernel with max work item sizes,Fail
 # uprev Piglit in Mesa
 spec@ext_external_objects@vk-semaphores,Crash
 spec@ext_external_objects@vk-semaphores-2,Crash
-spec@glsl-es-1.00@linker@glsl-mismatched-uniform-precision-unused,Fail
 

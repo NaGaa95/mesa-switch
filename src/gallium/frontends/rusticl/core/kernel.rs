@@ -619,7 +619,7 @@ fn opt_nir(nir: &mut NirShader, dev: &Device, has_explicit_types: bool) {
     while {
         let mut progress = false;
 
-        progress |= nir_pass!(nir, nir_copy_prop);
+        progress |= nir_pass!(nir, nir_opt_copy_prop);
         progress |= nir_pass!(nir, nir_opt_copy_prop_vars);
         progress |= nir_pass!(nir, nir_opt_dead_write_vars);
 
@@ -706,7 +706,6 @@ fn compile_nir_to_args(
     nir.set_fp_rounding_mode_rtne();
 
     nir_pass!(nir, nir_scale_fdiv);
-    nir.set_workgroup_size_variable_if_zero();
     nir.structurize();
     nir_pass!(
         nir,
@@ -717,7 +716,7 @@ fn compile_nir_to_args(
     while {
         let mut progress = false;
         nir_pass!(nir, nir_split_var_copies);
-        progress |= nir_pass!(nir, nir_copy_prop);
+        progress |= nir_pass!(nir, nir_opt_copy_prop);
         progress |= nir_pass!(nir, nir_opt_copy_prop_vars);
         progress |= nir_pass!(nir, nir_opt_dead_write_vars);
         progress |= nir_pass!(nir, nir_opt_deref);
@@ -1048,7 +1047,12 @@ fn compile_nir_variant(
     }
     res.input_size = nir.uniform_size();
 
-    nir_pass!(nir, nir_lower_convert_alu_types, None);
+    nir_pass!(
+        nir,
+        nir_lower_convert_alu_types,
+        nir_options.lower_convert_alu_types
+    );
+    nir_pass!(nir, nir_opt_intrinsics);
 
     opt_nir(nir, dev, true);
 
@@ -1442,6 +1446,8 @@ impl Kernel {
     ) {
         // We have to use the required workgroup size if specified.
         if self.work_group_size() != [0; 3] {
+            // This is not just a memcpy, clippy is wrong here
+            #[expect(clippy::manual_memcpy)]
             for i in 0..work_dim {
                 block[i] = self.work_group_size()[i];
                 grid[i] /= block[i];

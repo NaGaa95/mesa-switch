@@ -376,7 +376,6 @@ _mesa_init_constants(struct gl_constants *consts, gl_api api)
    assert(consts);
 
    /* Constants, may be overriden (usually only reduced) by device drivers */
-   consts->MaxTextureMbytes = MAX_TEXTURE_MBYTES;
    consts->MaxTextureSize = 1 << (MAX_TEXTURE_LEVELS - 1);
    consts->Max3DTextureLevels = MAX_TEXTURE_LEVELS;
    consts->MaxCubeTextureLevels = MAX_TEXTURE_LEVELS;
@@ -1005,13 +1004,6 @@ _mesa_initialize_context(struct gl_context *ctx,
 
    _mesa_reset_vertex_processing_mode(ctx);
 
-   /* Mesa core handles all the formats that mesa core knows about.
-    * Drivers will want to override this list with just the formats
-    * they can handle.
-    */
-   memset(&ctx->TextureFormatSupported, GL_TRUE,
-          sizeof(ctx->TextureFormatSupported));
-
    switch (ctx->API) {
    case API_OPENGL_COMPAT:
    case API_OPENGL_CORE:
@@ -1043,7 +1035,7 @@ _mesa_initialize_context(struct gl_context *ctx,
    simple_mtx_lock(&ctx->Shared->Mutex);
    list_addtail(&ctx->SharedLink, &ctx->Shared->Contexts);
    simple_mtx_unlock(&ctx->Shared->Mutex);
-   util_dynarray_init(&ctx->ReleaseResources, NULL);
+   ctx->ReleaseResources = UTIL_DYNARRAY_INIT;
 
    return GL_TRUE;
 
@@ -1415,7 +1407,7 @@ handle_first_current(struct gl_context *ctx)
     * first time each context is made current we'll print some useful
     * information.
     */
-   if (getenv("MESA_INFO")) {
+   if (os_get_option("MESA_INFO")) {
       _mesa_print_info(ctx);
    }
 }

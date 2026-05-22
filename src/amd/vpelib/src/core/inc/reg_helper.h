@@ -231,33 +231,6 @@ typedef struct reg_id_val {
         config_writer_fill_direct_config_packet(config_writer, &packet);                           \
     } while (0)
 
-#define REG_UPDATE(reg, field, val)       REG_SET(reg, REG_CURRENT(reg), field, val)
-#define REG_UPDATE_2(reg, f1, v1, f2, v2) REG_SET_2(reg, REG_CURRENT(reg), f1, v1, f2, v2)
-#define REG_UPDATE_3(reg, f1, v1, f2, v2, f3, v3)                                                  \
-    REG_SET_3(reg, REG_CURRENT(reg), f1, v1, f2, v2, f3, v3)
-#define REG_UPDATE_4(reg, f1, v1, f2, v2, f3, v3, f4, v4)                                          \
-    REG_SET_4(reg, REG_CURRENT(reg), f1, v1, f2, v2, f3, v3, f4, v4)
-#define REG_UPDATE_5(reg, f1, v1, f2, v2, f3, v3, f4, v4, f5, v5)                                  \
-    REG_SET_5(reg, REG_CURRENT(reg), f1, v1, f2, v2, f3, v3, f4, v4, f5, v5)
-
-#define REG_UPDATE_6(reg, f1, v1, f2, v2, f3, v3, f4, v4, f5, v5, f6, v6)                          \
-    REG_SET_6(reg, REG_CURRENT(reg), f1, v1, f2, v2, f3, v3, f4, v4, f5, v5, f6, v6)
-
-#define REG_UPDATE_7(reg, f1, v1, f2, v2, f3, v3, f4, v4, f5, v5, f6, v6, f7, v7)                  \
-    REG_SET_7(reg, REG_CURRENT(reg), f1, v1, f2, v2, f3, v3, f4, v4, f5, v5, f6, v6, f7, v7)
-
-#define REG_UPDATE_8(reg, f1, v1, f2, v2, f3, v3, f4, v4, f5, v5, f6, v6, f7, v7, f8, v8)          \
-    REG_SET_8(reg, REG_CURRENT(reg), f1, v1, f2, v2, f3, v3, f4, v4, f5, v5, f6, v6, f7, v7, f8, v8)
-
-#define REG_UPDATE_9(reg, f1, v1, f2, v2, f3, v3, f4, v4, f5, v5, f6, v6, f7, v7, f8, v8, f9, v9)  \
-    REG_SET_9(reg, REG_CURRENT(reg), f1, v1, f2, v2, f3, v3, f4, v4, f5, v5, f6, v6, f7, v7, f8,   \
-        v8, f9, v9)
-
-#define REG_UPDATE_10(                                                                             \
-    reg, f1, v1, f2, v2, f3, v3, f4, v4, f5, v5, f6, v6, f7, v7, f8, v8, f9, v9, f10, v10)         \
-    REG_SET_10(reg, REG_CURRENT(reg), f1, v1, f2, v2, f3, v3, f4, v4, f5, v5, f6, v6, f7, v7, f8,  \
-        v8, f9, v9, f10, v10)
-
 #define REG_SET_DEFAULT(reg_name)                                                                  \
     do {                                                                                           \
         packet.bits.INC                         = 0;                                               \

@@ -1276,10 +1276,10 @@ draw_set_disk_cache_callbacks(struct draw_context *draw,
                               void *data_cookie,
                               void (*find_shader)(void *cookie,
                                                   struct lp_cached_code *cache,
-                                                  unsigned char ir_sha1_cache_key[20]),
+                                                  unsigned char ir_blake3_cache_key[BLAKE3_KEY_LEN]),
                               void (*insert_shader)(void *cookie,
                                                     struct lp_cached_code *cache,
-                                                    unsigned char ir_sha1_cache_key[20]))
+                                                    unsigned char ir_blake3_cache_key[BLAKE3_KEY_LEN]))
 {
    draw->disk_cache_find_shader = find_shader;
    draw->disk_cache_insert_shader = insert_shader;

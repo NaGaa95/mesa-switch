@@ -9,7 +9,7 @@
 #ifndef RADEON_VCE_H
 #define RADEON_VCE_H
 
-#include "radeon_video.h"
+#include "si_video.h"
 #include "util/list.h"
 
 #define RVCE_CS(value) (enc->cs.current.buf[enc->cs.current.cdw++] = (value))
@@ -293,6 +293,11 @@ struct rvce_h264_enc_pic {
    bool not_referenced;
 };
 
+struct rvce_fb_buffer {
+   struct si_resource *res;
+   void *data;
+};
+
 /* VCE encoder representation */
 struct rvce_encoder {
    struct pipe_video_codec base;
@@ -316,8 +321,8 @@ struct rvce_encoder {
 
    unsigned dpb_slots;
 
-   struct rvid_buffer *fb;
-   struct rvid_buffer dpb;
+   struct rvce_fb_buffer *fb;
+   struct si_resource *dpb;
    struct pipe_h264_enc_picture_desc pic;
    struct rvce_h264_enc_pic enc_pic;
 

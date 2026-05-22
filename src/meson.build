@@ -53,6 +53,9 @@ if with_gallium_or_lvp or with_gbm or with_platform_wayland
   subdir('loader')
 endif
 subdir('compiler')
+if with_poly
+  subdir('poly')
+endif
 if with_tools.contains('drm-shim')
   subdir('drm-shim')
 endif
@@ -64,9 +67,6 @@ if with_wayland_bind_display
 endif
 if with_any_vk or with_gallium_zink
   subdir('vulkan')
-endif
-if with_any_intel
-  subdir('intel')
 endif
 if with_virtio_vk
   subdir('virtio/vulkan')
@@ -89,6 +89,9 @@ endif
 if with_imagination_vk or with_tools.contains('imagination')
   subdir('imagination')
 endif
+if with_any_intel
+  subdir('intel')
+endif
 if with_gallium_panfrost or with_gallium_lima or with_panfrost_vk or with_tools.contains('panfrost')
   subdir('panfrost')
 endif
@@ -110,6 +113,9 @@ if with_gfxstream_vk
 endif
 if with_gallium_asahi or with_asahi_vk or with_tools.contains('asahi')
   subdir('asahi')
+endif
+if with_kosmickrisp_vk
+  subdir('kosmickrisp')
 endif
 if with_gallium
   subdir('mesa')
@@ -158,7 +164,7 @@ endif
 if with_egl
   subdir('egl')
 endif
-if with_gallium and with_gbm
+if with_gallium
   if with_glx == 'dri' or with_platform_x11 or with_platform_xcb
     subdir('gallium/targets/dril')
   endif

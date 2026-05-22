@@ -1,30 +1,13 @@
 /*
  * Copyright © 2020 Intel Corporation
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
- * IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  */
 
 #include "intel_nir.h"
 #include "brw_nir_rt.h"
 #include "brw_nir_rt_builder.h"
 #include "intel_nir.h"
+#include "brw_private.h"
 
 static bool
 resize_deref(nir_builder *b, nir_deref_instr *deref,
@@ -36,8 +19,7 @@ resize_deref(nir_builder *b, nir_deref_instr *deref,
 
    /* NIR requires array indices have to match the deref bit size */
    if (deref->def.bit_size != bit_size &&
-       (deref->deref_type == nir_deref_type_array ||
-        deref->deref_type == nir_deref_type_ptr_as_array)) {
+       nir_deref_instr_is_arr(deref)) {
       b->cursor = nir_before_instr(&deref->instr);
       nir_def *idx;
       if (nir_src_is_const(deref->arr.index)) {
@@ -109,7 +91,7 @@ lower_rt_io_derefs(nir_shader *shader, const struct intel_device_info *devinfo)
                                                brw_nir_rt_stack_addr(&b),
                                                stage == MESA_SHADER_CLOSEST_HIT,
                                                devinfo);
-         nir_store_global(&b, hit_attrib_addr, 4, tri_bary, 0x3);
+         nir_store_global(&b, tri_bary, hit_attrib_addr);
       }
       nir_pop_if(&b, NULL);
 
@@ -400,7 +382,9 @@ build_load_uniform(nir_builder *b, unsigned offset,
                    unsigned num_components, unsigned bit_size)
 {
    return nir_load_inline_data_intel(b, num_components, bit_size,
-                                     .base = offset);
+                                     nir_imm_int(b, 0),
+                                     .base = offset,
+                                     .range = num_components * bit_size / 8);
 }
 
 #define load_trampoline_param(b, name, num_components, bit_size) \
@@ -428,7 +412,6 @@ brw_nir_create_raygen_trampoline(const struct brw_compiler *compiler,
     * passed in as push constants in the first register.  We deal with the
     * raygen BSR address here; the global data we'll deal with later.
     */
-   b.shader->num_uniforms = 32;
    nir_def *raygen_param_bsr_addr =
       load_trampoline_param(&b, raygen_bsr_addr, 1, 64);
    nir_def *is_indirect =
@@ -440,10 +423,7 @@ brw_nir_create_raygen_trampoline(const struct brw_compiler *compiler,
    nir_push_if(&b, is_indirect);
    {
       raygen_indirect_bsr_addr =
-         nir_load_global_constant(&b, raygen_param_bsr_addr,
-                                  8 /* align */,
-                                  1 /* components */,
-                                  64 /* bit_size */);
+         nir_load_global_constant(&b, 1, 64, raygen_param_bsr_addr);
    }
    nir_pop_if(&b, NULL);
 
@@ -470,12 +450,12 @@ brw_nir_create_raygen_trampoline(const struct brw_compiler *compiler,
    nir_def *launch_size = nir_load_ray_launch_size(&b);
    nir_push_if(&b, nir_ball(&b, nir_ult(&b, launch_id, launch_size)));
    {
-      nir_store_global(&b, brw_nir_rt_sw_hotzone_addr(&b, devinfo), 16,
-                       nir_vec4(&b, nir_imm_int(&b, 0), /* Stack ptr */
+      nir_store_global(&b, nir_vec4(&b, nir_imm_int(&b, 0), /* Stack ptr */
                                     nir_channel(&b, launch_id, 0),
                                     nir_channel(&b, launch_id, 1),
                                     nir_channel(&b, launch_id, 2)),
-                       0xf /* write mask */);
+                       brw_nir_rt_sw_hotzone_addr(&b, devinfo),
+                       .align_mul = 16);
 
       brw_nir_btd_spawn(&b, raygen_bsr_addr);
    }
@@ -522,7 +502,14 @@ brw_nir_create_raygen_trampoline(const struct brw_compiler *compiler,
 
    NIR_PASS(_, nir, brw_nir_lower_cs_intrinsics, devinfo, NULL);
 
-   brw_nir_optimize(nir, devinfo);
+   brw_pass_tracker pt = {
+      .nir = nir,
+      .compiler = compiler,
+   };
+
+   brw_nir_optimize(&pt);
+   /* brw_nir_optimize undoes late lowerings. */
+   NIR_PASS(_, nir, nir_opt_algebraic_late);
 
    return nir;
 }

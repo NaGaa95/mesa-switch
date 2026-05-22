@@ -54,6 +54,7 @@ static struct dpp_funcs vpe10_dpp_funcs = {
     .get_optimal_number_of_taps  = vpe10_dpp_get_optimal_number_of_taps,
     .dscl_calc_lb_num_partitions = vpe10_dscl_calc_lb_num_partitions,
     .set_segment_scaler          = vpe10_dpp_set_segment_scaler,
+    .dscl_set_scaler_position    = vpe10_dpp_dscl_set_scaler_position,
     .set_frame_scaler            = vpe10_dpp_set_frame_scaler,
     .get_line_buffer_size        = vpe10_get_line_buffer_size,
     .validate_number_of_taps     = vpe10_dpp_validate_number_of_taps,
@@ -484,6 +485,6 @@ bool vpe10_dpp_validate_number_of_taps(struct dpp *dpp, struct scaler_data *scl_
 void vpe10_dpp_program_crc(struct dpp *dpp, bool enable)
 {
     PROGRAM_ENTRY();
-    REG_UPDATE(VPDPP_CRC_CTRL, VPDPP_CRC_EN, enable);
+    REG_SET(VPDPP_CRC_CTRL, REG_DEFAULT(VPDPP_CRC_CTRL), VPDPP_CRC_EN, enable);
 }
 

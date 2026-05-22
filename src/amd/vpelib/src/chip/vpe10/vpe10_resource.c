@@ -120,106 +120,111 @@ static const struct vpe10_opp_shift opp_shift = {OPP_FIELD_LIST_VPE10(__SHIFT)};
 
 static const struct vpe10_opp_mask opp_mask = {OPP_FIELD_LIST_VPE10(_MASK)};
 
-static struct vpe_caps caps = {
-    .max_input_size =
+static struct vpe_caps
+    caps =
         {
-            .width  = 16384,
-            .height = 16384,
-        },
-    .max_output_size =
-        {
-            .width  = 16384,
-            .height = 16384,
-        },
-    .min_input_size =
-        {
-            .width  = 1,
-            .height = 1,
-        },
-    .min_output_size =
-        {
-            .width  = 1,
-            .height = 1,
-        },
-    .lut_size               = LUT_BUFFER_SIZE,
-    .rotation_support       = 0,
-    .h_mirror_support       = 1,
-    .v_mirror_support       = 0,
-    .is_apu                 = 1,
-    .bg_color_check_support = 0,
-    .resource_caps =
-        {
-            .num_dpp       = 1,
-            .num_opp       = 1,
-            .num_mpc_3dlut = 1,
-            .num_queue     = 8,
-            .num_cdc_be    = 1,
-        },
-    .color_caps = {.dpp =
-                       {
-                           .pre_csc    = 1,
-                           .luma_key   = 0,
-                           .color_key  = 1,
-                           .dgam_ram   = 0,
-                           .post_csc   = 1,
-                           .gamma_corr = 1,
-                           .hw_3dlut   = 1,
-                           .ogam_ram   = 1, /**< programmable gam in output -> gamma_corr */
-                           .ocsc       = 0,
-                           .dgam_rom_caps =
+            .max_input_size =
+                {
+                    .width  = 16384,
+                    .height = 16384,
+                },
+            .max_output_size =
+                {
+                    .width  = 16384,
+                    .height = 16384,
+                },
+            .min_input_size =
+                {
+                    .width  = 1,
+                    .height = 1,
+                },
+            .min_output_size =
+                {
+                    .width  = 1,
+                    .height = 1,
+                },
+            .lut_size               = LUT_BUFFER_SIZE,
+            .rotation_support       = 0,
+            .h_mirror_support       = 1,
+            .v_mirror_support       = 0,
+            .is_apu                 = 1,
+            .bg_color_check_support = 0,
+
+            .prefer_external_scaler_coef = 1,
+
+            .resource_caps =
+                {
+                    .num_dpp       = 1,
+                    .num_opp       = 1,
+                    .num_mpc_3dlut = 1,
+                    .num_queue     = 8,
+                    .num_cdc_be    = 1,
+                },
+            .color_caps = {.dpp =
                                {
-                                   .srgb     = 1,
-                                   .bt2020   = 1,
-                                   .gamma2_2 = 1,
-                                   .pq       = 1,
-                                   .hlg      = 1,
+                                   .pre_csc    = 1,
+                                   .luma_key   = 0,
+                                   .color_key  = 1,
+                                   .dgam_ram   = 0,
+                                   .post_csc   = 1,
+                                   .gamma_corr = 1,
+                                   .hw_3dlut   = 1,
+                                   .ogam_ram   = 1, /**< programmable gam in output -> gamma_corr */
+                                   .ocsc       = 0,
+                                   .dgam_rom_caps =
+                                       {
+                                           .srgb     = 1,
+                                           .bt2020   = 1,
+                                           .gamma2_2 = 1,
+                                           .pq       = 1,
+                                           .hlg      = 1,
+                                       },
                                },
-                       },
-        .mpc =
-            {
-                .gamut_remap         = 1,
-                .ogam_ram            = 1,
-                .ocsc                = 1,
-                .shared_3d_lut       = 1,
-                .global_alpha        = 1,
-                .top_bottom_blending = 0,
-            }},
-    .plane_caps =
-        {
-            .per_pixel_alpha = 1,
-            .input_pixel_format_support =
+                .mpc =
+                    {
+                        .gamut_remap         = 1,
+                        .ogam_ram            = 1,
+                        .ocsc                = 1,
+                        .shared_3d_lut       = 1,
+                        .global_alpha        = 1,
+                        .top_bottom_blending = 0,
+                    }},
+            .plane_caps =
                 {
-                    .argb_packed_32b = 1,
-                    .nv12            = 1,
-                    .fp16            = 0,
-                    .p010            = 1, /**< planar 4:2:0 10-bit */
-                    .p016            = 0, /**< planar 4:2:0 16-bit */
-                    .ayuv            = 0, /**< packed 4:4:4 */
-                    .yuy2            = 0, /**< packed 4:2:2 */
-                },
-            .output_pixel_format_support =
-                {
-                    .argb_packed_32b = 1,
-                    .nv12            = 0,
-                    .fp16            = 1,
-                    .p010            = 0, /**< planar 4:2:0 10-bit */
-                    .p016            = 0, /**< planar 4:2:0 16-bit */
-                    .ayuv            = 0, /**< packed 4:4:4 */
-                    .yuy2            = 0, /**< packed 4:2:2 */
-                },
-            .max_upscale_factor = 64000,
+                    .per_pixel_alpha = 1,
+                    .input_pixel_format_support =
+                        {
+                            .argb_packed_32b = 1,
+                            .nv12            = 1,
+                            .fp16            = 0,
+                            .p010            = 1, /**< planar 4:2:0 10-bit */
+                            .p016            = 0, /**< planar 4:2:0 16-bit */
+                            .ayuv            = 0, /**< packed 4:4:4 */
+                            .yuy2            = 0, /**< packed 4:2:2 */
+                        },
+                    .output_pixel_format_support =
+                        {
+                            .argb_packed_32b = 1,
+                            .nv12            = 0,
+                            .fp16            = 1,
+                            .p010            = 0, /**< planar 4:2:0 10-bit */
+                            .p016            = 0, /**< planar 4:2:0 16-bit */
+                            .ayuv            = 0, /**< packed 4:4:4 */
+                            .yuy2            = 0, /**< packed 4:2:2 */
+                        },
+                    .max_upscale_factor = 64000,
 
-            /*
-             * 4:1 downscaling ratio : 1000 / 4 = 250
-             * vpelib does not support more than 4:1 to preserve quality
-             * due to the limitation of using maximum number of 8 taps
-             */
-            .max_downscale_factor = 250,
+                    /*
+                     * 4:1 downscaling ratio : 1000 / 4 = 250
+                     * vpelib does not support more than 4:1 to preserve quality
+                     * due to the limitation of using maximum number of 8 taps
+                     */
+                    .max_downscale_factor = 250,
 
-            .pitch_alignment    = 256,
-            .addr_alignment     = 256,
-            .max_viewport_width = 1024,
-        },
+                    .pitch_alignment    = 256,
+                    .addr_alignment     = 256,
+                    .max_viewport_width = 1024,
+                },
 };
 
 static bool vpe10_init_scaler_data(struct vpe_priv *vpe_priv, struct stream_ctx *stream_ctx,
@@ -228,7 +233,8 @@ static bool vpe10_init_scaler_data(struct vpe_priv *vpe_priv, struct stream_ctx 
     struct dpp *dpp;
     dpp = vpe_priv->resource.dpp[0];
 
-    calculate_scaling_ratios(scl_data, src_rect, dst_rect, stream_ctx->stream.surface_info.format);
+    vpe_calculate_scaling_ratios(
+        scl_data, src_rect, dst_rect, stream_ctx->stream.surface_info.format);
 
     scl_data->taps.v_taps   = stream_ctx->stream.scaling_info.taps.v_taps;
     scl_data->taps.h_taps   = stream_ctx->stream.scaling_info.taps.h_taps;
@@ -438,6 +444,7 @@ enum vpe_status vpe10_construct_resource(struct vpe_priv *vpe_priv, struct resou
     res->update_blnd_gamma                 = vpe10_update_blnd_gamma;
     res->update_output_gamma               = vpe10_update_output_gamma;
     res->validate_cached_param             = vpe10_validate_cached_param;
+    res->calculate_shaper                  = vpe10_calculate_shaper;
 
     return VPE_STATUS_OK;
 err:
@@ -660,6 +667,7 @@ enum vpe_status vpe10_calculate_segments(
     const uint32_t      max_downscale_factor = vpe_priv->pub.caps->plane_caps.max_downscale_factor;
     struct dpp         *dpp                  = vpe_priv->resource.dpp[0];
     const uint32_t      max_lb_size          = dpp->funcs->get_line_buffer_size();
+    uint16_t            alignment            = 1;
 
     for (stream_idx = 0; stream_idx < vpe_priv->num_streams; stream_idx++) {
         stream_ctx = &vpe_priv->stream_ctx[stream_idx];
@@ -740,7 +748,8 @@ enum vpe_status vpe10_calculate_segments(
     if (!gaps)
         return VPE_STATUS_NO_MEMORY;
 
-    gaps_cnt = vpe_priv->resource.find_bg_gaps(vpe_priv, &(params->target_rect), gaps, max_gaps);
+    gaps_cnt = vpe_priv->resource.find_bg_gaps(
+        vpe_priv, &(params->target_rect), gaps, alignment, max_gaps);
 
     if (gaps_cnt > 0)
         vpe_priv->resource.create_bg_segments(vpe_priv, gaps, gaps_cnt, VPE_CMD_OPS_BG);
@@ -895,12 +904,9 @@ int32_t vpe10_program_frontend(struct vpe_priv *vpe_priv, uint32_t pipe_idx, uin
         dpp->funcs->program_input_transfer_func(dpp, stream_ctx->input_tf);
         dpp->funcs->program_gamut_remap(dpp, stream_ctx->gamut_remap);
 
-        enum mpcc_blend_mode blend_mode = get_blend_mode(
-            MPC_MUX_TOPSEL_DPP0, MPC_MUX_BOTSEL_DISABLE, vpe_priv->init.debug.mpc_bypass == 1);
-
         // for not bypass mode, we always are in single layer coming from DPP and output to OPP
         mpc->funcs->program_mpcc_mux(mpc, MPC_MPCCID_0, MPC_MUX_TOPSEL_DPP0, MPC_MUX_BOTSEL_DISABLE,
-            MPC_MUX_OUTMUX_MPCC0, MPC_MUX_OPPID_OPP0, blend_mode);
+            MPC_MUX_OUTMUX_MPCC0, MPC_MUX_OPPID_OPP0);
 
         // program shaper, 3dlut and 1dlut in MPC for stream before blend
         mpc->funcs->program_movable_cm(
@@ -933,7 +939,11 @@ int32_t vpe10_program_frontend(struct vpe_priv *vpe_priv, uint32_t pipe_idx, uin
         config_writer_complete(&vpe_priv->config_writer);
     }
 
-    vpe10_create_stream_ops_config(vpe_priv, pipe_idx, stream_ctx, cmd_input, cmd_info->ops);
+    enum mpcc_blend_mode blend_mode = get_blend_mode(
+        MPC_MUX_TOPSEL_DPP0, MPC_MUX_BOTSEL_DISABLE, vpe_priv->init.debug.mpc_bypass == 1);
+
+    vpe10_create_stream_ops_config(
+        vpe_priv, pipe_idx, stream_ctx, cmd_input, cmd_info->ops, blend_mode);
 
     /* start segment specific programming */
     vpe_priv->fe_cb_ctx.stream_sharing    = false;
@@ -962,9 +972,11 @@ int32_t vpe10_program_backend(
 
     struct bit_depth_reduction_params         fmt_bit_depth;
     struct clamping_and_pixel_encoding_params clamp_param;
+    struct opp_pipe_control_params            pipe_ctrl_param;
     enum color_depth                          display_color_depth;
     uint16_t                                  alpha_16;
     bool                                      opp_dig_bypass = false;
+    struct fmt_control_params                 fmt_ctrl       = {0};
 
     vpe_priv->be_cb_ctx.vpe_priv = vpe_priv;
     config_writer_set_callback(
@@ -1007,8 +1019,9 @@ int32_t vpe10_program_backend(
                 alpha_16 = 0xffff;
         }
 
-        opp->funcs->program_pipe_alpha(opp, alpha_16);
-        opp->funcs->program_pipe_bypass(opp, opp_dig_bypass);
+        pipe_ctrl_param.alpha         = alpha_16;
+        pipe_ctrl_param.bypass_enable = opp_dig_bypass;
+        opp->funcs->program_pipe_control(opp, &pipe_ctrl_param);
 
         display_color_depth = vpe_get_color_depth(surface_info->format);
         build_clamping_params(opp, &clamp_param);
@@ -1016,7 +1029,7 @@ int32_t vpe10_program_backend(
 
         // disable dynamic expansion for now as no use case
         opp->funcs->set_dyn_expansion(opp, false, display_color_depth);
-        opp->funcs->program_fmt(opp, &fmt_bit_depth, &clamp_param);
+        opp->funcs->program_fmt(opp, &fmt_bit_depth, &fmt_ctrl, &clamp_param);
         if (vpe_priv->init.debug.opp_pipe_crc_ctrl)
             opp->funcs->program_pipe_crc(opp, true);
 
@@ -1032,12 +1045,12 @@ enum vpe_status vpe10_populate_cmd_info(struct vpe_priv *vpe_priv)
     uint16_t             segment_idx;
     struct stream_ctx   *stream_ctx;
     struct vpe_cmd_info  cmd_info = {0};
-    bool                 tm_enabled;
+    enum lut3d_type      lut3d_type;
 
     for (stream_idx = 0; stream_idx < vpe_priv->num_streams; stream_idx++) {
         stream_ctx = &vpe_priv->stream_ctx[stream_idx];
 
-        tm_enabled = stream_ctx->stream.tm_params.UID != 0 || stream_ctx->stream.tm_params.enable_3dlut;
+        lut3d_type = vpe_get_stream_lut3d_type(stream_ctx);
 
         for (segment_idx = 0; segment_idx < stream_ctx->num_segments; segment_idx++) {
 
@@ -1053,7 +1066,7 @@ enum vpe_status vpe10_populate_cmd_info(struct vpe_priv *vpe_priv)
 
             cmd_info.num_inputs         = 1;
             cmd_info.ops                = VPE_CMD_OPS_COMPOSITING;
-            cmd_info.tm_enabled         = tm_enabled;
+            cmd_info.lut3d_type         = lut3d_type;
             cmd_info.insert_start_csync = false;
             cmd_info.insert_end_csync   = false;
             vpe_vector_push(vpe_priv->vpe_cmd_vector, &cmd_info);
@@ -1077,7 +1090,8 @@ enum vpe_status vpe10_populate_cmd_info(struct vpe_priv *vpe_priv)
 }
 
 void vpe10_create_stream_ops_config(struct vpe_priv *vpe_priv, uint32_t pipe_idx,
-    struct stream_ctx *stream_ctx, struct vpe_cmd_input *cmd_input, enum vpe_cmd_ops ops)
+    struct stream_ctx *stream_ctx, struct vpe_cmd_input *cmd_input, enum vpe_cmd_ops ops,
+    enum mpcc_blend_mode blend_mode)
 {
     /* put all hw programming that can be shared according to the cmd type within a stream here */
     struct mpcc_blnd_cfg blndcfg  = {0};
@@ -1185,6 +1199,7 @@ void vpe10_create_stream_ops_config(struct vpe_priv *vpe_priv, uint32_t pipe_idx
     blndcfg.top_gain            = 0x1f000;
     blndcfg.bottom_inside_gain  = 0x1f000;
     blndcfg.bottom_outside_gain = 0x1f000;
+    blndcfg.blend_mode          = blend_mode;
 
     mpc->funcs->program_mpcc_blending(mpc, MPC_MPCCID_0, &blndcfg);
 
@@ -1223,8 +1238,9 @@ void vpe10_get_bufs_req(struct vpe_priv *vpe_priv, struct vpe_bufs_req *req)
         // just the segment specific config size is added
         if (cmd_info->ops == VPE_CMD_OPS_COMPOSITING) {
             if (stream_idx != cmd_info->inputs[0].stream_idx) {
-                emb_req    = cmd_info->tm_enabled ? VPE10_GENERAL_EMB_USAGE_3DLUT_FRAME_SHARED
-                                                  : VPE10_GENERAL_EMB_USAGE_FRAME_SHARED;
+                emb_req    = (cmd_info->lut3d_type == LUT3D_TYPE_CPU)
+                                 ? VPE10_GENERAL_EMB_USAGE_3DLUT_FRAME_SHARED
+                                 : VPE10_GENERAL_EMB_USAGE_FRAME_SHARED;
                 stream_idx = cmd_info->inputs[0].stream_idx;
             } else {
                 emb_req = VPE10_GENERAL_EMB_USAGE_SEG_NON_SHARED;
@@ -1528,4 +1544,9 @@ void vpe10_setup_check_funcs(struct vpe_check_support_funcs *funcs)
     funcs->check_output_color_space       = vpe10_check_output_color_space;
     funcs->get_dcc_compression_input_cap  = vpe10_get_dcc_compression_input_cap;
     funcs->get_dcc_compression_output_cap = vpe10_get_dcc_compression_output_cap;
+}
+
+enum vpe_status vpe10_calculate_shaper(struct vpe_priv *vpe_priv, struct stream_ctx *stream_ctx)
+{
+    return vpe_calculate_shaper(vpe_priv, stream_ctx); // calculate shaper data and config
 }

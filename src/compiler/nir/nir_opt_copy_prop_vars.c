@@ -123,20 +123,22 @@ struct copy_prop_var_state {
    bool progress;
 };
 
-static bool
+static nir_component_mask_t
 value_equals_store_src(struct value *value, nir_intrinsic_instr *intrin)
 {
    assert(intrin->intrinsic == nir_intrinsic_store_deref);
    nir_component_mask_t write_mask = nir_intrinsic_write_mask(intrin);
+   nir_component_mask_t equals_mask = 0;
 
    for (unsigned i = 0; i < intrin->num_components; i++) {
+      nir_scalar src = nir_scalar_resolved(intrin->src[1].ssa, i);
       if ((write_mask & (1 << i)) &&
-          (value->ssa.def[i] != intrin->src[1].ssa ||
-           value->ssa.component[i] != i))
-         return false;
+          (value->ssa.def[i] == src.def &&
+           value->ssa.component[i] == src.comp))
+         equals_mask |= 1 << i;
    }
 
-   return true;
+   return equals_mask;
 }
 
 static struct vars_written *
@@ -169,7 +171,8 @@ gather_vars_written(struct copy_prop_var_state *state,
 
       nir_block *block = nir_cf_node_as_block(cf_node);
       nir_foreach_instr(instr, block) {
-         if (instr->type == nir_instr_type_call) {
+         if (instr->type == nir_instr_type_call ||
+             instr->type == nir_instr_type_cmat_call) {
             written->modes |= nir_var_shader_out |
                               nir_var_shader_temp |
                               nir_var_function_temp |
@@ -404,7 +407,7 @@ copy_entry_create(struct copy_prop_var_state *state,
    struct copy_entry new_entry = {
       .dst = *deref,
    };
-   util_dynarray_append(copies_array, struct copy_entry, new_entry);
+   util_dynarray_append(copies_array, new_entry);
    return util_dynarray_top_ptr(copies_array, struct copy_entry);
 }
 
@@ -752,7 +755,7 @@ load_from_ssa_entry_value(struct copy_prop_var_state *state,
          if (load_def == NULL)
             load_def = nir_load_deref(b, entry->dst.instr);
 
-         if (load_def->parent_instr == &intrin->instr)
+         if (nir_def_instr(load_def) == &intrin->instr)
             keep_intrin = true;
 
          comps[i] = nir_get_scalar(load_def, i);
@@ -1009,7 +1012,8 @@ copy_prop_vars_block(struct copy_prop_var_state *state,
       if (debug && instr->type == nir_instr_type_deref)
          dump_instr(instr);
 
-      if (instr->type == nir_instr_type_call) {
+      if (instr->type == nir_instr_type_call ||
+          instr->type == nir_instr_type_cmat_call) {
          if (debug)
             dump_instr(instr);
          apply_barrier_for_modes(state, copies, nir_var_shader_out | nir_var_shader_temp | nir_var_function_temp | nir_var_mem_ssbo | nir_var_mem_shared | nir_var_mem_global);
@@ -1110,7 +1114,7 @@ copy_prop_vars_block(struct copy_prop_var_state *state,
                    * rewrite the vecN itself.
                    */
                   nir_def_rewrite_uses_after(&intrin->def,
-                                                 value.ssa.def[0]);
+                                             value.ssa.def[0]);
                } else {
                   nir_def_rewrite_uses(&intrin->def,
                                        value.ssa.def[0]);
@@ -1195,13 +1199,46 @@ copy_prop_vars_block(struct copy_prop_var_state *state,
 
          struct copy_entry *entry =
             lookup_entry_for_deref(state, copies, &dst, nir_derefs_equal_bit, NULL);
-         if (entry && value_equals_store_src(&entry->src, intrin)) {
+         nir_component_mask_t equals_mask = entry ? value_equals_store_src(&entry->src, intrin) : 0;
+         if (equals_mask == nir_intrinsic_write_mask(intrin)) {
             /* If we are storing the value from a load of the same var the
              * store is redundant so remove it.
              */
             nir_instr_remove(instr);
             state->progress = true;
          } else {
+            if (!(b->shader->info.stage == MESA_SHADER_FRAGMENT &&
+                  (nir_deref_mode_may_be(dst.instr, nir_var_shader_out)))) {
+               /* If any channels we wrote were already the dst's value, mask them
+                * off (which can lead to other dead code elimination).  Apparently
+                * glslang does write masking with load-vec-store.
+                *
+                * Skip this for FS outputs, where multiple drivers don't like color
+                * writes getting channels writemasked out based on copying the
+                * fbfetched data through.
+                */
+               nir_component_mask_t remove_mask = equals_mask & nir_intrinsic_write_mask(intrin);
+               if (remove_mask) {
+                  nir_intrinsic_set_write_mask(intrin, nir_intrinsic_write_mask(intrin) & ~equals_mask);
+
+                  /* For any channels we're trimming off the write mask, replace
+                   * them with undefs.  This lets them be dead-code eliminated,
+                   * which no other pass would do on its own.
+                   */
+                  b->cursor = nir_before_instr(instr);
+                  nir_def *channels[NIR_MAX_VEC_COMPONENTS];
+                  nir_def *undef = nir_undef(b, 1, intrin->src[1].ssa->bit_size);
+                  for (int i = 0; i < intrin->num_components; i++) {
+                     if (remove_mask & (1 << i)) {
+                        channels[i] = undef;
+                     } else {
+                        channels[i] = nir_channel(b, intrin->src[1].ssa, i);
+                     }
+                  }
+                  nir_src_rewrite(&intrin->src[1], nir_vec(b, channels, intrin->num_components));
+                  state->progress = true;
+               }
+            }
             struct value value = { 0 };
             value_set_ssa_components(&value, intrin->src[1].ssa,
                                      intrin->num_components);

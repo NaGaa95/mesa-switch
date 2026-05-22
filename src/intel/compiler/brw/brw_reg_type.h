@@ -1,24 +1,6 @@
 /*
  * Copyright © 2017 Intel Corporation
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
- * IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  */
 
 #pragma once
@@ -68,13 +50,15 @@ enum PACKED brw_reg_type {
    BRW_TYPE_Q  = 0b00111,
    /** @} */
 
-   /** Floating point types: 16 (half), 32, and 64-bit (double) @{ */
-   BRW_TYPE_HF = 0b01001,
-   BRW_TYPE_F  = 0b01010,
-   BRW_TYPE_DF = 0b01011,
+   /** Floating point types: 8, 16 (half), 32, and 64-bit (double) @{ */
+   BRW_TYPE_HF8 = 0b01000,
+   BRW_TYPE_HF  = 0b01001,
+   BRW_TYPE_F   = 0b01010,
+   BRW_TYPE_DF  = 0b01011,
    /** @} */
 
-   /** Floating point types (bfloat variants): 16-bit @{ */
+   /** Floating point types (bfloat variants): 8 and 16-bit @{ */
+   BRW_TYPE_BF8 = 0b01100,
    BRW_TYPE_BF  = 0b01101,
    /** @} */
 
@@ -196,6 +180,33 @@ brw_type_larger_of(enum brw_reg_type a, enum brw_reg_type b)
 
 /* -------------------------------------------------------------- */
 
+/**
+ * Enum for float data types.
+ */
+enum PACKED brw_data_type_float {
+   BRW_TYPE_FLOAT_BF8   = 0,
+   BRW_TYPE_FLOAT_HF    = 1,
+   BRW_TYPE_FLOAT_F     = 2,
+   BRW_TYPE_FLOAT_DF    = 3,
+   BRW_TYPE_FLOAT_HF8   = 4,
+   BRW_TYPE_FLOAT_BF    = 5,
+   BRW_TYPE_FLOAT_TF32  = 6,
+};
+
+/**
+ * Enum for integer data types.
+ */
+enum PACKED brw_data_type_int {
+   BRW_TYPE_INT_UB      = 0,
+   BRW_TYPE_INT_UW      = 1,
+   BRW_TYPE_INT_UD      = 2,
+   BRW_TYPE_INT_UQ      = 3,
+   BRW_TYPE_INT_B       = 4,
+   BRW_TYPE_INT_W       = 5,
+   BRW_TYPE_INT_D       = 6,
+   BRW_TYPE_INT_Q       = 7,
+};
+
 unsigned
 brw_type_encode(const struct intel_device_info *devinfo,
                 enum brw_reg_file file, enum brw_reg_type type);
@@ -211,6 +222,13 @@ brw_type_encode_for_3src(const struct intel_device_info *devinfo,
 enum brw_reg_type
 brw_type_decode_for_3src(const struct intel_device_info *devinfo,
                          unsigned hw_type, unsigned exec_type);
+
+unsigned
+brw_data_type_encode(const struct intel_device_info *devinfo,
+                     enum brw_reg_type type);
+enum brw_reg_type
+brw_data_type_decode(const struct intel_device_info *devinfo,
+                     unsigned data_type, bool exec_type);
 
 const char *
 brw_reg_type_to_letters(enum brw_reg_type type);

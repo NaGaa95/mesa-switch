@@ -1,4 +1,6 @@
-# Copyright (C) 2020-2021 Collabora
+# Copyright 2025 Valve Corporation
+# Copyright 2020-2021 Collabora
+# SPDX-License-Identifier: MIT
 
 agx2_disasm_c = custom_target(
   input : ['gen-disasm.py', 'AGX2.xml'],

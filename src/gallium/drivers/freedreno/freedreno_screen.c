@@ -132,6 +132,12 @@ fd_screen_get_timestamp(struct pipe_screen *pscreen)
    }
 }
 
+static uint64_t
+fd_screen_convert_timestamp(struct pipe_screen *pscreen, uint64_t raw_timestamp)
+{
+   return ticks_to_ns(raw_timestamp);
+}
+
 static void
 fd_screen_destroy(struct pipe_screen *pscreen)
 {
@@ -142,6 +148,11 @@ fd_screen_destroy(struct pipe_screen *pscreen)
 
    if (screen->tess_bo)
       fd_bo_del(screen->tess_bo);
+
+   for (int i = 0; i < ARRAY_SIZE(screen->pvtmem); i++) {
+      if (screen->pvtmem[i].bo)
+         fd_bo_del(screen->pvtmem[i].bo);
+   }
 
    if (screen->pipe)
       fd_pipe_del(screen->pipe);
@@ -182,7 +193,7 @@ get_memory_size(struct fd_screen *screen)
    if (fd_device_version(screen->dev) >= FD_VERSION_VA_SIZE) {
       uint64_t va_size;
       if (!fd_pipe_get_param(screen->pipe, FD_VA_SIZE, &va_size)) {
-         system_memory = MIN2(system_memory, va_size);
+         system_memory = MIN2(system_memory / 2, va_size);
       }
    }
 
@@ -214,7 +225,7 @@ fd_init_shader_caps(struct fd_screen *screen)
       case MESA_SHADER_GEOMETRY:
          if (!is_a6xx(screen))
             continue;
-         if (screen->info->a6xx.is_a702)
+         if (screen->info->props.is_a702)
             continue;
          break;
       case MESA_SHADER_COMPUTE:
@@ -233,10 +244,10 @@ fd_init_shader_caps(struct fd_screen *screen)
       caps->max_control_flow_depth = 8; /* XXX */
 
       caps->max_inputs = is_a6xx(screen) && i != MESA_SHADER_GEOMETRY ?
-         screen->info->a6xx.vs_max_inputs_count : 16;
+         screen->info->props.vs_max_inputs_count : 16;
 
       caps->max_outputs =
-         (is_a6xx(screen) && !screen->info->a6xx.is_a702) ? 32 : 16;
+         (is_a6xx(screen) && !screen->info->props.is_a702) ? 32 : 16;
 
       caps->max_temps = 64; /* Max native temporaries. */
 
@@ -314,31 +325,31 @@ fd_init_shader_caps(struct fd_screen *screen)
 static void
 fd_init_compute_caps(struct fd_screen *screen)
 {
-   const struct fd_dev_info *info = screen->info;
    struct pipe_compute_caps *caps =
       (struct pipe_compute_caps *)&screen->base.compute_caps;
 
    if (!has_compute(screen))
       return;
 
+   /* all things that support compute are ir3 (no a2xx compute): */
+
    struct ir3_compiler *compiler = screen->compiler;
+   const nir_shader_compiler_options *options =
+      ir3_get_compiler_options(compiler);
 
    caps->address_bits = screen->gen >= 5 ? 64 : 32;
 
    caps->grid_dimension = 3;
 
-   caps->max_grid_size[0] =
-   caps->max_grid_size[1] =
-   caps->max_grid_size[2] = 65535;
+   caps->max_grid_size[0] = options->max_workgroup_count[0];
+   caps->max_grid_size[1] = options->max_workgroup_count[1];
+   caps->max_grid_size[2] = options->max_workgroup_count[2];
 
    caps->max_block_size[0] = 1024;
    caps->max_block_size[1] = 1024;
    caps->max_block_size[2] = 64;
 
-   caps->max_threads_per_block = info->threadsize_base * info->max_waves;
-
-   if (is_a6xx(screen) && info->a6xx.supports_double_threadsize)
-      caps->max_threads_per_block *= 2;
+   caps->max_threads_per_block = options->max_workgroup_invocations;
 
    caps->max_global_size = screen->ram_size;
 
@@ -387,6 +398,7 @@ fd_init_screen_caps(struct fd_screen *screen)
    caps->glsl_tess_levels_as_inputs = true;
    caps->texture_mirror_clamp_to_edge = true;
    caps->gl_spirv = true;
+   caps->cl_gl_sharing = true;
    caps->fbfetch_coherent = true;
    caps->has_const_bw = true;
 
@@ -451,10 +463,10 @@ fd_init_screen_caps(struct fd_screen *screen)
 
    caps->sampler_reduction_minmax =
    caps->sampler_reduction_minmax_arb =
-      is_a6xx(screen) && screen->info->a6xx.has_sampler_minmax;
+      is_a6xx(screen) && screen->info->props.has_sampler_minmax;
 
    caps->programmable_sample_locations =
-      is_a6xx(screen) && screen->info->a6xx.has_sample_locations;
+      is_a6xx(screen) && screen->info->props.has_sample_locations;
 
    caps->polygon_offset_clamp = is_a4xx(screen) || is_a5xx(screen) || is_a6xx(screen);
 
@@ -494,7 +506,7 @@ fd_init_screen_caps(struct fd_screen *screen)
    caps->doubles = is_ir3(screen);
 
    if (is_a6xx(screen)) {
-      if (screen->info->a6xx.is_a702) {
+      if (screen->info->props.is_a702) {
          /* a702 family is a special case, no gs/tess: */
          caps->glsl_feature_level = 140;
          caps->essl_feature_level = 310;
@@ -553,7 +565,7 @@ fd_init_screen_caps(struct fd_screen *screen)
 
    caps->max_viewports = is_a6xx(screen) ? 16 : 1;
 
-   caps->max_varyings = (is_a6xx(screen) && !screen->info->a6xx.is_a702) ? 31 : 16;
+   caps->max_varyings = (is_a6xx(screen) && !screen->info->props.is_a702) ? 31 : 16;
 
    /* We don't really have a limit on this, it all goes into the main
     * memory buffer. Needs to be at least 120 / 4 (minimum requirement
@@ -601,7 +613,7 @@ fd_init_screen_caps(struct fd_screen *screen)
 
    /* Stream output. */
    caps->max_vertex_streams =
-      (is_a6xx(screen) && !screen->info->a6xx.is_a702) ?  /* has SO + GS */
+      (is_a6xx(screen) && !screen->info->props.is_a702) ?  /* has SO + GS */
          PIPE_MAX_SO_BUFFERS : 0;
    caps->max_stream_output_buffers = is_ir3(screen) ? PIPE_MAX_SO_BUFFERS : 0;
    caps->stream_output_pause_resume =
@@ -680,7 +692,9 @@ fd_init_screen_caps(struct fd_screen *screen)
    caps->max_texture_anisotropy = 16.0f;
    caps->max_texture_lod_bias = 15.0f;
 
-   caps->shader_clock = is_a6xx(screen);
+   if (is_a6xx(screen)) {
+      caps->shader_clock = true;
+   }
 }
 
 static const struct nir_shader_compiler_options *
@@ -852,6 +866,22 @@ fd_screen_get_fd(struct pipe_screen *pscreen)
    return fd_device_fd(screen->dev);
 }
 
+static void
+__debug_init(void)
+{
+   fd_mesa_debug = debug_get_option_fd_mesa_debug();
+
+   if (FD_DBG(NOBIN))
+      fd_binning_enabled = false;
+}
+
+static void
+fd_screen_debug_init(void)
+{
+   static util_once_flag once = UTIL_ONCE_FLAG_INIT;
+   util_call_once(&once, __debug_init);
+}
+
 struct pipe_screen *
 fd_screen_create(int fd,
                  const struct pipe_screen_config *config,
@@ -865,10 +895,7 @@ fd_screen_create(int fd,
    struct pipe_screen *pscreen;
    uint64_t val;
 
-   fd_mesa_debug = debug_get_option_fd_mesa_debug();
-
-   if (FD_DBG(NOBIN))
-      fd_binning_enabled = false;
+   fd_screen_debug_init();
 
    if (!screen)
       return NULL;
@@ -1015,6 +1042,7 @@ fd_screen_create(int fd,
       break;
    case 6:
    case 7:
+   case 8:
       fd6_screen_init(pscreen);
       break;
    default:
@@ -1069,6 +1097,9 @@ fd_screen_create(int fd,
 
    pscreen->get_timestamp = fd_screen_get_timestamp;
 
+   if (is_a6xx(screen))
+      pscreen->convert_timestamp = fd_screen_convert_timestamp;
+
    pscreen->fence_reference = _fd_fence_ref;
    pscreen->fence_finish = fd_pipe_fence_finish;
    pscreen->fence_get_fd = fd_pipe_fence_get_fd;
@@ -1103,7 +1134,7 @@ fd_screen_aux_context_get(struct pipe_screen *pscreen)
    simple_mtx_lock(&screen->aux_ctx_lock);
 
    if (!screen->aux_ctx) {
-      screen->aux_ctx = pscreen->context_create(pscreen, NULL, 0);
+      screen->aux_ctx = pscreen->context_create(pscreen, NULL, FD_CONTEXT_FLAG_AUX);
    }
 
    return fd_context(screen->aux_ctx);

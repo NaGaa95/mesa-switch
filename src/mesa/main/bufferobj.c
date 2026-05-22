@@ -2353,7 +2353,7 @@ buffer_data(struct gl_context *ctx, struct gl_buffer_object *bufObj,
 
       switch (usage) {
       case GL_STREAM_DRAW_ARB:
-         valid_usage = (ctx->API != API_OPENGLES);
+         valid_usage = (!_mesa_is_gles1(ctx));
          break;
       case GL_STATIC_DRAW_ARB:
       case GL_DYNAMIC_DRAW_ARB:

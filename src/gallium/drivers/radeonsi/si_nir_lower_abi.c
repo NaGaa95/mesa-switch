@@ -54,7 +54,9 @@ static nir_def *build_attr_ring_desc(nir_builder *b, struct si_shader *shader,
                                 b->shader->info.vs.blit_sgprs_amd - 1) :
       ac_nir_load_arg(b, &args->ac, args->gs_attr_address);
 
-   unsigned stride = 16 * si_shader_num_alloc_param_exports(shader);
+   unsigned per_vertex_params = MAX2(1, si_shader_num_alloc_param_exports(shader));
+   unsigned total_params = per_vertex_params + shader->info.nr_prim_param_exports;
+   unsigned stride = 16 * total_params;
    uint32_t desc[4];
 
    ac_build_attr_ring_descriptor(sel->screen->info.gfx_level,
@@ -183,6 +185,63 @@ static bool build_gsvs_ring_desc(nir_builder *b, struct lower_abi_state *s)
    return false;
 }
 
+static nir_def *build_task_ring_desc(nir_builder *b, struct lower_abi_state *s,
+                                     bool payload)
+{
+   struct si_screen *screen = s->shader->selector->screen;
+   struct ac_task_info *info = &screen->task_info;
+   unsigned entry_size = payload ? info->payload_entry_size : AC_TASK_DRAW_ENTRY_BYTES;
+
+   const struct ac_buffer_state ac_state = {
+      .va = (uint64_t)screen->info.address32_hi << 32,
+      .size = screen->task_info.num_entries * entry_size,
+      .format = PIPE_FORMAT_R32_FLOAT,
+      .swizzle = { PIPE_SWIZZLE_X, PIPE_SWIZZLE_Y, PIPE_SWIZZLE_Z, PIPE_SWIZZLE_W },
+      .gfx10_oob_select = V_008F0C_OOB_SELECT_DISABLED,
+   };
+
+   unsigned desc[4];
+   ac_build_buffer_descriptor(screen->info.gfx_level, &ac_state, desc);
+
+   nir_def *addr = ac_nir_load_arg(b, &s->args->ac, s->args->task_ring_addr);
+   unsigned offset = payload ? info->payload_ring_offset : info->draw_ring_offset;
+   addr = nir_iadd_imm(b, addr, offset);
+
+   nir_def *comp[] = {
+      addr,
+      nir_imm_int(b, desc[1]),
+      nir_imm_int(b, desc[2]),
+      nir_imm_int(b, desc[3]),
+   };
+
+   return nir_vec(b, comp, 4);
+}
+
+static nir_def *build_mesh_scratch_ring_desc(nir_builder *b, struct lower_abi_state *s)
+{
+   struct si_screen *screen = s->shader->selector->screen;
+
+   const struct ac_buffer_state ac_state = {
+      .va = (uint64_t)screen->info.address32_hi << 32,
+      .size = AC_MESH_SCRATCH_NUM_ENTRIES * AC_MESH_SCRATCH_ENTRY_BYTES,
+      .format = PIPE_FORMAT_R32_FLOAT,
+      .swizzle = { PIPE_SWIZZLE_X, PIPE_SWIZZLE_Y, PIPE_SWIZZLE_Z, PIPE_SWIZZLE_W },
+      .gfx10_oob_select = V_008F0C_OOB_SELECT_DISABLED,
+   };
+
+   unsigned desc[4];
+   ac_build_buffer_descriptor(screen->info.gfx_level, &ac_state, desc);
+
+   nir_def *comp[] = {
+      ac_nir_load_arg(b, &s->args->ac, s->args->mesh_scratch_ring_addr),
+      nir_imm_int(b, desc[1]),
+      nir_imm_int(b, desc[2]),
+      nir_imm_int(b, desc[3]),
+   };
+
+   return nir_vec(b, comp, 4);
+}
+
 static bool preload_reusable_variables(nir_builder *b, struct lower_abi_state *s)
 {
    const struct si_shader_selector *sel = s->shader->selector;
@@ -257,7 +316,7 @@ static bool lower_intrinsic(nir_builder *b, nir_instr *instr, struct lower_abi_s
       break;
    }
    case nir_intrinsic_load_workgroup_size: {
-      assert(b->shader->info.workgroup_size_variable && sel->info.uses_variable_block_size);
+      assert(b->shader->info.workgroup_size_variable && shader->info.uses_sysval_workgroup_size);
 
       nir_def *block_size = ac_nir_load_arg(b, &args->ac, args->block_size);
       nir_def *comp[] = {
@@ -505,12 +564,12 @@ static bool lower_intrinsic(nir_builder *b, nir_instr *instr, struct lower_abi_s
    case nir_intrinsic_load_alpha_reference_amd:
       replacement = ac_nir_load_arg(b, &args->ac, args->alpha_reference);
       break;
-   case nir_intrinsic_load_color0:
-   case nir_intrinsic_load_color1: {
+   case nir_intrinsic_load_color0_amd:
+   case nir_intrinsic_load_color1_amd: {
       uint32_t colors_read = sel->info.colors_read;
 
       int start, offset;
-      if (intrin->intrinsic == nir_intrinsic_load_color0) {
+      if (intrin->intrinsic == nir_intrinsic_load_color0_amd) {
          start = 0;
          offset = 0;
       } else {
@@ -626,6 +685,15 @@ static bool lower_intrinsic(nir_builder *b, nir_instr *instr, struct lower_abi_s
       break;
    case nir_intrinsic_load_lds_ngg_gs_out_vertex_base_amd:
       replacement = nir_imul_imm(b, GET_FIELD_NIR(GS_STATE_GS_OUT_LDS_OFFSET_256B), 256);
+      break;
+   case nir_intrinsic_load_ring_task_draw_amd:
+      replacement = build_task_ring_desc(b, s, false);
+      break;
+   case nir_intrinsic_load_ring_task_payload_amd:
+      replacement = build_task_ring_desc(b, s, true);
+      break;
+   case nir_intrinsic_load_ring_mesh_scratch_amd:
+      replacement = build_mesh_scratch_ring_desc(b, s);
       break;
    default:
       return false;

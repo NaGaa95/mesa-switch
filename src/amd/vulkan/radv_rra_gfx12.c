@@ -10,6 +10,7 @@
 #include "radv_rra.h"
 
 #include "util/bitset.h"
+#include "util/compiler.h"
 
 struct rra_instance_sideband_data {
    uint32_t instance_index;
@@ -37,6 +38,24 @@ static const char *node_type_names[16] = {
    [14] = "invalid14",
    [15] = "invalid15",
 };
+
+static uint32_t
+get_geometry_id(const void *node, uint32_t triangle_index)
+{
+   uint32_t geometry_index_base_bits = BITSET_EXTRACT(node, 20, 4) * 2;
+   uint32_t geometry_index_bits = BITSET_EXTRACT(node, 24, 4) * 2;
+
+   uint32_t indices_midpoint = BITSET_EXTRACT(node, 42, 10);
+   uint32_t geometry_id_base =
+      BITSET_EXTRACT(node, indices_midpoint - geometry_index_base_bits, geometry_index_base_bits);
+
+   if (triangle_index == 0)
+      return geometry_id_base;
+
+   return (geometry_id_base & ~BITFIELD64_MASK(geometry_index_bits)) |
+          BITSET_EXTRACT(node, indices_midpoint - geometry_index_base_bits - geometry_index_bits * triangle_index,
+                         geometry_index_bits);
+}
 
 bool
 rra_validate_node_gfx12(struct hash_table_u64 *accel_struct_vas, uint8_t *data, void *node, uint32_t geometry_count,
@@ -98,13 +117,25 @@ rra_validate_node_gfx12(struct hash_table_u64 *accel_struct_vas, uint8_t *data, 
             rra_validation_fail(&child_ctx, "Invalid blas_addr(0x%llx)", (unsigned long long)blas_va);
       } else {
          uint32_t indices_midpoint = BITSET_EXTRACT(child_node, 42, 10);
-         if (indices_midpoint < 54 + 28) {
+         if (indices_midpoint < 54) {
             rra_validation_fail(&child_ctx, "Invalid indices_midpoint(%u)", indices_midpoint);
          } else {
-            uint32_t geometry_id = BITSET_EXTRACT(child_node, indices_midpoint - 28, 28);
-            if (geometry_id >= geometry_count) {
-               rra_validation_fail(&child_ctx, "Invalid geometry_id(%u) >= geometry_count(%u)", geometry_id,
-                                   geometry_count);
+            uint32_t pair_index = (child_type & 0x3) | ((child_type & 0x8) >> 1);
+
+            if (BITSET_EXTRACT(child_node, 1024 - 29 * (pair_index + 1) + 17, 12)) {
+               uint32_t geometry_id = get_geometry_id(child_node, pair_index * 2 + 0);
+               if (geometry_id >= geometry_count) {
+                  rra_validation_fail(&child_ctx, "Invalid geometry_id(%u) >= geometry_count(%u)", geometry_id,
+                                      geometry_count);
+               }
+            }
+
+            if (BITSET_EXTRACT(child_node, 1024 - 29 * (pair_index + 1) + 3, 12)) {
+               uint32_t geometry_id = get_geometry_id(child_node, pair_index * 2 + 1);
+               if (geometry_id >= geometry_count) {
+                  rra_validation_fail(&child_ctx, "Invalid geometry_id(%u) >= geometry_count(%u)", geometry_id,
+                                      geometry_count);
+               }
             }
          }
          if (!BITSET_TEST((BITSET_WORD *)child_node, 1024 - 29))
@@ -115,24 +146,6 @@ rra_validate_node_gfx12(struct hash_table_u64 *accel_struct_vas, uint8_t *data, 
    return ctx.failed;
 }
 
-static uint32_t
-get_geometry_id(const void *node, uint32_t triangle_index)
-{
-   uint32_t geometry_index_base_bits = BITSET_EXTRACT(node, 20, 4) * 2;
-   uint32_t geometry_index_bits = BITSET_EXTRACT(node, 24, 4) * 2;
-
-   uint32_t indices_midpoint = BITSET_EXTRACT(node, 42, 10);
-   uint32_t geometry_id_base =
-      BITSET_EXTRACT(node, indices_midpoint - geometry_index_base_bits, geometry_index_base_bits);
-
-   if (triangle_index == 0)
-      return geometry_id_base;
-
-   return (geometry_id_base & ~BITFIELD64_MASK(geometry_index_bits)) |
-          BITSET_EXTRACT(node, indices_midpoint - geometry_index_base_bits - geometry_index_bits * triangle_index,
-                         geometry_index_bits);
-}
-
 void
 rra_gather_bvh_info_gfx12(const uint8_t *bvh, uint32_t node_id, struct rra_bvh_info *dst)
 {
@@ -141,6 +154,7 @@ rra_gather_bvh_info_gfx12(const uint8_t *bvh, uint32_t node_id, struct rra_bvh_i
    switch (node_type) {
    case radv_bvh_node_box32:
       dst->internal_nodes_size += sizeof(struct radv_gfx12_box_node);
+      dst->box32_count++;
       break;
    case radv_bvh_node_instance:
       dst->leaf_nodes_size += sizeof(struct radv_gfx12_instance_node);
@@ -292,5 +306,100 @@ rra_transcode_node_gfx12(struct rra_transcoding_context *ctx, uint32_t parent_id
             _mesa_set_add(ctx->used_blas, addr);
          }
       }
+   }
+}
+
+void
+radv_gather_bvh_stats_gfx12(const uint8_t *bvh, uint32_t node_id, uint32_t depth, float surface_area,
+                            struct hash_table_u64 *blas_sah, struct radv_bvh_stats_gfx12 *stats)
+{
+   uint32_t node_type = node_id & 0xf;
+   const void *node = bvh + ((node_id & (~0xf)) << 3);
+
+   stats->max_depth = MAX2(stats->max_depth, depth);
+
+   switch (node_type) {
+   case radv_bvh_node_box32: {
+      stats->box_node_count++;
+      stats->sah += 0.5 * surface_area;
+
+      const struct radv_gfx12_box_node *src = node;
+
+      uint32_t valid_child_count_minus_one = src->child_count_exponents >> 28;
+
+      if (valid_child_count_minus_one != 0xf) {
+         uint32_t internal_id = src->internal_base_id;
+         uint32_t primitive_id = src->primitive_base_id;
+
+         uint32_t exponents[3] = {
+            src->child_count_exponents & 0xff,
+            (src->child_count_exponents >> 8) & 0xff,
+            (src->child_count_exponents >> 16) & 0xff,
+         };
+         float extent[3] = {
+            uif(exponents[0] << 23),
+            uif(exponents[1] << 23),
+            uif(exponents[2] << 23),
+         };
+
+         for (uint32_t i = 0; i <= valid_child_count_minus_one; i++) {
+            uint32_t child_type = (src->children[i].dword2 >> 24) & 0xf;
+            uint32_t child_size = src->children[i].dword2 >> 28;
+
+            uint32_t child_id;
+            if (child_type == radv_bvh_node_box32) {
+               child_id = internal_id | child_type;
+               internal_id += (child_size * RADV_GFX12_BVH_NODE_SIZE) >> 3;
+            } else {
+               child_id = primitive_id | child_type;
+               primitive_id += (child_size * RADV_GFX12_BVH_NODE_SIZE) >> 3;
+            }
+
+            float min[3] = {
+               (float)(src->children[i].dword0 & 0xfff) / 0x1000 * extent[0],
+               (float)((src->children[i].dword0 >> 12) & 0xfff) / 0x1000 * extent[1],
+               (float)(src->children[i].dword1 & 0xfff) / 0x1000 * extent[2],
+            };
+            float max[3] = {
+               (float)(((src->children[i].dword1 >> 12) & 0xfff) + 1) / 0x1000 * extent[0],
+               (float)((src->children[i].dword2 & 0xfff) + 1) / 0x1000 * extent[1],
+               (float)(((src->children[i].dword2 >> 12) & 0xfff) + 1) / 0x1000 * extent[2],
+            };
+            float child_extent[3] = {
+               max[0] - min[0],
+               max[1] - min[1],
+               max[2] - min[2],
+            };
+            float child_surface_area = 2 * (child_extent[0] * child_extent[1] + child_extent[0] * child_extent[2] +
+                                            child_extent[1] * child_extent[2]);
+
+            radv_gather_bvh_stats_gfx12(bvh, child_id, depth + 1, child_surface_area, blas_sah, stats);
+         }
+      }
+
+      break;
+   }
+   case radv_bvh_node_instance: {
+      stats->instance_node_count++;
+      stats->sah += 0.7 * surface_area;
+
+      struct radv_gfx12_instance_node *instance = (struct radv_gfx12_instance_node *)(node);
+      const struct radv_gfx12_instance_node_user_data *user_data =
+         (const void *)((const uint8_t *)node + sizeof(struct radv_gfx12_instance_node));
+      uint64_t blas_va = radv_node_to_addr(instance->pointer_flags_bvh_addr) - user_data->bvh_offset;
+      float *sah = _mesa_hash_table_u64_search(blas_sah, blas_va);
+      if (sah)
+         stats->instance_sah += *sah * surface_area;
+      else
+         fprintf(stderr, "radv: Could not find SAH for BLAS at address 0x%" PRIx64 "\n", blas_va);
+
+      break;
+   }
+   case radv_bvh_node_triangle:
+      stats->primitive_node_count++;
+      FALLTHROUGH;
+   default:
+      stats->sah += 1.0 * surface_area;
+      break;
    }
 }

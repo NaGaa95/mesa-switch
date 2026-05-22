@@ -540,13 +540,22 @@ drm_add_configs_for_visuals(_EGLDisplay *disp)
 
       for (unsigned j = 0; j < num_visuals; j++) {
          struct dri2_egl_config *dri2_conf;
+         EGLint config_group = 0;
 
          if (visuals[j].pipe_format != gl_config->color_format)
             continue;
 
+         /* Put the 16 bpc rgb[a] unorm formats into a lower priority EGL config
+          * group 1, so they don't get preferably chosen by eglChooseConfig().
+          */
+         if (util_format_is_unorm16(util_format_description(visuals[j].pipe_format)))
+            config_group = 1;
+
          const EGLint attr_list[] = {
             EGL_NATIVE_VISUAL_ID,
             visuals[j].gbm_format,
+            EGL_CONFIG_SELECT_GROUP_EXT,
+            config_group,
             EGL_NONE,
          };
 

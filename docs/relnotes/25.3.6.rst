@@ -86,7 +86,7 @@ Dylan Baker (9):
 Eric Engestrom (2):
 
 - bin/gen_release_notes: fix support for python 3.14
-- pick-ui: add \`Backport-to: *` as a synonym to \`Cc: mesa-stable`
+- pick-ui: add \`Backport-to: \*` as a synonym to \`Cc: mesa-stable`
 
 Eric R. Smith (1):
 

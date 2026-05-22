@@ -5,7 +5,6 @@
 
 #include "range_minimum_query.h"
 
-#include "bitscan.h"
 #include "macros.h"
 #include "ralloc.h"
 #include "u_math.h"

@@ -435,19 +435,25 @@ set_dirty_for_bind_map(struct anv_cmd_buffer *cmd_buffer,
                        mesa_shader_stage stage,
                        const struct anv_pipeline_bind_map *map)
 {
-   assert(stage < ARRAY_SIZE(cmd_buffer->state.surface_sha1s));
-   if (mem_update(cmd_buffer->state.surface_sha1s[stage],
-                  map->surface_sha1, sizeof(map->surface_sha1)))
-      cmd_buffer->state.descriptors_dirty |= mesa_to_vk_shader_stage(stage);
+   assert(stage < ARRAY_SIZE(cmd_buffer->state.surface_blake3s));
+   if (mem_update(cmd_buffer->state.surface_blake3s[stage],
+                  map->surface_blake3, sizeof(map->surface_blake3))) {
+      anv_cmd_buffer_dirty_descriptors(cmd_buffer,
+                                       mesa_to_vk_shader_stage(stage),
+                                       "shader surfaces change");
+   }
 
-   assert(stage < ARRAY_SIZE(cmd_buffer->state.sampler_sha1s));
-   if (mem_update(cmd_buffer->state.sampler_sha1s[stage],
-                  map->sampler_sha1, sizeof(map->sampler_sha1)))
-      cmd_buffer->state.descriptors_dirty |= mesa_to_vk_shader_stage(stage);
+   assert(stage < ARRAY_SIZE(cmd_buffer->state.sampler_blake3s));
+   if (mem_update(cmd_buffer->state.sampler_blake3s[stage],
+                  map->sampler_blake3, sizeof(map->sampler_blake3))) {
+      anv_cmd_buffer_dirty_descriptors(cmd_buffer,
+                                       mesa_to_vk_shader_stage(stage),
+                                       "shader samplers change");
+   }
 
-   assert(stage < ARRAY_SIZE(cmd_buffer->state.push_sha1s));
-   if (mem_update(cmd_buffer->state.push_sha1s[stage],
-                  map->push_sha1, sizeof(map->push_sha1)))
+   assert(stage < ARRAY_SIZE(cmd_buffer->state.push_blake3s));
+   if (mem_update(cmd_buffer->state.push_blake3s[stage],
+                  map->push_blake3, sizeof(map->push_blake3)))
       cmd_buffer->state.push_constants_dirty |= mesa_to_vk_shader_stage(stage);
 }
 
@@ -646,27 +652,13 @@ anv_cmd_buffer_bind_descriptor_set(struct anv_cmd_buffer *cmd_buffer,
          pipe_state->descriptor_buffers[set_index].buffer_index = -1;
          pipe_state->descriptor_buffers[set_index].buffer_offset = set->desc_offset;
          pipe_state->descriptor_buffers[set_index].bound = true;
-         cmd_buffer->state.descriptors_dirty |= stages;
+         anv_cmd_buffer_dirty_descriptors(cmd_buffer, stages, "push descriptor bind");
          cmd_buffer->state.descriptor_buffers.offsets_dirty |= stages;
       } else {
-         /* When using indirect descriptors, stages that have access to the HW
-          * binding tables, never need to access the
-          * anv_push_constants::desc_offsets fields, because any data they
-          * need from the descriptor buffer is accessible through a binding
-          * table entry. For stages that are "bindless" (Mesh/Task/RT), we
-          * need to provide anv_push_constants::desc_offsets matching the
-          * bound descriptor so that shaders can access the descriptor buffer
-          * through A64 messages.
-          *
-          * With direct descriptors, the shaders can use the
-          * anv_push_constants::desc_offsets to build bindless offsets. So
-          * it's we always need to update the push constant data.
+         /* Plaforms with LSC will use descriptor buffer push constant
+          * offsets
           */
-         bool update_desc_sets =
-            !cmd_buffer->device->physical->indirect_descriptors ||
-            (stages & (VK_SHADER_STAGE_TASK_BIT_EXT |
-                       VK_SHADER_STAGE_MESH_BIT_EXT |
-                       ANV_RT_STAGE_BITS));
+         bool update_desc_sets = cmd_buffer->device->info->has_lsc;
 
          if (update_desc_sets) {
             struct anv_push_constants *push = &pipe_state->push_constants;
@@ -679,13 +671,14 @@ anv_cmd_buffer_bind_descriptor_set(struct anv_cmd_buffer *cmd_buffer,
             push->desc_sampler_offsets[set_index] =
                anv_address_physical(set->desc_sampler_addr) -
                cmd_buffer->device->physical->va.dynamic_state_pool.addr;
-
-            anv_reloc_list_add_bo(cmd_buffer->batch.relocs,
-                                  set->desc_surface_addr.bo);
-            anv_reloc_list_add_bo(cmd_buffer->batch.relocs,
-                                  set->desc_sampler_addr.bo);
          }
       }
+
+      /* Always add a reference to the buffers */
+      anv_reloc_list_add_bo(cmd_buffer->batch.relocs,
+                            set->desc_surface_addr.bo);
+      anv_reloc_list_add_bo(cmd_buffer->batch.relocs,
+                            set->desc_sampler_addr.bo);
 
       dirty_stages |= stages;
    }
@@ -735,7 +728,7 @@ anv_cmd_buffer_bind_descriptor_set(struct anv_cmd_buffer *cmd_buffer,
    if (set->is_push)
       cmd_buffer->state.push_descriptors_dirty |= dirty_stages;
    else
-      cmd_buffer->state.descriptors_dirty |= dirty_stages;
+      anv_cmd_buffer_dirty_descriptors(cmd_buffer, dirty_stages, "descriptor bind");
    cmd_buffer->state.push_constants_dirty |= dirty_stages;
    pipe_state->push_constants_data_dirty = true;
 }
@@ -846,7 +839,7 @@ anv_cmd_buffer_set_descriptor_buffer_offsets(struct anv_cmd_buffer *cmd_buffer,
           !pipe_state->descriptor_buffers[set_index].bound) {
          pipe_state->descriptor_buffers[set_index].buffer_index = buffer_indices[i];
          pipe_state->descriptor_buffers[set_index].buffer_offset = buffer_offsets[i];
-         cmd_buffer->state.descriptors_dirty |= stages;
+         anv_cmd_buffer_dirty_descriptors(cmd_buffer, stages, "EXT_DB offset");
          cmd_buffer->state.descriptor_buffers.offsets_dirty |= stages;
       }
       pipe_state->descriptor_buffers[set_index].bound = true;
@@ -1008,7 +1001,7 @@ anv_isl_format_for_descriptor_type(const struct anv_device *device,
    switch (type) {
    case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER:
    case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC:
-      return device->physical->compiler->indirect_ubos_use_sampler ?
+      return intel_indirect_ubos_use_sampler(device->info) ?
              ISL_FORMAT_R32G32B32A32_FLOAT : ISL_FORMAT_RAW;
 
    case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:
@@ -1105,7 +1098,7 @@ anv_cmd_buffer_cs_push_constants(struct anv_cmd_buffer *cmd_buffer)
 
    const unsigned push_constant_alignment = 64;
    const unsigned aligned_total_push_constants_size =
-      ALIGN(total_push_constants_size, push_constant_alignment);
+      align(total_push_constants_size, push_constant_alignment);
    struct anv_state state;
    if (devinfo->verx10 >= 125) {
       state = anv_cmd_buffer_alloc_general_state(cmd_buffer,
@@ -1314,7 +1307,8 @@ anv_cmd_buffer_set_stack_size(struct vk_command_buffer *vk_cmd_buffer,
    if (anv_batch_has_error(&cmd_buffer->batch))
       return;
 
-   uint32_t stack_ids_per_dss = 2048; /* TODO */
+   uint32_t stack_ids_per_dss =
+      brw_rt_ray_queries_stack_ids_per_dss(device->info);
 
    unsigned stack_size_log2 = util_logbase2_ceil(stack_size);
    if (stack_size_log2 < 10)
@@ -1455,15 +1449,17 @@ anv_cmd_write_buffer_cp(VkCommandBuffer commandBuffer,
 void
 anv_cmd_flush_buffer_write_cp(VkCommandBuffer commandBuffer)
 {
-   /* TODO: cmd_write_buffer_cp is implemented with MI store +
-    * ForceWriteCompletionCheck so that should make the content globally
-    * observable.
-    *
-    * If we encounter any functional or perf bottleneck issues, let's revisit
-    * this helper and add ANV_PIPE_HDC_PIPELINE_FLUSH_BIT +
-    * ANV_PIPE_UNTYPED_DATAPORT_CACHE_FLUSH_BIT +
-    * ANV_PIPE_DATA_CACHE_FLUSH_BIT.
+   ANV_FROM_HANDLE(anv_cmd_buffer, cmd_buffer, commandBuffer);
+
+   /* IR header would get written by compute shader using BLORP code path, so
+    * we need to flush HDC and untyped dataport cache.
     */
+   anv_add_pending_pipe_bits(cmd_buffer,
+                             VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                             VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+                             ANV_PIPE_HDC_PIPELINE_FLUSH_BIT |
+                             ANV_PIPE_UNTYPED_DATAPORT_CACHE_FLUSH_BIT,
+                             "Flush buffer write cp");
 }
 
 void
@@ -1785,4 +1781,61 @@ anv_cmd_buffer_bind_shaders(struct vk_command_buffer *vk_cmd_buffer,
       bind_compute_shader(cmd_buffer, cs_shader);
    if (memcmp(gfx_shaders, cmd_buffer->state.gfx.shaders, sizeof(gfx_shaders)))
       bind_graphics_shaders(cmd_buffer, gfx_shaders);
+}
+
+struct anv_companion_prev_cmd_buffer_helper
+anv_begin_companion_cmd_buffer_helper(struct anv_cmd_buffer **cmd_buffer,
+                                      bool needs_companion)
+{
+   if (likely(!needs_companion))
+      return (struct anv_companion_prev_cmd_buffer_helper) { 0 };
+
+   struct anv_cmd_buffer* prev_cmd_buffer = *cmd_buffer;
+   const struct intel_device_info *info = prev_cmd_buffer->device->info;
+
+   const VkResult result = anv_cmd_buffer_ensure_rcs_companion(prev_cmd_buffer);
+   if (result != VK_SUCCESS) {
+      anv_batch_set_error(&prev_cmd_buffer->batch, result);
+      return (struct anv_companion_prev_cmd_buffer_helper) { 0 };
+   }
+
+   assert(prev_cmd_buffer->companion_rcs_cmd_buffer != NULL);
+
+   /* Re-emit the aux table register in every command buffer.  This way we're
+    * ensured that we have the table even if this command buffer doesn't
+    * initialize any images.
+    */
+   if (prev_cmd_buffer->device->info->has_aux_map) {
+      anv_add_pending_pipe_bits(prev_cmd_buffer->companion_rcs_cmd_buffer,
+                                VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+                                VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+                                 ANV_PIPE_AUX_TABLE_INVALIDATE_BIT,
+                                 "new cmd buffer with aux-tt");
+   }
+
+   struct anv_state syncpoint =
+      anv_genX(info, cmd_buffer_begin_companion_rcs_syncpoint)(prev_cmd_buffer);
+
+   *cmd_buffer = prev_cmd_buffer->companion_rcs_cmd_buffer;
+
+   return (struct anv_companion_prev_cmd_buffer_helper) {
+      .prev_cmd_buffer = prev_cmd_buffer,
+      .syncpoint = syncpoint,
+   };
+}
+
+void
+anv_end_companion_cmd_buffer_helper(struct anv_cmd_buffer **cmd_buffer,
+                                    struct anv_companion_prev_cmd_buffer_helper prev_cmd_buffer)
+{
+   if (likely(!prev_cmd_buffer.prev_cmd_buffer))
+      return;
+
+   if (prev_cmd_buffer.syncpoint.alloc_size) {
+      const struct intel_device_info *info = (*cmd_buffer)->device->info;
+      anv_genX(info, cmd_buffer_end_companion_rcs_syncpoint)(prev_cmd_buffer.prev_cmd_buffer,
+                                                             prev_cmd_buffer.syncpoint);
+   }
+
+   *cmd_buffer = prev_cmd_buffer.prev_cmd_buffer;
 }

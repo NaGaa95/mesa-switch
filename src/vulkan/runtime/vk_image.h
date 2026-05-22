@@ -32,6 +32,7 @@
 enum android_buffer_type {
    ANDROID_BUFFER_NONE = 0,
    ANDROID_BUFFER_NATIVE,
+   ANDROID_BUFFER_NATIVE_ALIAS,
    ANDROID_BUFFER_HARDWARE,
 };
 #endif
@@ -253,6 +254,10 @@ vk_image_buffer_copy_layout(const struct vk_image *image,
                             const VkBufferImageCopy2* region);
 
 struct vk_image_buffer_layout
+vk_image_memory_copy_layout(const struct vk_image *image,
+                            const VkDeviceMemoryImageCopyKHR* region);
+
+struct vk_image_buffer_layout
 vk_memory_to_image_copy_layout(const struct vk_image *image,
                                const VkMemoryToImageCopyEXT* region);
 
@@ -401,6 +406,8 @@ vk_image_view_subresource_range(const struct vk_image_view *view)
 bool vk_image_layout_is_read_only(VkImageLayout layout,
                                   VkImageAspectFlagBits aspect);
 bool vk_image_layout_is_depth_only(VkImageLayout layout);
+VkImageLayout vk_image_layout_depth_only(VkImageLayout layout);
+VkImageLayout vk_image_layout_stencil_only(VkImageLayout layout);
 
 VkImageUsageFlags vk_image_layout_to_usage_flags(VkImageLayout layout,
                                                  VkImageAspectFlagBits aspect);
@@ -416,9 +423,21 @@ vk_image_is_android_native_buffer(struct vk_image *image)
 {
    return image->android_buffer_type == ANDROID_BUFFER_NATIVE;
 }
+
+static inline bool
+vk_image_is_android_native_buffer_alias(struct vk_image *image)
+{
+   return image->android_buffer_type == ANDROID_BUFFER_NATIVE_ALIAS;
+}
 #else
 static inline bool
 vk_image_is_android_native_buffer(struct vk_image *image)
+{
+   return false;
+}
+
+static inline bool
+vk_image_is_android_native_buffer_alias(struct vk_image *image)
 {
    return false;
 }

@@ -173,7 +173,8 @@ struct v3d_sampler_view {
 
         uint8_t texture_shader_state[32];
         /* V3D 4.x: Texture state struct. */
-        struct v3d_bo *bo;
+        struct pipe_resource *tex_state;
+        uint32_t tex_state_offset;
 
         enum v3d_sampler_state_variant sampler_variant;
 
@@ -231,7 +232,7 @@ struct v3d_uncompiled_shader {
         uint32_t num_tf_specs;
 
         /* For caching */
-        unsigned char sha1[20];
+        unsigned char blake3[BLAKE3_KEY_LEN];
 };
 
 struct v3d_compiled_shader {
@@ -751,7 +752,7 @@ struct v3d_blend_state {
 
 #define perf_debug(...) do {                            \
         if (V3D_DBG(PERF))                            \
-                fprintf(stderr, __VA_ARGS__);           \
+                mesa_logw(__VA_ARGS__);           \
         if (unlikely(v3d->base.debug.debug_message))         \
                 util_debug_message(&v3d->base.debug, PERF_INFO, __VA_ARGS__); \
 } while (0)

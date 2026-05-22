@@ -391,6 +391,11 @@ enum isl_format {
    ISL_FORMAT_GFX12_CCS_32BPP_Y0,
    ISL_FORMAT_GFX12_CCS_64BPP_Y0,
    ISL_FORMAT_GFX12_CCS_128BPP_Y0,
+   ISL_FORMAT_GFX12_CCS_8BPP_Ys,
+   ISL_FORMAT_GFX12_CCS_16BPP_Ys,
+   ISL_FORMAT_GFX12_CCS_32BPP_Ys,
+   ISL_FORMAT_GFX12_CCS_64BPP_Ys,
+   ISL_FORMAT_GFX12_CCS_128BPP_Ys,
 
    /* An upper bound on the supported format enumerations */
    ISL_NUM_FORMATS,
@@ -822,8 +827,8 @@ enum isl_aux_usage {
     * CCS-compressed surface contains valid data at all times.
     *
     * :invariant: The surface is a color surface
-    * :invariant: :c:member:`isl_surf.samples` == 1 for GFX 12, GFX 20 can
-    *             be multisampled
+    * :invariant: :c:member:`isl_surf.samples` == 1 for GFX 12, GFX 12.5 and
+    *             newer can be multisampled
     */
    ISL_AUX_USAGE_HIZ_CCS_WT,
 
@@ -980,6 +985,12 @@ enum isl_aux_state {
     * Since neither the primary surface nor the auxiliary surface contains the
     * clear value, the surface can be cleared to a different color by simply
     * changing the clear color without modifying either surface.
+    *
+    * Note that depth images that support HiZ CCS have two potential encodings
+    * of the clear state with inconsistent behavior depending on whether it is
+    * implied by the hierarchical depth surface (e.g. from a HiZ CCS fast
+    * clear) or by the CCS auxiliary surface (e.g. from a HiZ CCS WT clear),
+    * to avoid ambiguity this enum only denotes the former state.
     */
    ISL_AUX_STATE_CLEAR,
 
@@ -1000,6 +1011,11 @@ enum isl_aux_state {
     * primary surface may contain all, some, or none of the data required to
     * reconstruct the actual sample values.  Blocks may also be in the clear
     * state (see Clear) and have their value taken from outside the surface.
+    *
+    * In this state, all of the data required to reconstruct the final sample
+    * values is contained in the CCS/MCS auxiliary surfaces, primary surface
+    * and clear value, the hierarchical depth surface doesn't have to be
+    * considered if present.
     */
    ISL_AUX_STATE_COMPRESSED_CLEAR,
 
@@ -1007,10 +1023,24 @@ enum isl_aux_state {
     *
     * This state is identical to the state above except that no blocks are in
     * the clear state.  In this state, all of the data required to reconstruct
-    * the final sample values is contained in the auxiliary and primary
-    * surface and the clear value is not considered.
+    * the final sample values is contained in the CCS/MCS auxiliary surfaces
+    * and primary surface, the clear value and hierarchical depth surface
+    * don't have to be considered.
     */
    ISL_AUX_STATE_COMPRESSED_NO_CLEAR,
+
+   /** Compressed with hierarchical depth information
+    *
+    * In this state, neither the CCS surface (if present) nor the primary
+    * surface have a complete representation of the data.  Instead, they must
+    * be used together in combination with the hierarchical depth surface or
+    * else corruption may occur.  Depending on the auxiliary compression
+    * format and the CCS and hierarchical depth data, any given block in the
+    * primary surface may contain all, some, or none of the data required to
+    * reconstruct the actual sample values.  Blocks may also be in the clear
+    * state (see Clear) and have their value taken from outside the surface.
+    */
+   ISL_AUX_STATE_COMPRESSED_HIER_DEPTH,
 
    /** Resolved
     *
@@ -1141,6 +1171,7 @@ typedef uint64_t isl_surf_usage_flags_t;
 #define ISL_SURF_USAGE_MULTI_ENGINE_SEQ_BIT    (1u << 24)
 #define ISL_SURF_USAGE_MULTI_ENGINE_PAR_BIT    (1u << 25)
 #define ISL_SURF_USAGE_SOFTWARE_DETILING       (1u << 26)
+#define ISL_SURF_USAGE_PREFER_4K_ALIGNMENT     (1u << 27)
 /** @} */
 
 /**
@@ -1823,11 +1854,11 @@ struct isl_surf_fill_state_info {
    uint64_t aux_address;
 
    /**
-    * The format to use for decoding media compression.
+    * The format to use for encoding and decoding render/media compression.
     *
-    * Used together with the surface format.
+    * May be used together with the surface format.
     */
-   enum isl_format mc_format;
+   enum isl_format aux_format;
 
    /**
     * The clear color for this surface
@@ -2596,6 +2627,9 @@ uint32_t
 isl_drm_modifier_get_score(const struct intel_device_info *devinfo,
                            uint64_t modifier);
 
+/* The maximum number of planes of an Intel modifier in drm_fourcc.h. */
+#define ISL_MODIFIER_MAX_PLANES 4
+
 /* Return the number of planes used by an image with the given parameters. */
 uint32_t
 isl_drm_modifier_get_plane_count(const struct intel_device_info *devinfo,
@@ -2783,14 +2817,11 @@ isl_surf_get_tile_info(const struct isl_surf *surf,
 
 /**
  * :param surf:                 |in|  The main surface
- * :param hiz_or_mcs_surf:      |in|  HiZ or MCS surface associated with the main
- *                                    surface
  * :returns: true if the given surface supports CCS.
  */
 bool
 isl_surf_supports_ccs(const struct isl_device *dev,
-                      const struct isl_surf *surf,
-                      const struct isl_surf *hiz_or_mcs_surf);
+                      const struct isl_surf *surf);
 
 /** Constructs a HiZ surface for the given main surface.
  *

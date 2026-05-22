@@ -353,7 +353,7 @@ comma_separated_list_contains(const char *list, const char *s);
 /**
  * Get option.
  *
- * It is an alias for getenv on Unix and Windows.
+ * It is an alias for os_get_option.
  *
  */
 const char *
@@ -408,19 +408,6 @@ __normal_user(void)
    return geteuid() == getuid() && getegid() == getgid();
 #endif
 }
-
-#ifndef HAVE_SECURE_GETENV
-#ifdef __SWITCH__
-/* Switch stdlib.h declares secure_getenv but doesn't implement it.
- * Use a macro to avoid conflicting with the non-static declaration. */
-#define secure_getenv(name) getenv(name)
-#else
-static inline char *secure_getenv(const char *name)
-{
-   return getenv(name);
-}
-#endif
-#endif
 
 #define DEBUG_GET_ONCE_BOOL_OPTION(sufix, name, dfault) \
 static bool \

@@ -256,4 +256,6 @@ typedef struct PACKED _pco_precomp_data {
 static_assert(sizeof(pco_precomp_data) == 8, "sizeof(pco_precomp_data) != 8");
 
 pco_precomp_data pco_get_precomp_data(pco_shader *shader);
+
+struct pvr_stats pco_get_pvr_stats(pco_shader *shader);
 #endif /* PCO_DATA_H */

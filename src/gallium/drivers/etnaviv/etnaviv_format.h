@@ -56,6 +56,9 @@ translate_pe_format(enum pipe_format fmt);
 int
 translate_pe_format_rb_swap(enum pipe_format fmt);
 
+enum pipe_format
+translate_pe_internal_format(enum pipe_format fmt);
+
 uint32_t
 translate_vertex_format_type(enum pipe_format fmt);
 

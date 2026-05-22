@@ -39,6 +39,7 @@
 #include "lp_bld_coro.h"
 #include "lp_bld_printf.h"
 #include "lp_bld_intr.h"
+#include "lp_bld_tgsi.h"
 
 #include "util/u_cpu_detect.h"
 #include "util/u_math.h"
@@ -189,7 +190,7 @@ struct lp_build_nir_soa_context
    struct hash_table *fns;
 
    /** Value range analysis hash table used in code generation. */
-   struct hash_table *range_ht;
+   nir_fp_analysis_state range_ht;
 
    LLVMValueRef func;
    nir_shader *shader;
@@ -217,6 +218,7 @@ struct lp_build_nir_soa_context
    LLVMValueRef ssbo_ptr;
 
    LLVMValueRef shared_ptr;
+   LLVMValueRef shared_size;
    LLVMValueRef payload_ptr;
    LLVMValueRef scratch_ptr;
    unsigned scratch_size;
@@ -361,7 +363,7 @@ group_op_mask_vec(struct lp_build_nir_soa_context *bld)
 {
    if (bld->shader->info.fs.require_full_quads)
       return mask_vec_with_helpers(bld);
-   
+
    return mask_vec(bld);
 }
 
@@ -1313,11 +1315,27 @@ mem_access_base_pointer(struct lp_build_nir_soa_context *bld,
          ptr = LLVMBuildPtrToInt(gallivm->builder, ptr, bld->int64_bld.elem_type, "");
          ptr = LLVMBuildAdd(gallivm->builder, ptr, lp_build_const_int64(gallivm, 12), "");
          ptr = LLVMBuildIntToPtr(gallivm->builder, ptr, LLVMPointerType(LLVMInt32TypeInContext(gallivm->context), 0), "");
+         if (bounds)
+            *bounds = NULL;
       }
-      else
+      else {
          ptr = bld->shared_ptr;
-      if (bounds)
-         *bounds = NULL;
+         if (bounds) {
+            /*
+             * For shared mem, use essentially the same logic as for SSBOs,
+             * and clamp against the declared size.
+             * Note this is probably overkill - unsure of vulkan semantics,
+             * but d3d would allow for instance to just clamp offsets,
+             * since OOB writes cause shared mem to become undefined, and OOB
+             * reads have undefined results, unlike for SSBOs there's no
+             * need to ignore writes and return 0 for reads.
+             * Bounds is in units of bit_size (not bytes).
+             */
+            uint32_t shift_val = bit_size_to_shift_size(bit_size);
+            *bounds = LLVMBuildAShr(gallivm->builder, bld->shared_size,
+                                    lp_build_const_int32(gallivm, shift_val), "");
+         }
+      }
    }
 
    /* Cast it to the pointer type of the access this instruction is doing. */
@@ -2294,15 +2312,31 @@ static void emit_elect(struct lp_build_nir_soa_context *bld, LLVMValueRef result
    result[0] = LLVMBuildICmp(builder, LLVMIntNE, result[0], lp_build_const_int_vec(gallivm, bld->int_bld.type, 0), "");
 }
 
+static LLVMValueRef build_reduction_identity_val(struct gallivm_state *gallivm,
+                                                 struct lp_build_context *int_bld,
+                                                 nir_op reduction_op,
+                                                 unsigned bit_size)
+{
+   nir_const_value const_val = nir_alu_binop_identity(reduction_op, bit_size);
+
+   return lp_build_const_int_vec(gallivm, lp_elem_type(int_bld->type),
+                                 nir_const_value_as_uint(const_val, bit_size));
+}
+
 static void emit_reduce(struct lp_build_nir_soa_context *bld, LLVMValueRef src,
                         nir_intrinsic_instr *instr, LLVMValueRef result[4])
 {
    struct gallivm_state *gallivm = bld->base.gallivm;
    LLVMBuilderRef builder = gallivm->builder;
    uint32_t bit_size = nir_src_bit_size(instr->src[0]);
-   /* can't use llvm reduction intrinsics because of exec_mask */
    LLVMValueRef exec_mask = group_op_mask_vec(bld);
    nir_op reduction_op = nir_intrinsic_reduction_op(instr);
+   bool is_flt = reduction_op == nir_op_fadd ||
+      reduction_op == nir_op_fmul ||
+      reduction_op == nir_op_fmin ||
+      reduction_op == nir_op_fmax;
+   bool is_unsigned = reduction_op == nir_op_umin ||
+      reduction_op == nir_op_umax;
 
    uint32_t cluster_size = 0;
 
@@ -2317,137 +2351,101 @@ static void emit_reduce(struct lp_build_nir_soa_context *bld, LLVMValueRef src,
       src = LLVMBuildZExt(builder, src, bld->uint8_bld.vec_type, "");
    }
 
+   struct lp_build_context *int_bld = get_int_bld(bld, true, bit_size, true);
+   struct lp_build_context *vec_bld = is_flt ? get_flt_bld(bld, bit_size, true) :
+      get_int_bld(bld, is_unsigned, bit_size, true);
+
+   /*
+    * For a reduce operation with the correct cluster size, the llvm
+    * intrinsics can be used as long as the exec_mask is taken into account.
+    * Values are defaulted in disabled lanes depending on the operation.
+    */
+   if (instr->intrinsic == nir_intrinsic_reduce &&
+       cluster_size == bld->int_bld.type.length) {
+      char intrinsic[64];
+      uint32_t length = vec_bld->type.length;
+      uint32_t src_width = bit_size;
+
+      src = LLVMBuildBitCast(builder, src, int_bld->vec_type, "");
+      if (bit_size < 32)
+         exec_mask = LLVMBuildTrunc(builder, exec_mask, int_bld->vec_type, "");
+      if (bit_size > 32)
+         exec_mask = LLVMBuildSExt(builder, exec_mask, int_bld->vec_type, "");
+      LLVMValueRef masked_val = lp_build_and(int_bld, src, exec_mask);
+      const char *opname;
+
+      switch (reduction_op) {
+      case nir_op_iadd: opname = "add"; break;
+      case nir_op_iand: opname = "and"; break;
+      case nir_op_ior: opname = "or"; break;
+      case nir_op_ixor: opname = "xor"; break;
+      case nir_op_imul: opname = "mul"; break;
+      case nir_op_fadd: opname = "fadd"; break;
+      case nir_op_fmul: opname = "fmul"; break;
+      case nir_op_imin: opname = "smin"; break;
+      case nir_op_umin: opname = "umin"; break;
+      case nir_op_fmin: opname = "fmin"; break;
+      case nir_op_imax: opname = "smax"; break;
+      case nir_op_umax: opname = "umax"; break;
+      case nir_op_fmax: opname = "fmax"; break;
+      default:
+	 UNREACHABLE("Unhandled reduction operation");
+      };
+      snprintf(intrinsic, sizeof intrinsic, "llvm.vector.reduce.%s.v%u%s%u",
+               opname,
+               length, is_flt ? "f" : "i" , src_width);
+
+      LLVMValueRef init_val = build_reduction_identity_val(gallivm,
+                                                           int_bld,
+                                                           reduction_op,
+                                                           bit_size);
+      if (init_val) {
+         init_val = lp_build_broadcast_scalar(int_bld, init_val);
+         init_val = lp_build_andnot(int_bld, init_val, exec_mask);
+         masked_val = lp_build_or(int_bld, masked_val, init_val);
+      }
+      if (is_flt)
+         masked_val = LLVMBuildBitCast(builder, masked_val, vec_bld->vec_type, "");
+
+      LLVMValueRef args[2];
+      int num_args = 1;
+
+      if (reduction_op == nir_op_fadd ||
+          reduction_op == nir_op_fmul) {
+         if (reduction_op == nir_op_fmul) {
+            args[0] = lp_build_const_elem(gallivm, vec_bld->type, 1);
+         } else {
+            args[0] = lp_build_const_elem(gallivm, vec_bld->type, -0.0);
+         }
+         args[1] = masked_val;
+         num_args++;
+      } else {
+         args[0] = masked_val;
+      }
+
+      LLVMValueRef res = lp_build_intrinsic(builder, intrinsic, vec_bld->elem_type, args, num_args, 0);
+
+      result[0] = lp_build_broadcast(gallivm, vec_bld->vec_type, res);
+
+      if (instr->def.bit_size == 1)
+         result[0] = LLVMBuildICmp(builder, LLVMIntNE, result[0], int_bld->zero, "");
+      return;
+   }
+
    LLVMValueRef res_store = NULL;
    LLVMValueRef scan_store;
-   struct lp_build_context *int_bld = get_int_bld(bld, true, bit_size, true);
 
    res_store = lp_build_alloca(gallivm, int_bld->vec_type, "");
    scan_store = lp_build_alloca(gallivm, int_bld->elem_type, "");
 
    struct lp_build_context elem_bld;
-   bool is_flt = reduction_op == nir_op_fadd ||
-      reduction_op == nir_op_fmul ||
-      reduction_op == nir_op_fmin ||
-      reduction_op == nir_op_fmax;
-   bool is_unsigned = reduction_op == nir_op_umin ||
-      reduction_op == nir_op_umax;
-
-   struct lp_build_context *vec_bld = is_flt ? get_flt_bld(bld, bit_size, true) :
-      get_int_bld(bld, is_unsigned, bit_size, true);
 
    lp_build_context_init(&elem_bld, gallivm, lp_elem_type(vec_bld->type));
 
-   LLVMValueRef store_val = NULL;
+   LLVMValueRef store_val = build_reduction_identity_val(gallivm, int_bld, reduction_op, bit_size);
    /*
     * Put the identity value for the operation into the storage
     */
-   switch (reduction_op) {
-   case nir_op_fmin: {
-      LLVMValueRef flt_max = bit_size == 64 ? LLVMConstReal(LLVMDoubleTypeInContext(gallivm->context), INFINITY) :
-         (bit_size == 16 ? LLVMConstReal(LLVMHalfTypeInContext(gallivm->context), INFINITY) : lp_build_const_float(gallivm, INFINITY));
-      store_val = LLVMBuildBitCast(builder, flt_max, int_bld->elem_type, "");
-      break;
-   }
-   case nir_op_fmax: {
-      LLVMValueRef flt_min = bit_size == 64 ? LLVMConstReal(LLVMDoubleTypeInContext(gallivm->context), -INFINITY) :
-         (bit_size == 16 ? LLVMConstReal(LLVMHalfTypeInContext(gallivm->context), -INFINITY) : lp_build_const_float(gallivm, -INFINITY));
-      store_val = LLVMBuildBitCast(builder, flt_min, int_bld->elem_type, "");
-      break;
-   }
-   case nir_op_fmul: {
-      LLVMValueRef flt_one = bit_size == 64 ? LLVMConstReal(LLVMDoubleTypeInContext(gallivm->context), 1.0) :
-         (bit_size == 16 ? LLVMConstReal(LLVMHalfTypeInContext(gallivm->context), 1.0) : lp_build_const_float(gallivm, 1.0));
-      store_val = LLVMBuildBitCast(builder, flt_one, int_bld->elem_type, "");
-      break;
-   }
-   case nir_op_umin:
-      switch (bit_size) {
-      case 8:
-         store_val = LLVMConstInt(LLVMInt8TypeInContext(gallivm->context), UINT8_MAX, 0);
-         break;
-      case 16:
-         store_val = LLVMConstInt(LLVMInt16TypeInContext(gallivm->context), UINT16_MAX, 0);
-         break;
-      case 32:
-      default:
-         store_val  = lp_build_const_int32(gallivm, UINT_MAX);
-         break;
-      case 64:
-         store_val  = lp_build_const_int64(gallivm, UINT64_MAX);
-         break;
-      }
-      break;
-   case nir_op_imin:
-      switch (bit_size) {
-      case 8:
-         store_val = LLVMConstInt(LLVMInt8TypeInContext(gallivm->context), INT8_MAX, 0);
-         break;
-      case 16:
-         store_val = LLVMConstInt(LLVMInt16TypeInContext(gallivm->context), INT16_MAX, 0);
-         break;
-      case 32:
-      default:
-         store_val  = lp_build_const_int32(gallivm, INT_MAX);
-         break;
-      case 64:
-         store_val  = lp_build_const_int64(gallivm, INT64_MAX);
-         break;
-      }
-      break;
-   case nir_op_imax:
-      switch (bit_size) {
-      case 8:
-         store_val = LLVMConstInt(LLVMInt8TypeInContext(gallivm->context), INT8_MIN, 0);
-         break;
-      case 16:
-         store_val = LLVMConstInt(LLVMInt16TypeInContext(gallivm->context), INT16_MIN, 0);
-         break;
-      case 32:
-      default:
-         store_val  = lp_build_const_int32(gallivm, INT_MIN);
-         break;
-      case 64:
-         store_val  = lp_build_const_int64(gallivm, INT64_MIN);
-         break;
-      }
-      break;
-   case nir_op_imul:
-      switch (bit_size) {
-      case 8:
-         store_val = LLVMConstInt(LLVMInt8TypeInContext(gallivm->context), 1, 0);
-         break;
-      case 16:
-         store_val = LLVMConstInt(LLVMInt16TypeInContext(gallivm->context), 1, 0);
-         break;
-      case 32:
-      default:
-         store_val  = lp_build_const_int32(gallivm, 1);
-         break;
-      case 64:
-         store_val  = lp_build_const_int64(gallivm, 1);
-         break;
-      }
-      break;
-   case nir_op_iand:
-      switch (bit_size) {
-      case 8:
-         store_val = LLVMConstInt(LLVMInt8TypeInContext(gallivm->context), 0xff, 0);
-         break;
-      case 16:
-         store_val = LLVMConstInt(LLVMInt16TypeInContext(gallivm->context), 0xffff, 0);
-         break;
-      case 32:
-      default:
-         store_val  = lp_build_const_int32(gallivm, 0xffffffff);
-         break;
-      case 64:
-         store_val  = lp_build_const_int64(gallivm, 0xffffffffffffffffLL);
-         break;
-      }
-      break;
-   default:
-      break;
-   }
    if (store_val)
       LLVMBuildStore(builder, store_val, scan_store);
 
@@ -2889,7 +2887,7 @@ get_instr_src_vec(struct lp_build_nir_soa_context *bld, nir_instr *instr, uint32
    struct gallivm_state *gallivm = bld->base.gallivm;
    LLVMBuilderRef builder = gallivm->builder;
 
-   nir_src *src = NULL; 
+   nir_src *src = NULL;
    switch (instr->type) {
    case nir_instr_type_alu: {
       nir_alu_instr *alu = nir_instr_as_alu(instr);
@@ -2965,8 +2963,10 @@ assign_ssa_dest(struct lp_build_nir_soa_context *bld, const nir_def *ssa,
    struct gallivm_state *gallivm = bld->base.gallivm;
    LLVMBuilderRef builder = gallivm->builder;
 
-   if (gallivm->di_builder && ssa->parent_instr->has_debug_info) {
-      nir_instr_debug_info *debug_info = nir_instr_get_debug_info(ssa->parent_instr);
+   if (gallivm->di_builder && nir_def_instr(ssa)->has_debug_info) {
+      /* Cast away the constness */
+      nir_instr_debug_info *debug_info =
+         nir_instr_get_debug_info((void *) nir_def_instr(ssa));
 
       /* Use "ssa_%u" because GDB cannot handle "%%%u" */
       char name[16];
@@ -3367,7 +3367,7 @@ do_alu_action(struct lp_build_nir_soa_context *bld,
        * better code can be generated by passing that information along.
        */
       nir_search_state search;
-      search.range_ht = bld->range_ht;
+      search.range_ht = &bld->range_ht;
       if (is_a_number(&search, instr, 1,
                       0 /* unused num_components */,
                       NULL /* unused swizzle */)) {
@@ -3660,32 +3660,20 @@ visit_alu(struct lp_build_nir_soa_context *bld,
    struct lp_type scalar_double_type = bld->scalar_dbl_bld.type;
 
    /* Set the per-intruction float controls. */
-   bld->half_bld.type.signed_zero_preserve |=
-      !!(instr->fp_fast_math & FLOAT_CONTROLS_SIGNED_ZERO_PRESERVE_FP16);
-   bld->scalar_half_bld.type.signed_zero_preserve |=
-      !!(instr->fp_fast_math & FLOAT_CONTROLS_SIGNED_ZERO_PRESERVE_FP16);
-   bld->half_bld.type.nan_preserve |=
-      !!(instr->fp_fast_math & FLOAT_CONTROLS_NAN_PRESERVE_FP16);
-   bld->scalar_half_bld.type.nan_preserve |=
-      !!(instr->fp_fast_math & FLOAT_CONTROLS_NAN_PRESERVE_FP16);
+   bld->half_bld.type.signed_zero_preserve |= nir_alu_instr_is_signed_zero_preserve(instr);
+   bld->scalar_half_bld.type.signed_zero_preserve |= nir_alu_instr_is_signed_zero_preserve(instr);
+   bld->half_bld.type.nan_preserve |= nir_alu_instr_is_nan_preserve(instr);
+   bld->scalar_half_bld.type.nan_preserve |= nir_alu_instr_is_nan_preserve(instr);
 
-   bld->base.type.signed_zero_preserve |=
-      !!(instr->fp_fast_math & FLOAT_CONTROLS_SIGNED_ZERO_PRESERVE_FP32);
-   bld->scalar_base.type.signed_zero_preserve |=
-      !!(instr->fp_fast_math & FLOAT_CONTROLS_SIGNED_ZERO_PRESERVE_FP32);
-   bld->base.type.nan_preserve |=
-      !!(instr->fp_fast_math & FLOAT_CONTROLS_NAN_PRESERVE_FP32);
-   bld->scalar_base.type.nan_preserve |=
-      !!(instr->fp_fast_math & FLOAT_CONTROLS_NAN_PRESERVE_FP32);
+   bld->base.type.signed_zero_preserve |= nir_alu_instr_is_signed_zero_preserve(instr);
+   bld->scalar_base.type.signed_zero_preserve |= nir_alu_instr_is_signed_zero_preserve(instr);
+   bld->base.type.nan_preserve |= nir_alu_instr_is_nan_preserve(instr);
+   bld->scalar_base.type.nan_preserve |= nir_alu_instr_is_nan_preserve(instr);
 
-   bld->dbl_bld.type.signed_zero_preserve |=
-      !!(instr->fp_fast_math & FLOAT_CONTROLS_SIGNED_ZERO_PRESERVE_FP64);
-   bld->scalar_dbl_bld.type.signed_zero_preserve |=
-      !!(instr->fp_fast_math & FLOAT_CONTROLS_SIGNED_ZERO_PRESERVE_FP64);
-   bld->dbl_bld.type.nan_preserve |=
-      !!(instr->fp_fast_math & FLOAT_CONTROLS_NAN_PRESERVE_FP64);
-   bld->scalar_dbl_bld.type.nan_preserve |=
-      !!(instr->fp_fast_math & FLOAT_CONTROLS_NAN_PRESERVE_FP64);
+   bld->dbl_bld.type.signed_zero_preserve |= nir_alu_instr_is_signed_zero_preserve(instr);
+   bld->scalar_dbl_bld.type.signed_zero_preserve |= nir_alu_instr_is_signed_zero_preserve(instr);
+   bld->dbl_bld.type.nan_preserve |= nir_alu_instr_is_nan_preserve(instr);
+   bld->scalar_dbl_bld.type.nan_preserve |= nir_alu_instr_is_nan_preserve(instr);
 
    for (unsigned i = 0; i < nir_op_infos[instr->op].num_inputs; i++) {
       /**
@@ -4256,7 +4244,7 @@ img_params_init_resource(struct lp_build_nir_soa_context *bld, struct lp_img_par
          params->image_index = nir_src_as_int(*src);
       else
          params->image_index_offset = get_src(bld, src, 0);
-   
+
       return;
    }
 
@@ -4271,7 +4259,7 @@ sampler_size_params_init_resource(struct lp_build_nir_soa_context *bld, struct l
          params->texture_unit = nir_src_as_int(*src);
       else
          params->texture_unit_offset = get_src(bld, src, 0);
-   
+
       return;
    }
 
@@ -4576,7 +4564,7 @@ visit_shared_load(struct lp_build_nir_soa_context *bld,
    bool offset_is_uniform = !lp_nir_instr_src_divergent(&instr->instr, 0);
    emit_load_mem(bld, instr->def.num_components,
                  instr->def.bit_size, true,
-                 offset_is_uniform, false, true, NULL, offset, result);
+                 offset_is_uniform, false, false, NULL, offset, result);
 }
 
 static void
@@ -4589,7 +4577,7 @@ visit_shared_store(struct lp_build_nir_soa_context *bld,
    int writemask = nir_intrinsic_write_mask(instr);
    int nc = nir_src_num_components(instr->src[0]);
    int bitsize = nir_src_bit_size(instr->src[0]);
-   emit_store_mem(bld, writemask, nc, bitsize, false, true, NULL, offset, val);
+   emit_store_mem(bld, writemask, nc, bitsize, false, false, NULL, offset, val);
 }
 
 static void
@@ -4604,7 +4592,7 @@ visit_shared_atomic(struct lp_build_nir_soa_context *bld,
    if (instr->intrinsic == nir_intrinsic_shared_atomic_swap)
       val2 = get_src(bld, &instr->src[2], 0);
 
-   emit_atomic_mem(bld, nir_intrinsic_atomic_op(instr), bitsize, false, true,
+   emit_atomic_mem(bld, nir_intrinsic_atomic_op(instr), bitsize, false, false,
                    NULL, offset, val, val2, &result[0]);
 }
 
@@ -5469,6 +5457,8 @@ visit_tex(struct lp_build_nir_soa_context *bld, nir_tex_instr *instr)
             derivs.ddx[chan] = deriv_vec[chan];
          for (unsigned chan = 0; chan < deriv_cnt; ++chan)
             derivs.ddx[chan] = cast_type(bld, derivs.ddx[chan], nir_type_float, 32);
+         for (unsigned chan = deriv_cnt; chan < 3; ++chan)
+            derivs.ddx[chan] = coord_zero;
          break;
       }
       case nir_tex_src_ddy: {
@@ -5481,6 +5471,8 @@ visit_tex(struct lp_build_nir_soa_context *bld, nir_tex_instr *instr)
             derivs.ddy[chan] = deriv_vec[chan];
          for (unsigned chan = 0; chan < deriv_cnt; ++chan)
             derivs.ddy[chan] = cast_type(bld, derivs.ddy[chan], nir_type_float, 32);
+         for (unsigned chan = deriv_cnt; chan < 3; ++chan)
+            derivs.ddy[chan] = coord_zero;
          break;
       }
       case nir_tex_src_offset: {
@@ -5854,30 +5846,18 @@ void lp_build_nir_soa_func(struct gallivm_state *gallivm,
    lp_build_context_init(&bld.int_bld, gallivm, lp_int_type(type));
    {
       struct lp_type float_type = type;
-      float_type.signed_zero_preserve =
-         !!(shader->info.float_controls_execution_mode & FLOAT_CONTROLS_SIGNED_ZERO_PRESERVE_FP32);
-      float_type.nan_preserve =
-         !!(shader->info.float_controls_execution_mode & FLOAT_CONTROLS_NAN_PRESERVE_FP32);
       lp_build_context_init(&bld.base, gallivm, float_type);
    }
    {
       struct lp_type dbl_type;
       dbl_type = type;
       dbl_type.width *= 2;
-      dbl_type.signed_zero_preserve =
-         !!(shader->info.float_controls_execution_mode & FLOAT_CONTROLS_SIGNED_ZERO_PRESERVE_FP64);
-      dbl_type.nan_preserve =
-         !!(shader->info.float_controls_execution_mode & FLOAT_CONTROLS_NAN_PRESERVE_FP64);
       lp_build_context_init(&bld.dbl_bld, gallivm, dbl_type);
    }
    {
       struct lp_type half_type;
       half_type = type;
       half_type.width /= 2;
-      half_type.signed_zero_preserve =
-         !!(shader->info.float_controls_execution_mode & FLOAT_CONTROLS_SIGNED_ZERO_PRESERVE_FP16);
-      half_type.nan_preserve =
-         !!(shader->info.float_controls_execution_mode & FLOAT_CONTROLS_NAN_PRESERVE_FP16);
       lp_build_context_init(&bld.half_bld, gallivm, half_type);
    }
    {
@@ -5918,7 +5898,7 @@ void lp_build_nir_soa_func(struct gallivm_state *gallivm,
    }
    {
       struct lp_type bool_type;
-      bool_type = lp_int_type(type);
+      bool_type = lp_uint_type(type);
       bool_type.width /= 32;
       lp_build_context_init(&bld.bool_bld, gallivm, bool_type);
    }
@@ -5929,30 +5909,18 @@ void lp_build_nir_soa_func(struct gallivm_state *gallivm,
    lp_build_context_init(&bld.scalar_int_bld, gallivm, lp_int_type(elem_type));
    {
       struct lp_type float_type = elem_type;
-      float_type.signed_zero_preserve =
-         !!(shader->info.float_controls_execution_mode & FLOAT_CONTROLS_SIGNED_ZERO_PRESERVE_FP32);
-      float_type.nan_preserve =
-         !!(shader->info.float_controls_execution_mode & FLOAT_CONTROLS_NAN_PRESERVE_FP32);
       lp_build_context_init(&bld.scalar_base, gallivm, float_type);
    }
    {
       struct lp_type dbl_type;
       dbl_type = elem_type;
       dbl_type.width *= 2;
-      dbl_type.signed_zero_preserve =
-         !!(shader->info.float_controls_execution_mode & FLOAT_CONTROLS_SIGNED_ZERO_PRESERVE_FP64);
-      dbl_type.nan_preserve =
-         !!(shader->info.float_controls_execution_mode & FLOAT_CONTROLS_NAN_PRESERVE_FP64);
       lp_build_context_init(&bld.scalar_dbl_bld, gallivm, dbl_type);
    }
    {
       struct lp_type half_type;
       half_type = elem_type;
       half_type.width /= 2;
-      half_type.signed_zero_preserve =
-         !!(shader->info.float_controls_execution_mode & FLOAT_CONTROLS_SIGNED_ZERO_PRESERVE_FP16);
-      half_type.nan_preserve =
-         !!(shader->info.float_controls_execution_mode & FLOAT_CONTROLS_NAN_PRESERVE_FP16);
       lp_build_context_init(&bld.scalar_half_bld, gallivm, half_type);
    }
    {
@@ -5993,7 +5961,7 @@ void lp_build_nir_soa_func(struct gallivm_state *gallivm,
    }
    {
       struct lp_type bool_type;
-      bool_type = lp_int_type(elem_type);
+      bool_type = lp_uint_type(elem_type);
       bool_type.width /= 32;
       lp_build_context_init(&bld.scalar_bool_bld, gallivm, bool_type);
    }
@@ -6015,6 +5983,7 @@ void lp_build_nir_soa_func(struct gallivm_state *gallivm,
    bld.thread_data_ptr = params->thread_data_ptr;
    bld.image = params->image;
    bld.shared_ptr = params->shared_ptr;
+   bld.shared_size = params->shared_size;
    bld.payload_ptr = params->payload_ptr;
    bld.coro = params->coro;
    bld.num_inputs = params->num_inputs;
@@ -6049,7 +6018,7 @@ void lp_build_nir_soa_func(struct gallivm_state *gallivm,
 
    bld.shader = shader;
 
-   bld.scratch_size = ALIGN(shader->scratch_size, 8);
+   bld.scratch_size = align(shader->scratch_size, 8);
    if (params->scratch_ptr)
       bld.scratch_ptr = params->scratch_ptr;
    else if (shader->scratch_size) {
@@ -6094,7 +6063,7 @@ void lp_build_nir_soa_func(struct gallivm_state *gallivm,
    bld.regs = _mesa_pointer_hash_table_create(NULL);
    bld.vars = _mesa_hash_table_create(NULL, _mesa_hash_pointer,
                                       _mesa_key_pointer_equal);
-   bld.range_ht = _mesa_pointer_hash_table_create(NULL);
+   bld.range_ht = nir_create_fp_analysis_state(impl);
 
    nir_index_ssa_defs(impl);
 
@@ -6145,7 +6114,7 @@ void lp_build_nir_soa_func(struct gallivm_state *gallivm,
    free(bld.ssa_defs);
    ralloc_free(bld.vars);
    ralloc_free(bld.regs);
-   ralloc_free(bld.range_ht);
+   nir_free_fp_analysis_state(&bld.range_ht);
 
    if (bld.gs_iface) {
       LLVMBuilderRef builder = bld.base.gallivm->builder;
@@ -6186,7 +6155,7 @@ lp_build_nir_soa_prepasses(struct nir_shader *nir)
    do {
       progress = false;
       NIR_PASS(progress, nir, nir_lower_alu_to_scalar, NULL, NULL);
-      NIR_PASS(progress, nir, nir_copy_prop);
+      NIR_PASS(progress, nir, nir_opt_copy_prop);
       NIR_PASS(progress, nir, nir_opt_dce);
    } while (progress);
 

@@ -67,22 +67,6 @@ brw_emit_gs_thread_end(brw_shader &s)
    urb->offset = 0;
 }
 
-static void
-brw_assign_gs_urb_setup(brw_shader &s)
-{
-   assert(s.stage == MESA_SHADER_GEOMETRY);
-
-   struct brw_vue_prog_data *vue_prog_data = brw_vue_prog_data(s.prog_data);
-
-   s.first_non_payload_grf +=
-      8 * vue_prog_data->urb_read_length * s.nir->info.gs.vertices_in;
-
-   foreach_block_and_inst(block, brw_inst, inst, s.cfg) {
-      /* Rewrite all ATTR file references to GRFs. */
-      s.convert_attr_sources_to_hw_regs(inst);
-   }
-}
-
 static bool
 run_gs(brw_shader &s)
 {
@@ -110,17 +94,17 @@ run_gs(brw_shader &s)
 
    brw_from_nir(&s);
 
-   brw_emit_gs_thread_end(s);
-
    if (s.failed)
       return false;
 
    brw_calculate_cfg(s);
 
+   brw_emit_gs_thread_end(s);
+
    brw_optimize(s);
 
    s.assign_curb_setup();
-   brw_assign_gs_urb_setup(s);
+   brw_assign_urb_setup(s);
 
    brw_lower_3src_null_dest(s);
    brw_workaround_emit_dummy_mov_instruction(s);
@@ -148,7 +132,15 @@ brw_compile_gs(const struct brw_compiler *compiler,
 
    const bool debug_enabled = brw_should_print_shader(nir, DEBUG_GS, params->base.source_hash);
 
-   brw_debug_archive_nir(params->base.archiver, nir, dispatch_width, "first");
+   brw_pass_tracker pt_ = {
+      .nir = nir,
+      .dispatch_width = dispatch_width,
+      .compiler = compiler,
+      .key = &key->base,
+      .archiver = params->base.archiver,
+   }, *pt = &pt_;
+
+   BRW_NIR_SNAPSHOT("first");
 
    brw_prog_data_init(&prog_data->base.base, &params->base);
 
@@ -175,12 +167,15 @@ brw_compile_gs(const struct brw_compiler *compiler,
                        key->base.vue_layout,
                        pos_slots);
 
-   brw_nir_apply_key(nir, compiler, &key->base, dispatch_width);
-   brw_nir_lower_vue_inputs(nir, &input_vue_map);
+   brw_nir_apply_key(pt, &key->base, dispatch_width);
+   brw_nir_lower_gs_inputs(nir, compiler->devinfo, &input_vue_map,
+                           &prog_data->base.urb_read_length);
    brw_nir_lower_vue_outputs(nir);
-   brw_postprocess_nir(nir, compiler, dispatch_width,
-                       params->base.archiver, debug_enabled,
-                       key->base.robust_flags);
+
+   BRW_NIR_SNAPSHOT("after_lower_io");
+
+   brw_nir_opt_vectorize_urb(pt);
+   brw_postprocess_nir(pt, debug_enabled);
 
    prog_data->include_primitive_id =
       BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_PRIMITIVE_ID);
@@ -223,7 +218,7 @@ brw_compile_gs(const struct brw_compiler *compiler,
 
    /* 1 HWORD = 32 bytes = 256 bits */
    prog_data->control_data_header_size_hwords =
-      ALIGN(control_data_header_size_bits, 256) / 256;
+      align(control_data_header_size_bits, 256) / 256;
 
    /* Compute the output vertex size.
     *
@@ -276,7 +271,15 @@ brw_compile_gs(const struct brw_compiler *compiler,
    unsigned output_vertex_size_bytes = prog_data->base.vue_map.num_slots * 16;
    assert(output_vertex_size_bytes <= GFX7_MAX_GS_OUTPUT_VERTEX_SIZE_BYTES);
    prog_data->output_vertex_size_hwords =
-      ALIGN(output_vertex_size_bytes, 32) / 32;
+      align(output_vertex_size_bytes, 32) / 32;
+
+   const unsigned starting_urb_offset =
+      2 * prog_data->control_data_header_size_hwords +
+      ((prog_data->static_vertex_count == -1) ? 2 : 0);
+
+   BRW_NIR_PASS(brw_nir_lower_deferred_urb_writes, compiler->devinfo,
+                &prog_data->base.vue_map, starting_urb_offset,
+                2 * prog_data->output_vertex_size_hwords);
 
    /* Compute URB entry size.  The maximum allowed URB entry size is 32k.
     * That divides up as follows:
@@ -330,18 +333,13 @@ brw_compile_gs(const struct brw_compiler *compiler,
 
 
    /* URB entry sizes are stored as a multiple of 64 bytes in gfx7+. */
-   prog_data->base.urb_entry_size = ALIGN(output_size_bytes, 64) / 64;
+   prog_data->base.urb_entry_size = align(output_size_bytes, 64) / 64;
 
    assert(nir->info.gs.output_primitive < ARRAY_SIZE(gl_prim_to_hw_prim));
    prog_data->output_topology =
       gl_prim_to_hw_prim[nir->info.gs.output_primitive];
 
    prog_data->vertices_in = nir->info.gs.vertices_in;
-
-   /* GS inputs are read from the VUE 256 bits (2 vec4's) at a time, so we
-    * need to program a URB read length of ceiling(num_slots / 2).
-    */
-   prog_data->base.urb_read_length = (input_vue_map.num_slots + 1) / 2;
 
    /* Now that prog_data setup is done, we are ready to actually compile the
     * program.

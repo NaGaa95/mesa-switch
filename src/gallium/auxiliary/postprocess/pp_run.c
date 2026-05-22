@@ -127,7 +127,8 @@ pp_run(struct pp_queue_t *ppq, struct pipe_resource *in,
                         CSO_BIT_STENCIL_REF |
                         CSO_BIT_STREAM_OUTPUTS |
                         CSO_BIT_VERTEX_ELEMENTS |
-                        CSO_BITS_ALL_SHADERS |
+                        CSO_BIT_MESH_SHADER |
+                        CSO_BITS_VERTEX_PIPE_SHADERS |
                         CSO_BIT_VIEWPORT |
                         CSO_BIT_PAUSE_QUERIES |
                         CSO_BIT_RENDER_CONDITION));
@@ -139,7 +140,6 @@ pp_run(struct pp_queue_t *ppq, struct pipe_resource *in,
    cso_set_tessctrl_shader_handle(cso, NULL);
    cso_set_tesseval_shader_handle(cso, NULL);
    cso_set_geometry_shader_handle(cso, NULL);
-   cso_set_task_shader_handle(cso, NULL);
    cso_set_mesh_shader_handle(cso, NULL);
    cso_set_render_condition(cso, NULL, false, 0);
 
@@ -306,5 +306,5 @@ void
 pp_filter_set_clear_fb(struct pp_program *p)
 {
    cso_set_framebuffer(p->cso, &p->framebuffer);
-   p->pipe->clear(p->pipe, PIPE_CLEAR_COLOR0, NULL, &p->clear_color, 0, 0);
+   p->pipe->clear(p->pipe, PIPE_CLEAR_COLOR0, 0xf, 0, NULL, &p->clear_color, 0, 0);
 }

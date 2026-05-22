@@ -133,15 +133,14 @@ zink_debug_mem_print_stats(struct zink_screen *screen)
    simple_mtx_lock(&screen->debug_mem_lock);
 
    /* Put the HT's sizes data in an array so we can sort by number of allocations. */
-   struct util_dynarray dyn;
-   util_dynarray_init(&dyn, NULL);
+   struct util_dynarray dyn = UTIL_DYNARRAY_INIT;
 
    uint32_t size = 0;
    uint32_t count = 0;
    hash_table_foreach(screen->debug_mem_sizes, entry)
    {
       struct zink_debug_mem_entry *debug_bos = entry->data;
-      util_dynarray_append(&dyn, struct zink_debug_mem_entry *, debug_bos);
+      util_dynarray_append(&dyn, debug_bos);
       size += debug_bos->size / 1024;
       count += debug_bos->count;
    }
@@ -256,6 +255,12 @@ zink_resource_destroy(struct pipe_screen *pscreen,
    struct zink_resource *res = zink_resource(pres);
    /* prevent double-free when unrefing internal surfaces */
    res->base.b.reference.count = 999;
+
+#ifdef HAVE_LIBDRM
+   if (res->ro_scanout)
+      renderonly_scanout_destroy(res->ro_scanout, screen->ro);
+#endif
+
    if (pres->target == PIPE_BUFFER) {
       util_range_destroy(&res->valid_buffer_range);
       util_idalloc_mt_free(&screen->buffer_ids, res->base.buffer_id_unique);
@@ -803,9 +808,6 @@ init_ici(struct zink_screen *screen, VkImageCreateInfo *ici, const struct pipe_r
       ici->flags |= VK_IMAGE_CREATE_MULTISAMPLED_RENDER_TO_SINGLE_SAMPLED_BIT_EXT;
    ici->sharingMode = VK_SHARING_MODE_EXCLUSIVE;
    ici->initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-
-   if (templ->target == PIPE_TEXTURE_CUBE)
-      ici->arrayLayers *= 6;
 }
 
 static const VkImageAspectFlags plane_aspects[] = {
@@ -1465,6 +1467,7 @@ create_image(struct zink_screen *screen, struct zink_resource_object *obj,
          infos[i].image = obj->image;
          infos[i].memory = zink_bo_get_mem(obj->bo);
          infos[i].memoryOffset = obj->plane_offsets[i];
+         assert(!alloc_info->need_dedicated || obj->plane_offsets[i] == 0);
          if (templ->bind & ZINK_BIND_VIDEO) {
             infos[i].pNext = &planes[i];
             planes[i].sType = VK_STRUCTURE_TYPE_BIND_IMAGE_PLANE_MEMORY_INFO;
@@ -1477,11 +1480,13 @@ create_image(struct zink_screen *screen, struct zink_resource_object *obj,
          return roc_fail_and_cleanup_all;
       }
    } else {
-      if (!(templ->flags & PIPE_RESOURCE_FLAG_SPARSE))
+      if (!(templ->flags & PIPE_RESOURCE_FLAG_SPARSE)) {
+         assert(!alloc_info->need_dedicated || obj->offset == 0);
          if (VKSCR(BindImageMemory)(screen->dev, obj->image, zink_bo_get_mem(obj->bo), obj->offset) != VK_SUCCESS) {
             mesa_loge("ZINK: vkBindImageMemory failed");
             return roc_fail_and_cleanup_all;
          }
+      }
    }
    _mesa_set_init(&obj->surface_cache, NULL, NULL, equals_surface_key);
    return roc_success;
@@ -1549,8 +1554,9 @@ resource_object_create(struct zink_screen *screen, const struct pipe_resource *t
 
    switch (create_result) {
    case roc_success:
-      for (unsigned i = 0; i < max_level; i++)
-         util_dynarray_init(&obj->copies[i], NULL);
+      for (unsigned i = 0; i < max_level; i++) {
+         obj->copies[i] = UTIL_DYNARRAY_INIT;
+      }
       FALLTHROUGH;
    case roc_success_early_return:
       return obj;
@@ -1613,8 +1619,52 @@ resource_create(struct pipe_screen *pscreen,
    if (templ2.flags & PIPE_RESOURCE_FLAG_SPARSE &&
        (util_res_sample_count(templ) == 1 || screen->info.feats.features.shaderStorageImageMultisample))
       templ2.bind |= PIPE_BIND_SHADER_IMAGE;
+
+#ifdef HAVE_LIBDRM
+   if (!whandle && screen->ro && (templ2.bind & PIPE_BIND_SCANOUT)) {
+      struct winsys_handle handle;
+
+      assert(screen->info.have_EXT_image_drm_format_modifier);
+
+      /* Only LINEAR is considered the appropriate modifier for scaning out
+       * now, so sort out it if it's present, and fail if a modifier list is
+       * present but does not include LINEAR.
+       */
+      for (int i = 0; i < modifiers_count; i++) {
+         if (res->modifiers[i] == DRM_FORMAT_MOD_LINEAR) {
+            res->modifiers[0] = DRM_FORMAT_MOD_LINEAR;
+            res->modifiers_count = 1;
+            break;
+         }
+      }
+
+      if (modifiers_count > 0 && res->modifiers[0] != DRM_FORMAT_MOD_LINEAR) {
+         /* Failed to find LINEAR in the modifier list */
+         free(res->modifiers);
+         FREE_CL(res);
+         return NULL;
+      }
+
+      res->ro_scanout =
+         renderonly_scanout_for_resource(&templ2, screen->ro, &handle);
+
+      if (!res->ro_scanout) {
+         free(res->modifiers);
+         FREE_CL(res);
+         return NULL;
+      }
+      assert(handle.type == WINSYS_HANDLE_TYPE_FD);
+      assert(handle.modifier == DRM_FORMAT_MOD_LINEAR);
+      whandle = &handle;
+   }
+#endif
+
    res->obj = resource_object_create(screen, &templ2, whandle, &linear, res->modifiers, res->modifiers_count, loader_private, user_mem);
    if (!res->obj) {
+#ifdef HAVE_LIBDRM
+      if (res->ro_scanout)
+         renderonly_scanout_destroy(res->ro_scanout, screen->ro);
+#endif
       free(res->modifiers);
       FREE_CL(res);
       return NULL;
@@ -1855,6 +1905,12 @@ zink_resource_get_param(struct pipe_screen *pscreen, struct pipe_context *pctx,
       break;
 
    case PIPE_RESOURCE_PARAM_STRIDE: {
+#ifdef HAVE_LIBDRM
+      if (res->ro_scanout) {
+         *value = res->ro_scanout->stride;
+         break;
+      }
+#endif
       VkImageSubresource sub_res = {0};
       VkSubresourceLayout sub_res_layout = {0};
 
@@ -1867,6 +1923,12 @@ zink_resource_get_param(struct pipe_screen *pscreen, struct pipe_context *pctx,
    }
 
    case PIPE_RESOURCE_PARAM_OFFSET: {
+#ifdef HAVE_LIBDRM
+         if (res->ro_scanout) {
+            *value = 0;
+            break;
+         }
+#endif
          VkImageSubresource isr = {
             aspect,
             level,
@@ -1944,6 +2006,10 @@ zink_resource_get_handle(struct pipe_screen *pscreen,
 {
    if (tex->target == PIPE_BUFFER)
       tc_buffer_disable_cpu_storage(tex);
+#ifdef HAVE_LIBDRM
+   if (whandle->type == WINSYS_HANDLE_TYPE_KMS && zink_screen(pscreen)->ro)
+      return renderonly_get_handle(zink_resource(tex)->ro_scanout, whandle);
+#endif
    if (whandle->type == WINSYS_HANDLE_TYPE_FD || whandle->type == WINSYS_HANDLE_TYPE_KMS) {
 #ifdef ZINK_USE_DMABUF
       while (whandle->plane && tex->next && !zink_resource_is_aux_plane(tex->next)) {
@@ -2039,8 +2105,10 @@ zink_resource_from_handle(struct pipe_screen *pscreen,
                  unsigned usage)
 {
 #ifdef ZINK_USE_DMABUF
+   struct zink_screen *screen = zink_screen(pscreen);
+
    if (whandle->modifier != DRM_FORMAT_MOD_INVALID &&
-       !zink_screen(pscreen)->info.have_EXT_image_drm_format_modifier)
+       !screen->info.have_EXT_image_drm_format_modifier)
       return NULL;
 
    struct pipe_resource templ2 = *templ;
@@ -2064,14 +2132,27 @@ zink_resource_from_handle(struct pipe_screen *pscreen,
    }
    templ2.bind |= ZINK_BIND_DMABUF;
    struct pipe_resource *pres = resource_create(pscreen, &templ2, whandle, usage, &modifier, modifier_count, NULL, NULL);
-   if (pres) {
-      struct zink_resource *res = zink_resource(pres);
-      if (pres->target != PIPE_BUFFER)
-         res->valid = true;
-      else
-         tc_buffer_disable_cpu_storage(pres);
-      res->internal_format = whandle->format;
+   if (!pres)
+      return NULL;
+
+   struct zink_resource *res = zink_resource(pres);
+   if (pres->target != PIPE_BUFFER)
+      res->valid = true;
+   else
+      tc_buffer_disable_cpu_storage(pres);
+   res->obj->immutable_handle = true;
+   res->internal_format = whandle->format;
+
+#ifdef HAVE_LIBDRM
+   if (screen->ro) {
+      /* Make sure that renderonly has a handle to our buffer in the display's
+       * fd, so that a later renderonly_get_handle() returns correct handles
+       * or GEM names.
+       */
+      res->ro_scanout = renderonly_create_gpu_import_for_resource(pres, screen->ro, NULL);
    }
+#endif
+
    return pres;
 #else
    return NULL;
@@ -2548,6 +2629,8 @@ zink_image_map(struct pipe_context *pctx,
    struct zink_context *ctx = zink_context(pctx);
    struct zink_screen *screen = zink_screen(pctx->screen);
    struct zink_resource *res = zink_resource(pres);
+   if (res->unflushed_transient)
+      res = res->transient;
    struct zink_transfer *trans = create_transfer(ctx, pres, usage, box);
    if (!trans)
       return NULL;
@@ -3005,7 +3088,7 @@ zink_resource_copy_box_add(struct zink_context *ctx, struct zink_resource *res, 
          }
       }
    }
-   util_dynarray_append(&res->obj->copies[level], struct pipe_box, *box);
+   util_dynarray_append(&res->obj->copies[level], *box);
    if (!res->copies_warned && util_dynarray_num_elements(&res->obj->copies[level], struct pipe_box) > 100) {
       perf_debug(ctx, "zink: PERF WARNING! > 100 copy boxes detected for %p\n", res);
       mesa_logw("zink: PERF WARNING! > 100 copy boxes detected for %p\n", res);

@@ -513,13 +513,13 @@ __attribute__((format(printf, 3, 4))) void ${trace.tp_markers}(struct u_trace_co
 static void __emit_label_${trace_name}(struct u_trace_context *utctx, void *cs, struct trace_${trace_name} *entry) {
    ${trace.tp_markers}(utctx, cs, "${trace_name}("
    % for idx,arg in enumerate(trace.tp_print):
-   % if not arg.is_indirect:
+   % if not arg.is_indirect and (arg.length_arg is None or arg.length_arg.isdigit()):
       "${"," if idx != 0 else ""}${arg.name}=${arg.c_format}"
    % endif
    % endfor
       ")"
    % for arg in trace.tp_print:
-   % if not arg.is_indirect:
+   % if not arg.is_indirect and (arg.length_arg is None or arg.length_arg.isdigit()):
       ,${arg.value_expr('entry')}
    % endif
    % endfor
@@ -568,8 +568,9 @@ void __trace_${trace_name}(
   % endfor
    };
  % endif
+   const bool queueing = enabled_traces & U_TRACE_TYPE_REQUIRE_QUEUING;
    UNUSED struct trace_${trace_name} *__entry =
-      enabled_traces & U_TRACE_TYPE_REQUIRE_QUEUING ?
+      queueing ?
       (struct trace_${trace_name} *)u_trace_appendv(ut, ${"cs," if trace.need_cs_param else "NULL,"} &__tp_${trace_name},
                                                     0
   % for arg in trace.tp_struct:
@@ -591,7 +592,10 @@ void __trace_${trace_name}(
   % elif arg.length_arg is None:
      ${arg.copy_func}(__entry->${arg.name}, ${arg.var});
   % else:
-   ${arg.copy_func}(__entry->${arg.name}, ${arg.var}, ${arg.length_arg});
+   % if not arg.length_arg.isdigit():
+   if (queueing)
+   % endif
+     ${arg.copy_func}(__entry->${arg.name}, ${arg.var}, ${arg.length_arg});
   % endif
  % endfor
  % if trace.tp_markers is not None:
@@ -711,14 +715,14 @@ trace_payload_as_extra_${trace_name}(perfetto::protos::pbzero::GpuRenderStageEve
    % else:
    {
       auto data = event->add_extra_data();
-      data->set_name("${arg.name}");
+      data->set_name("${arg.name}", ${len(arg.name)});
 
     % if arg.is_indirect:
       const ${arg.type}* __${arg.var} = (const ${arg.type}*)((uint8_t *)indirect_data + ${arg.indirect_offset});
     % endif
-      sprintf(buf, "${arg.c_format}", ${arg.value_expr("payload")});
+      const int slen = sprintf(buf, "${arg.c_format}", ${arg.value_expr("payload")});
 
-      data->set_value(buf);
+      data->set_value(buf, slen);
    }
    % endif
   % endfor

@@ -1,24 +1,6 @@
 /*
  * Copyright © 2015 Intel Corporation
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
- * IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  */
 
 #ifndef _VTN_PRIVATE_H_
@@ -33,6 +15,7 @@
 #include "spirv.h"
 #include "spirv_info.h"
 #include "vtn_generator_ids.h"
+#include "spirv_internal_exts.h"
 
 extern uint32_t mesa_spirv_debug;
 
@@ -42,6 +25,7 @@ extern uint32_t mesa_spirv_debug;
 #define MESA_SPIRV_DEBUG_VALUES         (1u << 1)
 #define MESA_SPIRV_DEBUG_ASM            (1u << 2)
 #define MESA_SPIRV_DEBUG_COLOR          (1u << 3)
+#define MESA_SPIRV_DEBUG_OFFSETS        (1u << 4)
 
 struct vtn_builder;
 struct vtn_decoration;
@@ -295,6 +279,7 @@ enum vtn_base_type {
    vtn_base_type_function,
    vtn_base_type_event,
    vtn_base_type_cooperative_matrix,
+   vtn_base_type_buffer,
 };
 
 struct vtn_type {
@@ -362,7 +347,7 @@ struct vtn_type {
          bool packed:1;
       };
 
-      /* Members for pointer types */
+      /* Members for pointer and buffer types */
       struct {
          /* For regular pointers, the vtn_type of the object pointed to;
           * for untyped pointers it must be NULL.
@@ -559,6 +544,7 @@ vtn_translate_scope(struct vtn_builder *b, SpvScope scope);
 
 struct vtn_image_pointer {
    nir_deref_instr *image;
+   unsigned format;
    nir_def *coord;
    nir_def *sample;
    nir_def *lod;
@@ -706,8 +692,7 @@ struct vtn_builder {
    /* Current function parameter index */
    unsigned func_param_idx;
 
-   /* false by default, set to true by the ContractionOff execution mode */
-   bool exact;
+   unsigned fp_math_ctrl[6];
 
    /* when a physical memory model is choosen */
    bool physical_ptrs;
@@ -974,9 +959,8 @@ nir_alu_type vtn_convert_op_src_type(SpvOp opcode);
 nir_alu_type vtn_convert_op_dst_type(SpvOp opcode);
 
 nir_op vtn_nir_alu_op_for_spirv_opcode(struct vtn_builder *b,
-                                       SpvOp opcode, bool *swap, bool *exact,
-                                       const glsl_type *src_type,
-                                       const glsl_type *dst_type);
+                                       SpvOp opcode, bool *swap,
+                                       unsigned *extra_fp_math_ctrl);
 
 void vtn_handle_alu(struct vtn_builder *b, SpvOp opcode,
                     const uint32_t *w, unsigned count);
@@ -987,7 +971,9 @@ void vtn_handle_integer_dot(struct vtn_builder *b, SpvOp opcode,
 void vtn_handle_bitcast(struct vtn_builder *b, const uint32_t *w,
                         unsigned count);
 
-void vtn_handle_fp_fast_math(struct vtn_builder *b, struct vtn_value *val);
+unsigned *vtn_fp_math_ctrl_for_base_type(struct vtn_builder *b, enum glsl_base_type base_type);
+
+void vtn_handle_fp_fast_math(struct vtn_builder *b, struct vtn_value *dest_val, struct vtn_value *src0_val);
 
 void vtn_handle_subgroup(struct vtn_builder *b, SpvOp opcode,
                          const uint32_t *w, unsigned count);
@@ -1060,7 +1046,8 @@ nir_def *
 vtn_mediump_downconvert(struct vtn_builder *b, enum glsl_base_type base_type, nir_def *def);
 struct vtn_ssa_value *
 vtn_mediump_downconvert_value(struct vtn_builder *b, struct vtn_ssa_value *src);
-void vtn_mediump_upconvert_value(struct vtn_builder *b, struct vtn_ssa_value *value);
+struct vtn_ssa_value *
+vtn_mediump_upconvert_value(struct vtn_builder *b, struct vtn_ssa_value *value);
 
 static inline int
 cmp_uint32_t(const void *pa, const void *pb)
@@ -1104,5 +1091,18 @@ nir_deref_instr *vtn_create_cmat_temporary(struct vtn_builder *b,
                                            const struct glsl_type *t, const char *name);
 
 mesa_shader_stage vtn_stage_for_execution_model(SpvExecutionModel model);
+
+static inline bool
+vtn_value_is_non_uniform(struct vtn_builder *b, struct vtn_value *value)
+{
+   if (vtn_has_decoration(b, value, SpvDecorationNonUniformEXT))
+      return true;
+
+   if (b->enabled_capabilities.DescriptorHeapEXT &&
+       !vtn_has_decoration(b, value, SpvDecorationUniform))
+      return true;
+
+   return false;
+}
 
 #endif /* _VTN_PRIVATE_H_ */

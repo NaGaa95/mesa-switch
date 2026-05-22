@@ -219,7 +219,6 @@ anv_device_utrace_flush_cmd_buffers(struct anv_queue *queue,
                                     anv_device_utrace_emit_gfx_copy_buffer);
             }
          }
-         anv_genX(device->info, emit_so_memcpy_fini)(&submit->memcpy_state);
 
          trace_intel_end_trace_copy_cb(&submit->ds.trace, batch, num_traces);
 
@@ -666,16 +665,22 @@ anv_QueueBeginDebugUtilsLabelEXT(
 {
    VK_FROM_HANDLE(anv_queue, queue, _queue);
 
-   vk_common_QueueBeginDebugUtilsLabelEXT(_queue, pLabelInfo);
+   vk_queue_lock(&queue->vk);
+
+   vk_queue_begin_debug_utils_label(&queue->vk, pLabelInfo);
 
    anv_queue_trace(queue, pLabelInfo->pLabelName,
                    false /* frame */, true /* begin */);
+
+   vk_queue_unlock(&queue->vk);
 }
 
 void
 anv_QueueEndDebugUtilsLabelEXT(VkQueue _queue)
 {
    VK_FROM_HANDLE(anv_queue, queue, _queue);
+
+   vk_queue_lock(&queue->vk);
 
    if (queue->vk.labels.size > 0) {
       const VkDebugUtilsLabelEXT *label =
@@ -686,5 +691,7 @@ anv_QueueEndDebugUtilsLabelEXT(VkQueue _queue)
       intel_ds_device_process(&queue->device->ds, true);
    }
 
-   vk_common_QueueEndDebugUtilsLabelEXT(_queue);
+   vk_queue_end_debug_utils_label(&queue->vk);
+
+   vk_queue_unlock(&queue->vk);
 }

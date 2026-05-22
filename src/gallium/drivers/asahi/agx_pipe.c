@@ -1073,6 +1073,7 @@ agx_transfer_unmap(struct pipe_context *pctx, struct pipe_transfer *transfer)
  */
 static void
 agx_clear(struct pipe_context *pctx, unsigned buffers,
+          uint32_t color_clear_mask, uint8_t stencil_clear_mask,
           const struct pipe_scissor_state *scissor_state,
           const union pipe_color_union *color, double depth, unsigned stencil)
 {
@@ -1207,13 +1208,6 @@ agx_flush_resource(struct pipe_context *pctx, struct pipe_resource *pres)
    }
 }
 
-static bool
-is_aligned(unsigned x, unsigned pot_alignment)
-{
-   assert(util_is_power_of_two_nonzero(pot_alignment));
-   return (x & (pot_alignment - 1)) == 0;
-}
-
 static unsigned
 build_timestamp_offset(struct agx_batch *batch, unsigned offset)
 {
@@ -1285,7 +1279,7 @@ agx_cmdbuf(struct agx_device *dev, struct drm_asahi_cmd_render *c,
 
          /* Main stride in pages */
          assert((zres->layout.depth_px == 1 ||
-                 is_aligned(zres->layout.layer_stride_B, AIL_PAGESIZE)) &&
+                 util_is_aligned(zres->layout.layer_stride_B, AIL_PAGESIZE)) &&
                 "Page aligned Z layers");
 
          unsigned stride_pages = zres->layout.layer_stride_B / AIL_PAGESIZE;
@@ -1298,8 +1292,8 @@ agx_cmdbuf(struct agx_device *dev, struct drm_asahi_cmd_render *c,
                zres->layout.level_offsets_compressed_B[level];
 
             /* Meta stride in cache lines */
-            assert(is_aligned(zres->layout.compression_layer_stride_B,
-                              AIL_CACHELINE) &&
+            assert(util_is_aligned(zres->layout.compression_layer_stride_B,
+                                   AIL_CACHELINE) &&
                    "Cacheline aligned Z meta layers");
             unsigned stride_lines =
                zres->layout.compression_layer_stride_B / AIL_CACHELINE;
@@ -1323,7 +1317,7 @@ agx_cmdbuf(struct agx_device *dev, struct drm_asahi_cmd_render *c,
 
          /* Main stride in pages */
          assert((sres->layout.depth_px == 1 ||
-                 is_aligned(sres->layout.layer_stride_B, AIL_PAGESIZE)) &&
+                 util_is_aligned(sres->layout.layer_stride_B, AIL_PAGESIZE)) &&
                 "Page aligned S layers");
          unsigned stride_pages = sres->layout.layer_stride_B / AIL_PAGESIZE;
          c->stencil.stride = ((stride_pages - 1) << 14) | 1;
@@ -1335,8 +1329,8 @@ agx_cmdbuf(struct agx_device *dev, struct drm_asahi_cmd_render *c,
                sres->layout.level_offsets_compressed_B[level];
 
             /* Meta stride in cache lines */
-            assert(is_aligned(sres->layout.compression_layer_stride_B,
-                              AIL_CACHELINE) &&
+            assert(util_is_aligned(sres->layout.compression_layer_stride_B,
+                                   AIL_CACHELINE) &&
                    "Cacheline aligned S meta layers");
             unsigned stride_lines =
                sres->layout.compression_layer_stride_B / AIL_CACHELINE;
@@ -1381,8 +1375,7 @@ agx_cmdbuf(struct agx_device *dev, struct drm_asahi_cmd_render *c,
    c->partial_bg.usc = pipeline_load.usc | 4;
    c->partial_eot.usc = pipeline_store.usc | 4;
 
-   c->utile_width_px = tib->tile_size.width;
-   c->utile_height_px = tib->tile_size.height;
+   agx_tilebuffer_set_drm_cmd(c, tib);
 
    c->samples = tib->nr_samples;
    c->layers = MAX2(util_framebuffer_get_num_layers(framebuffer), 1);
@@ -1721,6 +1714,46 @@ asahi_get_device_reset_status(struct pipe_context *pipe)
    return ctx->any_faults ? PIPE_GUILTY_CONTEXT_RESET : PIPE_NO_RESET;
 }
 
+static void
+asahi_clear_buffer(struct pipe_context *pipe, struct pipe_resource *resource,
+                   unsigned offset, unsigned size, const void *clear_value,
+                   int clear_value_size)
+{
+   assert(clear_value_size > 0);
+   if (clear_value_size <= 16 && util_is_power_of_two_nonzero(clear_value_size)) {
+      union pipe_color_union color;
+      bool aligned_16 = util_is_aligned(offset, 16) && util_is_aligned(size, 16);
+      bool aligned_4 = util_is_aligned(offset, 4) && util_is_aligned(size, 4);
+
+      /* Splat out to 128-bit */
+      uint8_t *bytes = (uint8_t *)color.ui;
+      memcpy(bytes, clear_value, clear_value_size);
+      for (unsigned i = clear_value_size; i < 16; ++i) {
+         bytes[i] = bytes[i % clear_value_size];
+      }
+
+      if (aligned_16) {
+         struct agx_batch *batch = agx_get_compute_batch(agx_context(pipe));
+         agx_batch_init_state(batch);
+         agx_batch_writes_range(batch, agx_resource(resource), offset, size);
+         libagx_fill_uint4(batch, agx_2d(size / 16, 1), AGX_BARRIER_ALL,
+                           agx_map_gpu(agx_resource(resource)) + offset, 16,
+                           color.ui[0], color.ui[1], color.ui[2], color.ui[3]);
+         return;
+      } else if (aligned_4 && clear_value_size <= 4) {
+         struct agx_batch *batch = agx_get_compute_batch(agx_context(pipe));
+         agx_batch_init_state(batch);
+         agx_batch_writes_range(batch, agx_resource(resource), offset, size);
+         libagx_fill(batch, agx_1d(size / 4), AGX_BARRIER_ALL,
+                     agx_map_gpu(agx_resource(resource)) + offset, color.ui[0]);
+         return;
+      }
+   }
+
+   u_default_clear_buffer(pipe, resource, offset, size, clear_value,
+                          clear_value_size);
+}
+
 static struct pipe_context *
 agx_create_context(struct pipe_screen *screen, void *priv, unsigned flags)
 {
@@ -1772,7 +1805,7 @@ agx_create_context(struct pipe_screen *screen, void *priv, unsigned flags)
    pctx->transfer_flush_region = u_transfer_helper_transfer_flush_region;
 
    pctx->buffer_subdata = u_default_buffer_subdata;
-   pctx->clear_buffer = u_default_clear_buffer;
+   pctx->clear_buffer = asahi_clear_buffer;
    pctx->texture_subdata = u_default_texture_subdata;
    pctx->set_debug_callback = u_default_set_debug_callback;
    pctx->get_sample_position = u_default_get_sample_position;
@@ -2009,7 +2042,7 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
    caps->shader_subgroup_size = 32;
    caps->shader_subgroup_supported_stages = BITFIELD_MASK(MESA_SHADER_STAGES);
    caps->shader_subgroup_supported_features =
-      BITFIELD_MASK(PIPE_SHADER_SUBGROUP_NUM_FEATURES);
+      BITFIELD_MASK(PIPE_SHADER_SUBGROUP_FEATURE_MASK);
    caps->shader_subgroup_quad_all_stages = true;
 
    caps->sampler_view_target = true;

@@ -78,6 +78,7 @@
     - !reference [.test, rules]
     - !reference [.nvk-valve-rules, rules]
     - !reference [.zink-common-rules, rules]
+    - !reference [.rusticl-rules, rules]
 
 .zink-nvk-manual-rules:
   stage: layered-backends-nightly
@@ -86,6 +87,7 @@
     - !reference [.test, rules]
     - !reference [.nvk-valve-manual-rules, rules]
     - !reference [.zink-common-manual-rules, rules]
+    - !reference [.rusticl-manual-rules, rules]
 
 .zink-turnip-collabora-rules:
   stage: layered-backends
@@ -93,8 +95,6 @@
     - !reference [.test, rules]
     - !reference [.collabora-turnip-rules, rules]
     - !reference [.zink-common-rules, rules]
-  variables:
-    ZINK_DEBUG: optimal_keys
 
 .zink-turnip-collabora-manual-rules:
   stage: layered-backends-nightly
@@ -150,7 +150,6 @@
     - !reference [.zink-common-manual-rules, rules]
 
 .zink-test:
-  timeout: 30m
   variables:
     MESA_LOADER_DRIVER_OVERRIDE: "zink"
     FLAKES_CHANNEL: "#zink-ci"
@@ -254,7 +253,6 @@
     FLAKES_CHANNEL: ""
 
 .radv-zink-test-valve:
-  timeout: 30m
   extends:
     - .ci-tron-test-amdgpu
     - .ci-tron-x86_64-test-gl
@@ -264,6 +262,5 @@
   variables:
     DRIVER_NAME: zink-radv
     DEQP_SUITE: zink-radv
-    CI_TRON_TIMEOUT__OVERALL__MINUTES: 20
     # Disable reporting, since DUTs don't have internet access
     FLAKES_CHANNEL: ""

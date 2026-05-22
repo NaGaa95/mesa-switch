@@ -12,7 +12,7 @@
 
 #include "panvk_blend.h"
 #include "panvk_cmd_desc_state.h"
-#include "panvk_cmd_oq.h"
+#include "panvk_cmd_query.h"
 #include "panvk_entrypoints.h"
 #include "panvk_image.h"
 #include "panvk_image_view.h"
@@ -23,10 +23,10 @@
 #include "vk_format.h"
 #include "util/u_tristate.h"
 
+#include "pan_fb.h"
 #include "pan_props.h"
 
 #define MAX_VBS 16
-#define MAX_RTS 8
 
 struct panvk_cmd_buffer;
 
@@ -49,23 +49,35 @@ struct panvk_rendering_state {
    enum vk_rp_attachment_flags bound_attachments;
    struct {
       struct panvk_image_view *iviews[MAX_RTS];
+      /* If non-null, preload_iviews[i] overrides iviews[i] for preloads. */
+      struct panvk_image_view *preload_iviews[MAX_RTS];
       VkFormat fmts[MAX_RTS];
       uint8_t samples[MAX_RTS];
       struct panvk_resolve_attachment resolve[MAX_RTS];
    } color_attachments;
 
-   struct pan_image_view zs_pview;
-   struct pan_image_view s_pview;
-
    struct {
       struct panvk_image_view *iview;
+      /* If non-null, preload_iview overrides iview for preloads. */
+      struct panvk_image_view *preload_iview;
       VkFormat fmt;
       struct panvk_resolve_attachment resolve;
    } z_attachment, s_attachment;
 
+   /* Used for separate Z/S images */
    struct {
-      struct pan_fb_info info;
-      bool crc_valid[MAX_RTS];
+      struct pan_image_view load, spill, store, resolve;
+   } z_pview, s_pview;
+
+   struct {
+      struct pan_fb_layout layout;
+      struct pan_fb_load load;
+      struct pan_fb_resolve resolve;
+      struct pan_fb_store store;
+      struct {
+         struct pan_fb_load load;
+         struct pan_fb_store store;
+      } spill;
 
       /* nr_samples to be used before framebuffer / tiler descriptor are emitted */
       uint32_t nr_samples;
@@ -73,6 +85,8 @@ struct panvk_rendering_state {
 #if PAN_ARCH < 9
       uint32_t bo_count;
       struct pan_kmod_bo *bos[(MAX_RTS * PANVK_MAX_PLANES) + 2];
+      bool needs_load;
+      bool needs_store;
 #endif
    } fb;
 
@@ -101,6 +115,10 @@ struct panvk_rendering_state {
        * to a draw. */
       uint64_t last;
    } oq;
+
+   struct {
+      uint64_t fbds[3];
+   } ir;
 #endif
 };
 
@@ -126,6 +144,9 @@ struct panvk_cmd_graphics_state {
    } dynamic;
 
    struct panvk_occlusion_query_state occlusion_query;
+#if PAN_ARCH >= 10
+   struct panvk_prims_generated_query_state prims_generated_query;
+#endif
    struct panvk_graphics_sysvals sysvals;
 
 #if PAN_ARCH < 9
@@ -135,6 +156,7 @@ struct panvk_cmd_graphics_state {
    struct {
       const struct panvk_shader *shader;
       struct panvk_shader_desc_state desc;
+      uint64_t blend_descs[MAX_RTS];
       uint64_t push_uniforms;
       bool required;
 #if PAN_ARCH < 9
@@ -233,6 +255,12 @@ panvk_depth_range(const struct panvk_cmd_graphics_state *state,
                   const struct vk_viewport_state *vp,
                   float *z_min, float *z_max)
 {
+   if (vp->depth_clamp_mode == VK_DEPTH_CLAMP_MODE_USER_DEFINED_RANGE_EXT) {
+      *z_min = vp->depth_clamp_range.minDepthClamp;
+      *z_max = vp->depth_clamp_range.maxDepthClamp;
+      return;
+   }
+
    float a = vp->depth_clip_negative_one_to_one ?
       state->sysvals.viewport.offset.z - state->sysvals.viewport.scale.z :
       state->sysvals.viewport.offset.z;
@@ -247,11 +275,11 @@ panvk_select_tiler_hierarchy_mask(const struct panvk_physical_device *phys_dev,
                                   unsigned bin_ptr_mem_budget)
 {
    struct pan_tiler_features tiler_features =
-      pan_query_tiler_features(&phys_dev->kmod.props);
+      pan_query_tiler_features(&phys_dev->kmod.dev->props);
 
    uint32_t hierarchy_mask = GENX(pan_select_tiler_hierarchy_mask)(
-      state->render.fb.info.width, state->render.fb.info.height,
-      tiler_features.max_levels, state->render.fb.info.tile_size,
+      state->render.fb.layout.width_px, state->render.fb.layout.height_px,
+      tiler_features.max_levels, state->render.fb.layout.tile_size_px,
       bin_ptr_mem_budget);
 
    return hierarchy_mask;
@@ -361,15 +389,6 @@ void
 panvk_per_arch(cmd_init_render_state)(struct panvk_cmd_buffer *cmdbuf,
                                       const VkRenderingInfo *pRenderingInfo);
 
-void
-panvk_per_arch(cmd_force_fb_preload)(struct panvk_cmd_buffer *cmdbuf,
-                                     const VkRenderingInfo *render_info);
-
-void
-panvk_per_arch(cmd_preload_render_area_border)(struct panvk_cmd_buffer *cmdbuf,
-                                               const VkRenderingInfo *render_info);
-
-void panvk_per_arch(cmd_resolve_attachments)(struct panvk_cmd_buffer *cmdbuf);
 void panvk_per_arch(cmd_select_tile_size)(struct panvk_cmd_buffer *cmdbuf);
 
 struct panvk_draw_info {

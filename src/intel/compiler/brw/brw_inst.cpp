@@ -221,7 +221,6 @@ brw_inst_kind_for_opcode(enum opcode opcode)
    case FS_OPCODE_FB_WRITE_LOGICAL:
       return BRW_KIND_FB_WRITE;
 
-   case SHADER_OPCODE_GET_BUFFER_SIZE:
    case FS_OPCODE_FB_READ_LOGICAL:
    case FS_OPCODE_UNIFORM_PULL_CONSTANT_LOAD:
    case FS_OPCODE_VARYING_PULL_CONSTANT_LOAD_LOGICAL:
@@ -232,6 +231,10 @@ brw_inst_kind_for_opcode(enum opcode opcode)
    case FS_OPCODE_INTERPOLATE_AT_SHARED_OFFSET:
    case FS_OPCODE_INTERPOLATE_AT_PER_SLOT_OFFSET:
       return BRW_KIND_LOGICAL;
+
+   case SHADER_OPCODE_LSC_FILL:
+   case SHADER_OPCODE_LSC_SPILL:
+      return BRW_KIND_SCRATCH;
 
    default:
       return BRW_KIND_BASE;
@@ -302,6 +305,12 @@ brw_inst::is_payload(unsigned arg) const
 
    case SHADER_OPCODE_SEND:
       return arg >= SEND_SRC_PAYLOAD1;
+
+   case SHADER_OPCODE_LSC_FILL:
+      return arg == FILL_SRC_PAYLOAD1;
+
+   case SHADER_OPCODE_LSC_SPILL:
+      return arg == SPILL_SRC_PAYLOAD1 || arg == SPILL_SRC_PAYLOAD2;
 
    case SHADER_OPCODE_SEND_GATHER:
       return arg >= SEND_GATHER_SRC_SCALAR;
@@ -394,7 +403,6 @@ brw_inst::can_do_cmod(enum brw_conditional_mod cmod) const
    case BRW_OPCODE_LRP:
    case BRW_OPCODE_LZD:
    case BRW_OPCODE_MAC:
-   case BRW_OPCODE_MACH:
    case BRW_OPCODE_MAD:
    case BRW_OPCODE_MOV:
    case BRW_OPCODE_MUL:
@@ -502,29 +510,8 @@ brw_inst::components_read(unsigned i) const
       else
          return 1;
 
-   case SHADER_OPCODE_SAMPLER: {
-      const brw_tex_inst *tex = as_tex();
-      /* Texture coordinates. */
-      if (i == TEX_LOGICAL_SRC_COORDINATE)
-         return tex->coord_components;
-      /* Texture derivatives. */
-      else if ((i == TEX_LOGICAL_SRC_LOD || i == TEX_LOGICAL_SRC_LOD2) &&
-               tex->sampler_opcode == SAMPLER_OPCODE_TXD_LOGICAL)
-         return tex->grad_components;
-      /* Texture offset. */
-      else if (i == TEX_LOGICAL_SRC_TG4_OFFSET)
-         return 2;
-      /* MCS */
-      else if (i == TEX_LOGICAL_SRC_MCS) {
-         if (tex->sampler_opcode == SAMPLER_OPCODE_TXF_CMS_W_LOGICAL)
-            return 2;
-         else if (tex->sampler_opcode == SAMPLER_OPCODE_TXF_CMS_W_GFX12_LOGICAL)
-            return 4;
-         else
-            return 1;
-      } else
-         return 1;
-   }
+   case SHADER_OPCODE_SAMPLER:
+      return 1;
 
    case SHADER_OPCODE_MEMORY_LOAD_LOGICAL:
       if (i == MEMORY_LOGICAL_DATA0)
@@ -570,6 +557,25 @@ brw_inst::size_read(const struct intel_device_info *devinfo, int arg) const
          return as_send()->mlen * REG_SIZE;
       } else if (arg == SEND_SRC_PAYLOAD2) {
          return as_send()->ex_mlen * REG_SIZE;
+      }
+      break;
+
+   case SHADER_OPCODE_LSC_FILL:
+      if (arg == FILL_SRC_PAYLOAD1) {
+         return lsc_msg_addr_len(devinfo, LSC_ADDR_SIZE_A32,
+                                 as_scratch()->use_transpose ? 1 : exec_size) *
+                REG_SIZE;
+      }
+      break;
+
+   case SHADER_OPCODE_LSC_SPILL:
+      if (arg == SPILL_SRC_PAYLOAD1) {
+         assert(!as_scratch()->use_transpose);
+
+         return lsc_msg_addr_len(devinfo, LSC_ADDR_SIZE_A32, exec_size) *
+                REG_SIZE;
+      } else if (arg == SPILL_SRC_PAYLOAD2) {
+         return src[arg].component_size(exec_size);
       }
       break;
 
@@ -962,6 +968,7 @@ brw_inst::has_side_effects() const
       return as_send()->has_side_effects;
 
    case BRW_OPCODE_SYNC:
+   case SHADER_OPCODE_LSC_SPILL:
    case SHADER_OPCODE_MEMORY_STORE_LOGICAL:
    case SHADER_OPCODE_MEMORY_ATOMIC_LOGICAL:
    case SHADER_OPCODE_MEMORY_FENCE:
@@ -978,23 +985,6 @@ brw_inst::has_side_effects() const
       return true;
    default:
       return eot;
-   }
-}
-
-bool
-brw_inst::is_volatile() const
-{
-   switch (opcode) {
-   case SHADER_OPCODE_MEMORY_LOAD_LOGICAL:
-   case SHADER_OPCODE_LOAD_REG:
-      return true;
-   case SHADER_OPCODE_MEMORY_STORE_LOGICAL:
-      return as_mem()->flags & MEMORY_FLAG_VOLATILE_ACCESS;
-   case SHADER_OPCODE_SEND:
-   case SHADER_OPCODE_SEND_GATHER:
-      return as_send()->is_volatile;
-   default:
-      return false;
    }
 }
 

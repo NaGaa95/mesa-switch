@@ -62,6 +62,7 @@ struct loop_builder_param {
                               nir_def *,
                               nir_def *);
    bool use_unknown_init_value;
+   bool use_uniform_unknown_init_value;
    bool invert_exit_condition_and_continue_branch;
 };
 
@@ -80,9 +81,14 @@ loop_builder(nir_builder *b, loop_builder_param p)
     */
    nir_def *ssa_0;
    if (p.use_unknown_init_value) {
-      nir_def *one = nir_imm_int(b, 1);
-      nir_def *twelve = nir_imm_int(b, 12);
-      ssa_0 = nir_load_ubo(b, 1, 32, one, twelve, (gl_access_qualifier)0, 0, 0, 0, 16);
+      if (p.use_uniform_unknown_init_value) {
+         nir_def *one = nir_imm_int(b, 1);
+         nir_def *twelve = nir_imm_int(b, 12);
+         ssa_0 = nir_load_ubo(b, 1, 32, one, twelve, (gl_access_qualifier)0, 0, 0, 0, 16);
+      } else {
+         nir_def *zero = nir_imm_int(b, 0);
+         ssa_0 = nir_load_input(b, 1, 32, zero);
+      }
    } else
       ssa_0 = nir_imm_int(b, p.init_value);
 
@@ -191,6 +197,108 @@ loop_builder_invert(nir_builder *b, loop_builder_invert_param p)
 
    b->cursor = nir_before_block(nir_loop_first_block(loop));
    nir_builder_instr_insert(b, &phi->instr);
+
+   return loop;
+}
+
+struct loop_builder_two_terminators_param {
+   bool j_from_uniform;
+   bool j_from_input;
+   uint32_t i_init;
+   uint32_t j_init_const;
+   uint32_t i_limit;
+   uint32_t j_limit;
+   uint32_t j_incr;
+   nir_def *(*cond_instr)(nir_builder *,
+                              nir_def *,
+                              nir_def *);
+};
+
+static nir_loop *
+loop_builder_two_terminators(nir_builder *b,
+                             loop_builder_two_terminators_param p)
+{
+   /* Create IR:
+    *
+    * uint i = i_init;
+    * uint j = (uniform/input/or const);
+    *
+    * while (true) {
+    *    if (i >= i_limit)
+    *       break;
+    *
+    *    if (j >= j_limit)
+    *       break;
+    *
+    *    i++;
+    *    j += j_incr;
+    * }
+    */
+
+   nir_def *i0 = nir_imm_int(b, p.i_init);
+   nir_def *j0;
+
+   if (p.j_from_uniform) {
+      nir_def *one = nir_imm_int(b, 1);
+      nir_def *twelve = nir_imm_int(b, 12);
+      j0 = nir_load_ubo(b, 1, 32, one, twelve, (gl_access_qualifier)0, 0, 0, 0, 16);
+   } else if (p.j_from_input) {
+      nir_def *zero = nir_imm_int(b, 0);
+      j0 = nir_load_input(b, 1, 32, zero);
+   } else {
+      j0 = nir_imm_int(b, p.j_init_const);
+   }
+
+   nir_def *i_limit = nir_imm_int(b, p.i_limit);
+   nir_def *j_limit = nir_imm_int(b, p.j_limit);
+   nir_def *j_step = nir_imm_int(b, p.j_incr);
+   nir_def *one = nir_imm_int(b, 1);
+
+   nir_phi_instr *phi_i = nir_phi_instr_create(b->shader);
+   nir_phi_instr *phi_j = nir_phi_instr_create(b->shader);
+
+   nir_loop *loop = nir_push_loop(b);
+   {
+      nir_def_init(&phi_i->instr, &phi_i->def, 1, 32);
+      nir_def_init(&phi_j->instr, &phi_j->def, 1, 32);
+
+      nir_phi_instr_add_src(phi_i, nir_def_block(i0), i0);
+      nir_phi_instr_add_src(phi_j, nir_def_block(j0), j0);
+
+      nir_def *i = &phi_i->def;
+      nir_def *j = &phi_j->def;
+
+      nir_def *cond_i = p.cond_instr(b, i, i_limit);
+
+      nir_if *if_i = nir_push_if(b, cond_i);
+      {
+         nir_jump_instr *jump =
+            nir_jump_instr_create(b->shader, nir_jump_break);
+         nir_builder_instr_insert(b, &jump->instr);
+      }
+      nir_pop_if(b, if_i);
+
+      nir_def *cond_j = p.cond_instr(b, j, j_limit);
+
+      nir_if *if_j = nir_push_if(b, cond_j);
+      {
+         nir_jump_instr *jump =
+            nir_jump_instr_create(b->shader, nir_jump_break);
+         nir_builder_instr_insert(b, &jump->instr);
+      }
+      nir_pop_if(b, if_j);
+
+      nir_def *i_next = nir_iadd(b, i, one);
+      nir_def *j_next = nir_iadd(b, j, j_step);
+
+      nir_phi_instr_add_src(phi_i, nir_def_block(i_next), i_next);
+      nir_phi_instr_add_src(phi_j, nir_def_block(j_next), j_next);
+   }
+   nir_pop_loop(b, loop);
+
+   b->cursor = nir_before_block(nir_loop_first_block(loop));
+   nir_builder_instr_insert(b, &phi_i->instr);
+   nir_builder_instr_insert(b, &phi_j->instr);
 
    return loop;
 }
@@ -364,39 +472,40 @@ INOT_COMPARE(ilt_imin_rev)
       }                                                                                  \
    }
 
-#define INEXACT_COUNT_TEST_UNKNOWN_INIT(_cond_value, _incr_value, cond, incr, count, invert) \
-   TEST_F(nir_loop_analyze_test, incr##_##cond##_inexact_count_##count##_invert_##invert)    \
-   {                                                                                         \
-      nir_loop *loop =                                                                       \
-         loop_builder(&b, { .init_value = 0,                                                 \
-                            .cond_value = _cond_value,                                       \
-                            .incr_value = _incr_value,                                       \
-                            .cond_instr = nir_##cond,                                        \
-                            .incr_instr = nir_##incr,                                        \
-                            .use_unknown_init_value = true,                                  \
-                            .invert_exit_condition_and_continue_branch = invert });          \
-                                                                                             \
-      nir_validate_shader(b.shader, "input");                                                \
-                                                                                             \
-      nir_loop_analyze_impl(b.impl, nir_var_all, false);                                     \
-                                                                                             \
-      ASSERT_NE((void *)0, loop->info);                                                      \
-      EXPECT_NE((void *)0, loop->info->limiting_terminator);                                 \
-      EXPECT_EQ(count, loop->info->max_trip_count);                                          \
-      EXPECT_FALSE(loop->info->exact_trip_count_known);                                      \
-                                                                                             \
-      ASSERT_NE((void *)0, loop->info->induction_vars);                                      \
-      EXPECT_EQ(2, _mesa_hash_table_num_entries(loop->info->induction_vars));                \
-                                                                                             \
-      hash_table_foreach(loop->info->induction_vars, entry) {                                \
-         nir_loop_induction_variable *ivar = (nir_loop_induction_variable *)entry->data;     \
-         EXPECT_NE((void *)0, ivar->basis);                                                  \
-         EXPECT_NE((void *)0, ivar->def);                                                    \
-         ASSERT_NE((void *)0, ivar->init_src);                                               \
-         EXPECT_FALSE(nir_src_is_const(*ivar->init_src));                                    \
-         ASSERT_NE((void *)0, ivar->update_src);                                             \
-         EXPECT_TRUE(nir_src_is_const(ivar->update_src->src));                               \
-      }                                                                                      \
+#define INEXACT_COUNT_TEST_UNKNOWN_INIT(_cond_value, _incr_value, cond, incr, count, invert, uni_init) \
+   TEST_F(nir_loop_analyze_test, incr##_##cond##_inexact_count_##count##_invert_##invert##_uniform_init_##uni_init)\
+   {                                                                                                   \
+      nir_loop *loop =                                                                                 \
+         loop_builder(&b, { .init_value = 0,                                                           \
+                            .cond_value = _cond_value,                                                 \
+                            .incr_value = _incr_value,                                                 \
+                            .cond_instr = nir_##cond,                                                  \
+                            .incr_instr = nir_##incr,                                                  \
+                            .use_unknown_init_value = true,                                            \
+                            .use_uniform_unknown_init_value = uni_init,                                \
+                            .invert_exit_condition_and_continue_branch = invert });                    \
+                                                                                                       \
+      nir_validate_shader(b.shader, "input");                                                          \
+                                                                                                       \
+      nir_loop_analyze_impl(b.impl, nir_var_all, false);                                               \
+                                                                                                       \
+      ASSERT_NE((void *)0, loop->info);                                                                \
+      EXPECT_NE((void *)0, loop->info->limiting_terminator);                                           \
+      EXPECT_EQ(count, loop->info->max_trip_count);                                                    \
+      EXPECT_FALSE(loop->info->exact_trip_count_known);                                                \
+                                                                                                       \
+      ASSERT_NE((void *)0, loop->info->induction_vars);                                                \
+      EXPECT_EQ(2, _mesa_hash_table_num_entries(loop->info->induction_vars));                          \
+                                                                                                       \
+      hash_table_foreach(loop->info->induction_vars, entry) {                                          \
+         nir_loop_induction_variable *ivar = (nir_loop_induction_variable *)entry->data;               \
+         EXPECT_NE((void *)0, ivar->basis);                                                            \
+         EXPECT_NE((void *)0, ivar->def);                                                              \
+         ASSERT_NE((void *)0, ivar->init_src);                                                         \
+         EXPECT_FALSE(nir_src_is_const(*ivar->init_src));                                              \
+         ASSERT_NE((void *)0, ivar->update_src);                                                       \
+         EXPECT_TRUE(nir_src_is_const(ivar->update_src->src));                                         \
+      }                                                                                                \
    }
 
 #define INEXACT_COUNT_TEST(_init_value, _cond_value, _incr_value, cond, incr, count)     \
@@ -549,6 +658,49 @@ INOT_COMPARE(ilt_imin_rev)
       EXPECT_EQ((void *)0, loop->info->limiting_terminator);            \
       EXPECT_EQ(0, loop->info->max_trip_count);                         \
       EXPECT_FALSE(loop->info->exact_trip_count_known);                 \
+   }
+
+#define TWO_TERMINATOR_INEXACT_COUNT_TEST(_name, _j_uniform, _j_input, _term_trip_known, _other_term_trip_known, cond, _i_limit, _j_limit, _j_step, _count) \
+   TEST_F(nir_loop_analyze_test, two_terminator_##_name)                                                    \
+   {                                                                                                        \
+      nir_loop *loop =                                                                                      \
+         loop_builder_two_terminators(&b, {                                                                 \
+            .j_from_uniform = _j_uniform,                                                                   \
+            .j_from_input = _j_input,                                                                       \
+            .i_init = 0,                                                                                    \
+            .j_init_const = 0,                                                                              \
+            .i_limit = _i_limit,                                                                            \
+            .j_limit = _j_limit,                                                                            \
+            .j_incr = _j_step,                                                                              \
+            .cond_instr = nir_ ## cond,                                                                     \
+         });                                                                                                \
+                                                                                                            \
+      nir_validate_shader(b.shader, "input");                                                               \
+                                                                                                            \
+      nir_loop_analyze_impl(b.impl, nir_var_all, false);                                                    \
+                                                                                                            \
+      ASSERT_NE((void *)0, loop->info);                                                                     \
+      EXPECT_NE((void *)0, loop->info->limiting_terminator);                                                \
+      EXPECT_EQ(_count, loop->info->max_trip_count);                                                        \
+      EXPECT_FALSE(loop->info->exact_trip_count_known);                                                     \
+      if (!_term_trip_known)                                                                                \
+         EXPECT_TRUE(loop->info->limiting_terminator->exact_trip_count_unknown);                            \
+      else                                                                                                  \
+         EXPECT_FALSE(loop->info->limiting_terminator->exact_trip_count_unknown);                           \
+                                                                                                            \
+      list_for_each_entry_safe(nir_loop_terminator, t,                                                      \
+                               &loop->info->loop_terminator_list,                                           \
+                               loop_terminator_link) {                                                      \
+         if (t != loop->info->limiting_terminator) {                                                        \
+            if (!_other_term_trip_known)                                                                    \
+               EXPECT_TRUE(t->exact_trip_count_unknown);                                                    \
+            else                                                                                            \
+               EXPECT_FALSE(t->exact_trip_count_unknown);                                                   \
+         }                                                                                                  \
+      }                                                                                                     \
+                                                                                                            \
+      ASSERT_NE((void *)0, loop->info->induction_vars);                                                     \
+      EXPECT_GE(_mesa_hash_table_num_entries(loop->info->induction_vars), 2);                               \
    }
 
 /*    float i = 0.0;
@@ -1704,7 +1856,7 @@ INEXACT_COUNT_TEST(0x00000001, 0x00000100, 0x00000001, uge_umin, ishl, 8)
  *       i += 6;
  *    }
  */
-INEXACT_COUNT_TEST_UNKNOWN_INIT(0x00000004, 0x00000006, uge, iadd, 1, 0)
+INEXACT_COUNT_TEST_UNKNOWN_INIT(0x00000004, 0x00000006, uge, iadd, 1, 0, 1)
 
 /*    uniform uint x;
  *    uint i = x;
@@ -1717,4 +1869,143 @@ INEXACT_COUNT_TEST_UNKNOWN_INIT(0x00000004, 0x00000006, uge, iadd, 1, 0)
  *       i += 6;
  *    }
  */
-INEXACT_COUNT_TEST_UNKNOWN_INIT(0x00000004, 0x00000006, uge, iadd, 1, 1)
+INEXACT_COUNT_TEST_UNKNOWN_INIT(0x00000004, 0x00000006, uge, iadd, 1, 1, 1)
+
+/*    in uint x;
+ *    uint i = x;
+ *    while (true) {
+ *       if (i >= 4)
+ *          break;
+ *
+ *       i += 6;
+ *    }
+ */
+INEXACT_COUNT_TEST_UNKNOWN_INIT(0x00000004, 0x00000006, uge, iadd, 1, 0, 0)
+
+/*    uniform uint x;
+ *    uint i = 0;
+ *    uint j = x;
+ *    while (true) {
+ *       if (i >= 4)
+ *          break;
+ *
+ *       if (j >= 12)
+ *          break;
+ *
+ *       i++;
+ *       j += 6;
+ *    }
+ */
+TWO_TERMINATOR_INEXACT_COUNT_TEST(uniform_j_limit, true, false, false, true, uge, 4, 12, 6, 2)
+
+/*    uniform uint x;
+ *    uint i = 0;
+ *    uint j = x;
+ *    while (true) {
+ *       if (i >= 4)
+ *          break;
+ *
+ *       if (j >= 30)
+ *          break;
+ *
+ *       i++;
+ *       j += 6;
+ *    }
+ */
+TWO_TERMINATOR_INEXACT_COUNT_TEST(uniform_j_limit2, true, false, true, false, uge, 4, 30, 6, 4)
+
+/*    uniform int x;
+ *    int i = 0;
+ *    int j = x;
+ *    while (true) {
+ *       if (i >= 4)
+ *          break;
+ *
+ *       if (j >= 12)
+ *          break;
+ *
+ *       i++;
+ *       j += 6;
+ *    }
+ */
+TWO_TERMINATOR_INEXACT_COUNT_TEST(uniform_signed_j_limit, true, false, true, false, ige, 4, 12, 6, 4)
+
+/*    uniform int x;
+ *    int i = 0;
+ *    int j = x;
+ *    while (true) {
+ *       if (i >= 4)
+ *          break;
+ *
+ *       if (j >= 30)
+ *          break;
+ *
+ *       i++;
+ *       j += 6;
+ *    }
+ */
+TWO_TERMINATOR_INEXACT_COUNT_TEST(uniform_signed_j_limit2, true, false, true, false, ige, 4, 30, 6, 4)
+
+/*    in int x;
+ *    int i = 0;
+ *    int j = x;
+ *    while (true) {
+ *       if (i >= 4)
+ *          break;
+ *
+ *       if (j >= 30)
+ *          break;
+ *
+ *       i++;
+ *       j += 6;
+ *    }
+ */
+TWO_TERMINATOR_INEXACT_COUNT_TEST(input_signed_j_limit, false, true, true, false, ige, 4, 30, 6, 4)
+
+/*    in int x;
+ *    int i = 0;
+ *    int j = x;
+ *    while (true) {
+ *       if (i >= 4)
+ *          break;
+ *
+ *       if (j >= 12)
+ *          break;
+ *
+ *       i++;
+ *       j += 6;
+ *    }
+ */
+TWO_TERMINATOR_INEXACT_COUNT_TEST(input_signed_limit_j_limit2, false, true, true, false, ige, 4, 12, 6, 4)
+
+/*    in uint x;
+ *    uint i = 0;
+ *    uint j = x;
+ *    while (true) {
+ *       if (i >= 4)
+ *          break;
+ *
+ *       if (j >= 12)
+ *          break;
+ *
+ *       i++;
+ *       j += 6;
+ *    }
+ */
+TWO_TERMINATOR_INEXACT_COUNT_TEST(input_unsigned_limit_j_limit, false, true, false, true, uge, 4, 12, 6, 2)
+
+/*    in uint x;
+ *    uint i = 0;
+ *    uint j = x;
+ *    while (true) {
+ *       if (i >= 4)
+ *          break;
+ *
+ *       if (j >= 30)
+ *          break;
+ *
+ *       i++;
+ *       j += 6;
+ *    }
+ */
+TWO_TERMINATOR_INEXACT_COUNT_TEST(input_unsigned_j_limit2, false, true, true, false, uge, 4, 30, 6, 4)

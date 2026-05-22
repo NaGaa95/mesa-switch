@@ -131,7 +131,6 @@ foreach d : [[with_gallium_kmsro, [
 endforeach
 
 # This only works on Unix-like oses, which is probably fine for dri
-prog_ln = find_program('ln', required : false)
 if prog_ln.found()
   foreach d : dril_drivers
     custom_target(

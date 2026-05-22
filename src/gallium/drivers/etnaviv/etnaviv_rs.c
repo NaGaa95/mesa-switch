@@ -180,6 +180,10 @@ etna_compile_rs_state(struct etna_context *ctx, struct compiled_rs_state *cs,
       cs->RS_KICKER_INPLACE = rs->tile_count;
    }
    cs->source_ts_valid = rs->source_ts_valid;
+   cs->single_buffer = screen->specs.single_buffer;
+
+   if (cs->single_buffer)
+      assert(!src_multi && !dst_multi);
 }
 
 #define EMIT_STATE(state_name, src_value) \
@@ -244,7 +248,12 @@ etna_submit_rs_state(struct etna_context *ctx,
       /*28   */ EMIT_STATE(RS_FILL_VALUE(2), cs->RS_FILL_VALUE[2]);
       /*29   */ EMIT_STATE(RS_FILL_VALUE(3), cs->RS_FILL_VALUE[3]);
       /*30/31*/ EMIT_STATE(RS_EXTRA_CONFIG, cs->RS_EXTRA_CONFIG);
+
+      if (cs->single_buffer)
+         EMIT_STATE(RS_SINGLE_BUFFER, VIVS_RS_SINGLE_BUFFER_ENABLE);
       /*32/33*/ EMIT_STATE(RS_KICKER, 0xbeebbeeb);
+      if (cs->single_buffer)
+         EMIT_STATE(RS_SINGLE_BUFFER, 0x0);
       etna_coalesce_end(stream, &coalesce);
    } else {
       etna_cmd_stream_reserve(stream, 22);
@@ -467,7 +476,9 @@ etna_blit_clear_zs_rs(struct pipe_context *pctx, struct pipe_surface *dst,
 }
 
 static void
-etna_clear_rs(struct pipe_context *pctx, unsigned buffers, const struct pipe_scissor_state *scissor_state,
+etna_clear_rs(struct pipe_context *pctx, unsigned buffers,
+           uint32_t color_clear_mask, uint8_t stencil_clear_mask,
+           const struct pipe_scissor_state *scissor_state,
            const union pipe_color_union *color, double depth, unsigned stencil)
 {
    struct etna_context *ctx = etna_context(pctx);
@@ -872,7 +883,8 @@ etna_try_rs_blit(struct pipe_context *pctx,
       .dest_padded_height = dst_lev->padded_height,
       .downsample_x = downsample_x,
       .downsample_y = downsample_y,
-      .swap_rb = translate_rb_src_dst_swap(src->base.format, dst->base.format),
+      .swap_rb = ctx->in_transfer_blit &&
+                 translate_pe_format_rb_swap(blit_info->src.format),
       .dither = {0xffffffff, 0xffffffff}, // XXX dither when going from 24 to 16 bit?
       .clear_mode = VIVS_RS_CLEAR_CONTROL_MODE_DISABLED,
       .width = width,

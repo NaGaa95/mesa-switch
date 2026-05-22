@@ -14,6 +14,9 @@ bvh_shaders = [
   [
     'encode_gfx12.comp',
     'encode_gfx12',
+  ],[
+    'encode_triangles_gfx12.comp',
+    'encode_triangles_gfx12',
   ],
   [
     'encode.comp',
@@ -53,7 +56,7 @@ bvh_includes = files(
 bvh_spv = []
 foreach s : bvh_shaders
   command = [
-    prog_glslang, '-V', '-I' + bvh_include_dir, '-I' + vk_bvh_include_dir, '--target-env', 'spirv1.5',
+    prog_glslang, '-V', '-I' + bvh_include_dir, '-I' + vk_bvh_include_dir, '-I' + spirv_include_dir, '--target-env', 'spirv1.5',
     '-x', '-o', '@OUTPUT@', '@INPUT@', glslang_depfile, glslang_quiet,
   ]
   command += vk_glsl_shader_preamble

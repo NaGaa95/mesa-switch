@@ -17,6 +17,8 @@ static const driOptionDescription anv_dri_options[] = {
       DRI_CONF_ANV_ASSUME_FULL_SUBGROUPS(0)
       DRI_CONF_ANV_ASSUME_FULL_SUBGROUPS_WITH_BARRIER(false)
       DRI_CONF_ANV_ASSUME_FULL_SUBGROUPS_WITH_SHARED_MEMORY(false)
+      DRI_CONF_ANV_BARRIER_POST_TYPED_CLEAR_SHADER(false)
+      DRI_CONF_ANV_BARRIER_POST_UNTYPED_CLEAR_SHADER(false)
       DRI_CONF_ANV_DISABLE_FCV(false)
       DRI_CONF_ANV_ENABLE_BUFFER_COMP(false)
       DRI_CONF_ANV_DISABLE_DRM_AUX_MODIFIERS(false)
@@ -27,19 +29,32 @@ static const driOptionDescription anv_dri_options[] = {
       DRI_CONF_ANV_FP64_WORKAROUND_ENABLED(false)
       DRI_CONF_ANV_GENERATED_INDIRECT_THRESHOLD(4)
       DRI_CONF_ANV_GENERATED_INDIRECT_RING_THRESHOLD(100)
+      DRI_CONF_ANV_STATE_CACHE_PERF_FIX(false)
       DRI_CONF_NO_16BIT(false)
+      DRI_CONF_INTEL_BINDING_TABLE_BLOCK_SIZE(BINDING_TABLE_POOL_DEFAULT_BLOCK_SIZE,
+                                              1024, 128 * 1024)
       DRI_CONF_INTEL_ENABLE_WA_14018912822(false)
+      DRI_CONF_INTEL_ENABLE_WA_14024015672_MSAA(false)
       DRI_CONF_INTEL_SAMPLER_ROUTE_TO_LSC(false)
       DRI_CONF_ANV_QUERY_CLEAR_WITH_BLORP_THRESHOLD(6)
       DRI_CONF_ANV_QUERY_COPY_WITH_SHADER_THRESHOLD(6)
       DRI_CONF_ANV_FORCE_INDIRECT_DESCRIPTORS(false)
+      DRI_CONF_ANV_DISABLE_LINK_TIME_OPTIMIZATION(false)
+      DRI_CONF_ANV_ENABLE_OPT_DIVERGENT_ATOMICS(0)
+      DRI_CONF_ANV_BRW_DISABLE_SUBGROUP_SIZE_CONTROL(false)
       DRI_CONF_SHADER_SPILLING_RATE(11)
+      DRI_CONFIG_INTEL_FORCE_COMPUTE_SURFACE_PREFETCH(true)
+      DRI_CONFIG_INTEL_FORCE_SAMPLER_PREFETCH(false)
       DRI_CONFIG_INTEL_TBIMR(true)
       DRI_CONFIG_INTEL_VF_DISTRIBUTION(true)
       DRI_CONFIG_INTEL_TE_DISTRIBUTION(true)
       DRI_CONFIG_INTEL_STORAGE_CACHE_POLICY_WT(false)
       DRI_CONF_ANV_LARGE_WORKGROUP_NON_COHERENT_IMAGE_WORKAROUND(false)
+#if DETECT_OS_ANDROID && ANDROID_API_LEVEL >= 37
+      DRI_CONF_ANV_COMPRESSION_CONTROL_ENABLED(true)
+#else
       DRI_CONF_ANV_COMPRESSION_CONTROL_ENABLED(false)
+#endif
       DRI_CONF_ANV_FAKE_NONLOCAL_MEMORY(false)
       DRI_CONF_OPT_E(intel_stack_id, 512, 256, 2048,
                      "Control the number stackIDs (i.e. number of unique rays in the RT subsytem)",
@@ -87,6 +102,7 @@ static const struct debug_control debug_control[] = {
    { "video-encode", ANV_DEBUG_VIDEO_ENCODE},
    { "shader-hash",  ANV_DEBUG_SHADER_HASH},
    { "no-slab",      ANV_DEBUG_NO_SLAB},
+   { "desc-dirty",   ANV_DEBUG_DESCRIPTOR_DIRTY},
    { NULL,    0 }
 };
 
@@ -109,6 +125,7 @@ static const struct vk_instance_extension_table instance_extensions = {
 #ifdef ANV_USE_WSI_PLATFORM
    .KHR_get_surface_capabilities2            = true,
    .KHR_surface                              = true,
+   .KHR_surface_maintenance1                 = true,
    .KHR_surface_protected_capabilities       = true,
    .EXT_surface_maintenance1                 = true,
    .EXT_swapchain_colorspace                 = true,
@@ -173,12 +190,16 @@ anv_init_dri_options(struct anv_instance *instance)
        driQueryOptionb(&instance->dri_options, "anv_sample_mask_out_opengl_behaviour");
     instance->force_filter_addr_rounding =
        driQueryOptionb(&instance->dri_options, "anv_force_filter_addr_rounding");
+    instance->state_cache_perf_fix =
+       driQueryOptionb(&instance->dri_options, "anv_state_cache_perf_fix");
     instance->lower_depth_range_rate =
        driQueryOptionf(&instance->dri_options, "lower_depth_range_rate");
     instance->no_16bit =
        driQueryOptionb(&instance->dri_options, "no_16bit");
     instance->intel_enable_wa_14018912822 =
        driQueryOptionb(&instance->dri_options, "intel_enable_wa_14018912822");
+    instance->intel_enable_wa_14024015672_msaa =
+       driQueryOptionb(&instance->dri_options, "intel_enable_wa_14024015672_msaa");
     instance->emulate_read_without_format =
        driQueryOptionb(&instance->dri_options, "anv_emulate_read_without_format");
     instance->fp64_workaround_enabled =
@@ -195,6 +216,10 @@ anv_init_dri_options(struct anv_instance *instance)
        driQueryOptioni(&instance->dri_options, "force_vk_vendor");
     instance->has_fake_sparse =
        driQueryOptionb(&instance->dri_options, "fake_sparse");
+    instance->force_sampler_prefetch =
+       driQueryOptionb(&instance->dri_options, "intel_force_sampler_prefetch");
+    instance->force_compute_surface_prefetch =
+       driQueryOptionb(&instance->dri_options, "intel_force_compute_surface_prefetch");
     instance->enable_tbimr = driQueryOptionb(&instance->dri_options, "intel_tbimr");
     instance->enable_vf_distribution =
        driQueryOptionb(&instance->dri_options, "intel_vf_distribution");
@@ -224,6 +249,12 @@ anv_init_dri_options(struct anv_instance *instance)
        driQueryOptionb(&instance->dri_options, "vk_lower_terminate_to_discard");
     instance->disable_xe2_drm_ccs_modifiers =
        driQueryOptionb(&instance->dri_options, "anv_disable_drm_ccs_modifiers");
+    instance->binding_table_block_size = util_next_power_of_two(
+       driQueryOptioni(&instance->dri_options, "intel_binding_table_block_size"));
+    instance->barrier_post_typed_clear_shader =
+       driQueryOptionb(&instance->dri_options, "anv_barrier_post_typed_clear_shader");
+    instance->barrier_post_untyped_clear_shader =
+       driQueryOptionb(&instance->dri_options, "anv_barrier_post_untyped_clear_shader");
 
     if (instance->vk.app_info.engine_name &&
         !strcmp(instance->vk.app_info.engine_name, "DXVK")) {
@@ -236,6 +267,11 @@ anv_init_dri_options(struct anv_instance *instance)
          */
         instance->force_filter_addr_rounding &= !is_d3d9;
     }
+
+    instance->disable_lto =
+        driQueryOptionb(&instance->dri_options, "anv_disable_link_time_optimization");
+    instance->enable_opt_divergent_atomics =
+        driQueryOptioni(&instance->dri_options, "anv_enable_opt_divergent_atomics");
 
     instance->stack_ids = driQueryOptioni(&instance->dri_options, "intel_stack_id");
     switch (instance->stack_ids) {
@@ -294,6 +330,9 @@ VkResult anv_CreateInstance(
 
    instance->debug = parse_debug_string(os_get_option("ANV_DEBUG"),
                                         debug_control);
+
+   process_intel_debug_variable();
+   instance->vk.enable_debug_logging = INTEL_DEBUG(DEBUG_PERF);
 
    intel_driver_ds_init();
 

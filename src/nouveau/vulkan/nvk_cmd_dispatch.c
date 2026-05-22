@@ -150,6 +150,9 @@ nvk_flush_compute_state(struct nvk_cmd_buffer *cmd,
                                        0, 3, base_workgroup);
    nvk_descriptor_state_set_root_array(cmd, desc, cs.group_count,
                                        0, 3, global_size);
+
+   if (NAK_CAN_PRINTF)
+      nvk_cmd_buffer_flush_printf_buffer(cmd, desc);
 }
 
 static VkResult
@@ -356,6 +359,11 @@ nvk_cmd_dispatch_shader(struct nvk_cmd_buffer *cmd,
    };
    assert(push_size <= sizeof(root.push));
    memcpy(root.push, push_data, push_size);
+
+   if (NAK_CAN_PRINTF) {
+      struct nvkmd_mem *bo = (struct nvkmd_mem *)dev->printf.bo;
+      root.printf_buffer_addr = bo->va->addr;
+   }
 
    uint64_t qmd_addr;
    VkResult result = nvk_cmd_upload_qmd(cmd, shader, NULL, &root,
@@ -564,8 +572,18 @@ nvk_CmdDispatchIndirect(VkCommandBuffer commandBuffer,
    struct nv_push *p;
    if (nvk_cmd_buffer_compute_cls(cmd) >= TURING_COMPUTE_A) {
       p = nvk_cmd_buffer_push(cmd, 14);
-      if (nvk_cmd_buffer_compute_cls(cmd) < BLACKWELL_COMPUTE_A)
+      if (nvk_cmd_buffer_compute_cls(cmd) < BLACKWELL_COMPUTE_A) {
          P_IMMD(p, NVC597, SET_MME_DATA_FIFO_CONFIG, FIFO_SIZE_SIZE_4KB);
+      } else {
+         /* The line in the other side of the if causes an implicit wfi
+          * due to the subc switch which we apparently rely on for
+          * correctness (!?). Anyway, to prevent issues on blackwell
+          * we need to wfi here too.
+          * TODO: delete this
+          */
+         P_IMMD(p, NVC86F, WFI, 0);
+      }
+
       if (nvk_cmd_buffer_compute_cls(cmd) >= AMPERE_COMPUTE_B)
          P_1INC(p, NVC7C0, CALL_MME_MACRO(NVK_MME_DISPATCH_INDIRECT));
       else

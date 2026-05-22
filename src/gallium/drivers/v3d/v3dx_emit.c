@@ -292,12 +292,21 @@ v3dX(emit_state)(struct pipe_context *pctx)
 
         if (v3d->dirty & (V3D_DIRTY_RASTERIZER |
                           V3D_DIRTY_ZSA |
+                          V3D_DIRTY_PRIM_MODE |
                           V3D_DIRTY_BLEND)) {
+                const enum mesa_prim reduced_prim =
+                        u_reduced_prim(v3d->prim_mode);
                 cl_emit(&job->bcl, CFG_BITS, config) {
+                        /* When drawing points and lines, they will be
+                         * discarded if forward facing primitive is not
+                         * enabled.
+                         */
                         config.enable_forward_facing_primitive =
                                 !rasterizer_discard &&
-                                !(v3d->rasterizer->base.cull_face &
-                                  PIPE_FACE_FRONT);
+                                (reduced_prim == MESA_PRIM_LINES ||
+                                 reduced_prim == MESA_PRIM_POINTS ||
+                                 !(v3d->rasterizer->base.cull_face &
+                                   PIPE_FACE_FRONT));
                         config.enable_reverse_facing_primitive =
                                 !rasterizer_discard &&
                                 !(v3d->rasterizer->base.cull_face &
@@ -407,11 +416,24 @@ v3dX(emit_state)(struct pipe_context *pctx)
                 }
         }
 
-        if (v3d->dirty & V3D_DIRTY_RASTERIZER) {
+        /* There is a bug in V3D 4.2 hardware where a FIFO in the binner may
+         * overflow in some scenarios where geometry is dropped in the
+         * pipeline (for example, if using primitive discards). The work
+         * around requires the driver to emit any CLE command, which will
+         * trigger the binner to flush the FIFO. The recommendation is to emit
+         * a very small packet that is fast to process by the CLE hardware
+         * such as PointSize in between all draw calls to ensure this flush
+         * always happens and there is never a chance of overflowing the
+         * binner.
+         */
+        if (v3d->dirty & V3D_DIRTY_RASTERIZER ||
+            v3d->screen->devinfo.ver == 42) {
                 cl_emit(&job->bcl, POINT_SIZE, point_size) {
                         point_size.point_size = v3d->rasterizer->point_size;
                 }
+        }
 
+        if (v3d->dirty & V3D_DIRTY_RASTERIZER) {
                 cl_emit(&job->bcl, LINE_WIDTH, line_width) {
                         line_width.line_width = v3d_get_real_line_width(v3d);
                 }

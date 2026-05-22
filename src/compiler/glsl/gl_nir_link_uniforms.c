@@ -142,7 +142,7 @@ mark_array_elements_referenced(const struct array_deref_range *dr,
          BITSET_SET(bits, dr[0].index);
       } else {
          /* Accessed by non-constant index so set everything as referenced */
-         BITSET_SET_RANGE(bits, 0, dr[0].size - 1);
+         BITSET_SET_COUNT(bits, 0, dr[0].size);
       }
 
       return;
@@ -567,7 +567,7 @@ add_var_use_deref(nir_deref_instr *deref, struct hash_table *live,
       ainfo = ralloc(live, struct uniform_array_info);
 
       unsigned num_bits = MAX2(1, glsl_get_aoa_size(deref->var->type));
-      ainfo->indices = rzalloc_array(live, BITSET_WORD, BITSET_WORDS(num_bits));
+      ainfo->indices = BITSET_RZALLOC(live, num_bits);
 
       ainfo->deref_list = ralloc(live, struct util_dynarray);
       util_dynarray_init(ainfo->deref_list, live);
@@ -588,7 +588,7 @@ add_var_use_deref(nir_deref_instr *deref, struct hash_table *live,
       mark_array_elements_referenced(*derefs, num_derefs, array_depth,
                                      ainfo->indices);
 
-      util_dynarray_append(ainfo->deref_list, nir_deref_instr *, deref);
+      util_dynarray_append(ainfo->deref_list, deref);
    }
 
    assert(deref->modes == deref->var->data.mode);

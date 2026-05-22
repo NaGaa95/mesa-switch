@@ -7,12 +7,11 @@
 #include "panvk_device.h"
 #include "panvk_device_memory.h"
 #include "panvk_entrypoints.h"
+#include "panvk_sparse.h"
 
 #include "pan_props.h"
 
 #include "vk_log.h"
-
-#define PANVK_MAX_BUFFER_SIZE (1 << 30)
 
 VKAPI_ATTR uint64_t VKAPI_CALL
 panvk_GetBufferOpaqueCaptureAddress(VkDevice _device,
@@ -38,6 +37,8 @@ panvk_GetDeviceBufferMemoryRequirements(VkDevice _device,
                                         VkMemoryRequirements2 *pMemoryRequirements)
 {
    VK_FROM_HANDLE(panvk_device, device, _device);
+   struct panvk_physical_device *phys_dev =
+      to_panvk_physical_device(device->vk.physical);
 
    /* For sparse resources alignment specifies binding granularity, rather than
     * the alignment requirement. It's up to us to satisfy the alignment
@@ -49,7 +50,8 @@ panvk_GetDeviceBufferMemoryRequirements(VkDevice _device,
          : 64;
    const uint64_t size = align64(pInfo->pCreateInfo->size, align);
 
-   pMemoryRequirements->memoryRequirements.memoryTypeBits = 1;
+   pMemoryRequirements->memoryRequirements.memoryTypeBits =
+      BITFIELD_MASK(phys_dev->memory.type_count);
    pMemoryRequirements->memoryRequirements.alignment = align;
    pMemoryRequirements->memoryRequirements.size = size;
 
@@ -113,8 +115,9 @@ panvk_CreateBuffer(VkDevice _device, const VkBufferCreateInfo *pCreateInfo,
    if (buffer->vk.create_flags & VK_BUFFER_CREATE_SPARSE_BINDING_BIT) {
       uint64_t va_range = panvk_buffer_get_sparse_size(buffer);
 
-      buffer->vk.device_address = panvk_as_alloc(device, va_range,
-         pan_choose_gpu_va_alignment(device->kmod.vm, va_range));
+      buffer->vk.device_address =
+         panvk_as_alloc(device, &device->as.heap, va_range,
+                        pan_choose_gpu_va_alignment(device->kmod.vm, va_range));
       if (!buffer->vk.device_address) {
          result = panvk_error(device, VK_ERROR_OUT_OF_DEVICE_MEMORY);
          goto err_destroy_buffer;
@@ -140,7 +143,8 @@ panvk_CreateBuffer(VkDevice _device, const VkBufferCreateInfo *pCreateInfo,
 
 err_free_va:
    if (buffer->vk.create_flags & VK_BUFFER_CREATE_SPARSE_BINDING_BIT)
-      panvk_as_free(device, buffer->vk.device_address, panvk_buffer_get_sparse_size(buffer));
+      panvk_as_free(device, &device->as.heap, buffer->vk.device_address,
+                    panvk_buffer_get_sparse_size(buffer));
 
 err_destroy_buffer:
    vk_buffer_destroy(&device->vk, pAllocator, &buffer->vk);
@@ -171,7 +175,8 @@ panvk_DestroyBuffer(VkDevice _device, VkBuffer _buffer,
          device->kmod.vm, PAN_KMOD_VM_OP_MODE_IMMEDIATE, &unmap, 1);
       assert(!ret);
 
-      panvk_as_free(device, buffer->vk.device_address, va_range);
+      panvk_as_free(device, &device->as.heap, buffer->vk.device_address,
+                    va_range);
    }
 
    vk_buffer_destroy(&device->vk, pAllocator, &buffer->vk);

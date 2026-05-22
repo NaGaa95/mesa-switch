@@ -1,6 +1,5 @@
 /*
  * Copyright © 2024 Collabora Ltd.
- *
  * SPDX-License-Identifier: MIT
  */
 
@@ -15,6 +14,8 @@
 #include "panvk_macros.h"
 #include "panvk_queue.h"
 #include "panvk_utrace.h"
+#include "panvk_sparse.h"
+#include "pan_layout.h"
 
 #include "util/bitscan.h"
 #include "vk_drm_syncobj.h"
@@ -174,11 +175,48 @@ panvk_bind_queue_submit_flush(struct panvk_bind_queue_submit *submit)
    return ret;
 }
 
+static bool
+panvk_try_merge_vm_bind_ops(struct drm_panthor_vm_bind_op *a,
+                            const struct drm_panthor_vm_bind_op *b)
+{
+   if (a->flags != b->flags)
+      return false;
+
+   /* See panvk_bind_queue_submit_vm_bind */
+   assert(b->syncs.count == 0);
+
+   enum drm_panthor_vm_bind_op_flags op_type = a->flags & DRM_PANTHOR_VM_BIND_OP_TYPE_MASK;
+   if (op_type != DRM_PANTHOR_VM_BIND_OP_TYPE_MAP &&
+       op_type != DRM_PANTHOR_VM_BIND_OP_TYPE_UNMAP)
+      return false;
+
+   if (a->va + a->size != b->va)
+      return false;
+
+   if (op_type == DRM_PANTHOR_VM_BIND_OP_TYPE_MAP &&
+       (a->bo_handle != b->bo_handle ||
+        a->bo_offset + a->size != b->bo_offset))
+      return false;
+
+   a->size += b->size;
+   return true;
+}
+
 static int
 panvk_bind_queue_submit_vm_bind(
    struct panvk_bind_queue_submit *submit,
    const struct drm_panthor_vm_bind_op *op)
 {
+   /* We handle all of the syncs here and in
+    * panvk_bind_queue_submit_process_signals */
+   assert(op->syncs.count == 0);
+
+   if (submit->bind_op_count > 0) {
+      struct drm_panthor_vm_bind_op *prev = &submit->bind_ops[submit->bind_op_count - 1];
+      if (panvk_try_merge_vm_bind_ops(prev, op))
+         return 0;
+   }
+
    if (submit->bind_op_count == submit->bind_op_cap) {
       int ret = panvk_bind_queue_submit_flush(submit);
       if (ret)
@@ -186,7 +224,6 @@ panvk_bind_queue_submit_vm_bind(
    }
 
    struct drm_panthor_vm_bind_op tmp = *op;
-   assert(!tmp.syncs.array);
    if (submit->sync_ops.wait_count > 0) {
       tmp.syncs = (struct drm_panthor_obj_array)DRM_PANTHOR_OBJ_ARRAY(
          submit->sync_ops.wait_count, submit->sync_ops.waits);
@@ -243,9 +280,9 @@ panvk_bind_queue_submit_process_signals(struct panvk_bind_queue_submit *submit)
       return ret;
 
    if (submit->force_sync) {
-      int ret = drmSyncobjWait(device->drm_fd, &queue->syncobj_handle, 1,
-                               INT64_MAX, DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL,
-                               NULL);
+      ASSERTED int ret = drmSyncobjWait(device->drm_fd,
+                               &queue->syncobj_handle, 1, INT64_MAX,
+                               DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL, NULL);
       assert(!ret);
 
       drmSyncobjReset(device->drm_fd, &queue->syncobj_handle, 1);
@@ -308,6 +345,70 @@ panvk_bind_queue_submit_sparse_memory_bind(
    }
 }
 
+struct panvk_sparse_block_memory_bind {
+   uint32_t plane_index;
+   uint32_t layer;
+   uint32_t level;
+   VkOffset3D offset; /* must be a multiple of extent */
+   VkExtent3D extent;
+   VkDeviceMemory mem;
+   VkDeviceSize mem_offset;
+};
+
+static int
+panvk_bind_queue_submit_sparse_block_memory_bind(
+   struct panvk_bind_queue_submit *submit,
+   const struct panvk_image *image,
+   const struct panvk_sparse_block_memory_bind *in)
+{
+   uint64_t resource_va = image->sparse.device_address;
+   const struct panvk_image_plane *plane = &image->planes[in->plane_index];
+
+   /* Previously, sparse residency was implemented using block U-interleaved
+    * (https://gitlab.freedesktop.org/mesa/mesa/-/merge_requests/37483).
+    * Interleaved 64k offers better map and unmap performance (at most one bind
+    * op per tile, as opposed to 4 to 16 with U-interleaved), and no worse
+    * access performance.
+    *
+    * Note that interleaved 64k is not a thing on pre-v10 hardware. If at any
+    * point there's a desire for sparse residency on pre-v10 hardware, resurrect
+    * the code linked above.
+    */
+   assert(image->vk.drm_format_mod == DRM_FORMAT_MOD_ARM_INTERLEAVED_64K);
+
+   struct pan_image_block_size tile_extent_el =
+      pan_interleaved_64k_tile_size_el(vk_format_to_pipe_format(image->vk.format));
+   struct pan_image_block_size tile_extent_px = {
+      tile_extent_el.width * vk_format_get_blockwidth(image->vk.format),
+      tile_extent_el.height * vk_format_get_blockheight(image->vk.format),
+   };
+   VkOffset3D offset_tiles = {
+      in->offset.x / tile_extent_px.width,
+      in->offset.y / tile_extent_px.height,
+      in->offset.z,
+   };
+   assert(in->extent.width == tile_extent_px.width &&
+          in->extent.height == tile_extent_px.height &&
+          in->extent.depth == 1);
+   uint32_t tile_size_B = 65536;
+
+   assert(image->vk.image_type != VK_IMAGE_TYPE_3D || in->layer == 0);
+
+   const struct pan_image_slice_layout *slayout = &plane->plane.layout.slices[in->level];
+   VkSparseMemoryBind bind = {
+      .resourceOffset =
+         in->layer * plane->plane.layout.array_stride_B +
+         slayout->offset_B +
+         offset_tiles.z * slayout->tiled_or_linear.surface_stride_B +
+         offset_tiles.y * slayout->tiled_or_linear.row_stride_B +
+         offset_tiles.x * tile_size_B,
+      .size = tile_size_B,
+      .memory = in->mem,
+      .memoryOffset = in->mem_offset,
+   };
+   return panvk_bind_queue_submit_sparse_memory_bind(submit, resource_va, &bind);
+}
+
 static int
 panvk_bind_queue_submit_do(struct panvk_bind_queue_submit *submit,
                            const struct vk_queue_submit *vk_submit)
@@ -346,7 +447,46 @@ panvk_bind_queue_submit_do(struct panvk_bind_queue_submit *submit,
       }
    }
    for (uint32_t i = 0; i < vk_submit->image_bind_count; i++) {
-      UNREACHABLE("not implemented");
+      VK_FROM_HANDLE(panvk_image, image, vk_submit->image_binds[i].image);
+      assert(image->vk.create_flags & VK_IMAGE_CREATE_SPARSE_BINDING_BIT);
+      assert(image->vk.create_flags & VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT);
+
+      struct panvk_sparse_block_desc sblock = panvk_get_sparse_block_desc(image->vk.image_type, image->vk.format);
+
+      for (uint32_t j = 0; j < vk_submit->image_binds[i].bindCount; j++) {
+         const VkSparseImageMemoryBind *in =
+            &vk_submit->image_binds[i].pBinds[j];
+
+         VkOffset3D max = {
+            in->offset.x + in->extent.width,
+            in->offset.y + in->extent.height,
+            in->offset.z + in->extent.depth,
+         };
+         struct panvk_sparse_block_memory_bind bind = {
+            /* We only support single-plane images right now. See
+             * https://gitlab.freedesktop.org/panfrost/mesa/-/issues/243 details. */
+            .plane_index = 0,
+            .level = in->subresource.mipLevel,
+            .layer = in->subresource.arrayLayer,
+            .offset = {},
+            .extent = sblock.extent,
+            .mem = in->memory,
+            .mem_offset = in->memoryOffset,
+         };
+         for (bind.offset.z = in->offset.z;
+              bind.offset.z < max.z; bind.offset.z += sblock.extent.depth) {
+            for (bind.offset.y = in->offset.y;
+                 bind.offset.y < max.y; bind.offset.y += sblock.extent.height) {
+               for (bind.offset.x = in->offset.x;
+                    bind.offset.x < max.x; bind.offset.x += sblock.extent.width) {
+                  ret = panvk_bind_queue_submit_sparse_block_memory_bind(submit, image, &bind);
+                  if (ret)
+                     return ret;
+                  bind.mem_offset += sblock.size_B;
+               }
+            }
+         }
+      }
    }
 
    return panvk_bind_queue_submit_process_signals(submit);

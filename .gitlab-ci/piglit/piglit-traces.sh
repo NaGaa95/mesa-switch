@@ -135,7 +135,9 @@ replay_s3_upload_images() {
 
 SANITY_MESA_VERSION_CMD="$SANITY_MESA_VERSION_CMD | tee /tmp/version.txt | grep \"Mesa $MESA_VERSION\(\s\|$\)\""
 
-cd $RESULTS_DIR && rm -rf ..?* .[!.]* *
+if [ "${GIT_STRATEGY:-}" = none ]; then
+  cd $RESULTS_DIR && rm -rf ..?* .[!.]* *
+fi
 cd /piglit
 
 if [ -n "$USE_CASELIST" ]; then

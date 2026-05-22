@@ -238,7 +238,7 @@ rewrite_cost(nir_def *def, const void *data)
          nir_intrinsic_instr *parent_intrin =
             nir_instr_as_intrinsic(parent_instr);
 
-         if (v->compiler->has_alias_rt && v->type == MESA_SHADER_FRAGMENT &&
+         if (v->compiler->info->props.has_alias_rt && v->type == MESA_SHADER_FRAGMENT &&
              parent_intrin->intrinsic == nir_intrinsic_store_output &&
              def->bit_size == 32) {
             /* For FS outputs, alias.rt can use const registers without a mov.
@@ -359,7 +359,7 @@ bool
 ir3_def_is_rematerializable_for_preamble(nir_def *def,
                                          nir_def **preamble_defs)
 {
-   switch (def->parent_instr->type) {
+   switch (nir_def_instr_type(def)) {
    case nir_instr_type_load_const:
       return true;
    case nir_instr_type_intrinsic: {
@@ -469,10 +469,10 @@ _rematerialize_def(nir_builder *b, struct hash_table *remap_ht,
                    struct set *instr_set, nir_def **preamble_defs,
                    nir_def *def)
 {
-   if (_mesa_hash_table_search(remap_ht, def->parent_instr))
+   if (_mesa_hash_table_search(remap_ht, nir_def_instr(def)))
       return NULL;
 
-   switch (def->parent_instr->type) {
+   switch (nir_def_instr_type(def)) {
    case nir_instr_type_load_const:
       break;
    case nir_instr_type_intrinsic: {
@@ -500,7 +500,7 @@ _rematerialize_def(nir_builder *b, struct hash_table *remap_ht,
       UNREACHABLE("should not get here");
    }
 
-   nir_instr *instr = nir_instr_clone_deep(b->shader, def->parent_instr,
+   nir_instr *instr = nir_instr_clone_deep(b->shader, nir_def_instr(def),
                                            remap_ht);
 
    /* Find a legal place to insert the new instruction. We cannot simply put it
@@ -856,8 +856,9 @@ ir3_nir_lower_preamble(nir_shader *nir, struct ir3_shader_variant *v)
    unsigned preamble_size =
       const_state->allocs.consts[IR3_CONST_ALLOC_PREAMBLE].size_vec4 * 4;
 
-   BITSET_DECLARE(promoted_to_float, preamble_size);
-   memset(promoted_to_float, 0, sizeof(promoted_to_float));
+   /* Avoid zero-size VLA. */
+   BITSET_DECLARE(promoted_to_float, preamble_size > 0 ? preamble_size : 1);
+   BITSET_ZERO(promoted_to_float);
 
    nir_builder builder_main = nir_builder_create(main);
    nir_builder *b = &builder_main;

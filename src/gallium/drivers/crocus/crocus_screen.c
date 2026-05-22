@@ -170,7 +170,8 @@ crocus_init_shader_caps(struct crocus_screen *screen)
 
       /* Lie about these to avoid st/mesa's GLSL IR lowering of indirects,
        * which we don't want.  Our compiler backend will check elk_compiler's
-       * options and call nir_lower_indirect_derefs appropriately anyway.
+       * options and call nir_lower_indirect_derefs_to_if_else_trees
+       * appropriately anyway.
        */
       caps->indirect_temp_addr = true;
       caps->indirect_const_addr = true;
@@ -402,7 +403,7 @@ crocus_init_screen_caps(struct crocus_screen *screen)
     * extensive checking in the driver for correctness, e.g. to prevent
     * illegal snoop <-> snoop transfers.
     */
-   caps->resource_from_user_memory = devinfo->has_llc;
+   caps->resource_from_user_memory = devinfo->has_llc && devinfo->has_userptr_uapi;
    caps->throttle = !screen->driconf.disable_throttling;
 
    caps->context_priority_mask =
@@ -465,6 +466,7 @@ crocus_screen_destroy(struct crocus_screen *screen)
    u_transfer_helper_destroy(screen->base.transfer_helper);
    crocus_bufmgr_unref(screen->bufmgr);
    disk_cache_destroy(screen->disk_cache);
+   intel_virtio_unref_fd(screen->winsys_fd);
    close(screen->winsys_fd);
    ralloc_free(screen);
 }
@@ -549,6 +551,9 @@ crocus_screen_create(int fd, const struct pipe_screen_config *config)
    if (!screen)
       return NULL;
 
+   if (intel_virtio_init_fd(fd) < 0)
+      return NULL;
+
    if (!intel_get_device_info_from_fd(fd, &screen->devinfo, 4, 8))
       return NULL;
    screen->pci_id = screen->devinfo.pci_device_id;
@@ -559,7 +564,7 @@ crocus_screen_create(int fd, const struct pipe_screen_config *config)
    if (screen->devinfo.ver == 8) {
       /* bind to cherryview or bdw if forced */
       if (screen->devinfo.platform != INTEL_PLATFORM_CHV &&
-          !getenv("CROCUS_GEN8"))
+          !os_get_option("CROCUS_GEN8"))
          return NULL;
    }
 

@@ -89,6 +89,7 @@ static const struct drm_driver_descriptor *driver_descriptors[] = {
    &tegra_driver_descriptor,
    &lima_driver_descriptor,
    &zink_driver_descriptor,
+   &kmsro_driver_descriptor,
 };
 
 static const struct drm_driver_descriptor *
@@ -98,7 +99,7 @@ get_driver_descriptor(const char *driver_name)
       if (strcmp(driver_descriptors[i]->driver_name, driver_name) == 0)
          return driver_descriptors[i];
    }
-   return &kmsro_driver_descriptor;
+   return NULL;
 }
 
 static int
@@ -171,9 +172,13 @@ pipe_loader_drm_probe_fd_nodup(struct pipe_loader_device **dev, int fd, bool zin
    if (strcmp(ddev->base.driver_name, "vgem") == 0)
       goto fail;
 
-   /* kmsro supports lots of drivers, try as a fallback */
-   if (!ddev->dd && !zink)
+   /* kmsro supports lots of drivers, try as a fallback for primary nodes */
+   if (!ddev->dd && !zink && drmGetNodeTypeFromFd(fd) == DRM_NODE_PRIMARY)
       ddev->dd = get_driver_descriptor("kmsro");
+
+   /* Try zink for unknown render nodes */
+   if (!ddev->dd && drmGetNodeTypeFromFd(fd) == DRM_NODE_RENDER)
+      ddev->dd = get_driver_descriptor("zink");
 
    if (!ddev->dd)
       goto fail;
@@ -388,6 +393,9 @@ pipe_loader_get_compatible_render_capable_device_fds(int kms_only_fd, unsigned i
 #endif
 #if defined GALLIUM_VC4
       "vc4",
+#endif
+#if defined GALLIUM_ZINK
+      "zink",
 #endif
    };
 

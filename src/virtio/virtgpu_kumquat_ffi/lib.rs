@@ -47,54 +47,57 @@ macro_rules! return_on_error {
     };
 }
 
-#[allow(non_camel_case_types)]
+#[expect(non_camel_case_types)]
 type virtgpu_kumquat_ffi = Mutex<VirtGpuKumquat>;
 
 // The following structs (in define.rs) must be ABI-compatible with FFI header
 // (virtgpu_kumquat_ffi.h).
 
-#[allow(non_camel_case_types)]
+#[expect(non_camel_case_types)]
 type drm_kumquat_getparam = VirtGpuParam;
 
-#[allow(non_camel_case_types)]
+#[expect(non_camel_case_types)]
 type drm_kumquat_resource_unref = VirtGpuResourceUnref;
 
-#[allow(non_camel_case_types)]
+#[expect(non_camel_case_types)]
 type drm_kumquat_get_caps = VirtGpuGetCaps;
 
-#[allow(non_camel_case_types)]
+#[expect(non_camel_case_types)]
 type drm_kumquat_context_init = VirtGpuContextInit;
 
-#[allow(non_camel_case_types)]
+#[expect(non_camel_case_types)]
 type drm_kumquat_resource_create_3d = VirtGpuResourceCreate3D;
 
-#[allow(non_camel_case_types)]
+#[expect(non_camel_case_types)]
 type drm_kumquat_resource_create_blob = VirtGpuResourceCreateBlob;
 
-#[allow(non_camel_case_types)]
+#[expect(non_camel_case_types)]
 type drm_kumquat_transfer_to_host = VirtGpuTransfer;
 
-#[allow(non_camel_case_types)]
+#[expect(non_camel_case_types)]
 type drm_kumquat_transfer_from_host = VirtGpuTransfer;
 
-#[allow(non_camel_case_types)]
+#[expect(non_camel_case_types)]
 type drm_kumquat_execbuffer = VirtGpuExecBuffer;
 
-#[allow(non_camel_case_types)]
+#[expect(non_camel_case_types)]
 type drm_kumquat_wait = VirtGpuWait;
 
-#[allow(non_camel_case_types)]
+#[expect(non_camel_case_types)]
 type drm_kumquat_resource_map = VirtGpuResourceMap;
 
-#[allow(non_camel_case_types)]
+#[expect(non_camel_case_types)]
 type drm_kumquat_resource_export = VirtGpuResourceExport;
 
-#[allow(non_camel_case_types)]
+#[expect(non_camel_case_types)]
 type drm_kumquat_resource_import = VirtGpuResourceImport;
 
-#[allow(non_camel_case_types)]
+#[expect(non_camel_case_types)]
 type drm_kumquat_resource_info = VirtGpuResourceInfo;
 
+// SAFETY:
+// The `ptr` must be a valid pointer to a `*mut virtgpu_kumquat_ffi`.
+// If `gpu_socket` is `Some`, `gpu_socket` must be a valid, null-terminated C string.
 #[no_mangle]
 pub unsafe extern "C" fn virtgpu_kumquat_init(
     ptr: &mut *mut virtgpu_kumquat_ffi,
@@ -123,6 +126,9 @@ pub unsafe extern "C" fn virtgpu_kumquat_init(
 #[no_mangle]
 pub extern "C" fn virtgpu_kumquat_finish(ptr: &mut *mut virtgpu_kumquat_ffi) -> i32 {
     catch_unwind(AssertUnwindSafe(|| {
+        // SAFETY:
+        // The pointer `*ptr` must have been previously allocated by `virtgpu_kumquat_init`,
+        // which uses `Box::into_raw`, and must not have been freed yet.
         let _ = unsafe { Box::from_raw(*ptr) };
         *ptr = null_mut();
         NO_ERROR
@@ -130,18 +136,28 @@ pub extern "C" fn virtgpu_kumquat_finish(ptr: &mut *mut virtgpu_kumquat_ffi) -> 
     .unwrap_or(-ESRCH)
 }
 
+// SAFETY:
+// The `ptr` must be a valid pointer to a `virtgpu_kumquat_ffi` struct initialized
+// by `virtgpu_kumquat_init`.
+// The `cmd` pointer must be valid for writes.
 #[no_mangle]
 pub unsafe extern "C" fn virtgpu_kumquat_get_param(
     ptr: &mut virtgpu_kumquat_ffi,
     cmd: &mut drm_kumquat_getparam,
 ) -> i32 {
     catch_unwind(AssertUnwindSafe(|| {
-        let result = ptr.lock().unwrap().get_param(cmd);
+        let result = ptr.get_mut().unwrap().get_param(cmd);
         return_result(result)
     }))
     .unwrap_or(-ESRCH)
 }
 
+// SAFETY:
+// `ptr` must be a valid pointer to a `virtgpu_kumquat_ffi` obtained from
+// `virtgpu_kumquat_init`. `cmd` must be a valid pointer to a
+// `drm_kumquat_get_caps` struct. `cmd.addr` must be a valid pointer to a
+// buffer of at least `cmd.size` bytes, or null if `cmd.size` is 0. The
+// buffer must be valid for writes.
 #[no_mangle]
 pub unsafe extern "C" fn virtgpu_kumquat_get_caps(
     ptr: &mut virtgpu_kumquat_ffi,
@@ -150,17 +166,24 @@ pub unsafe extern "C" fn virtgpu_kumquat_get_caps(
     catch_unwind(AssertUnwindSafe(|| {
         let caps_slice = if cmd.size != 0 {
             // SAFETY:
-            // The API user must pass in a valid array to hold capset data.
+            // The caller must ensure that `cmd.addr` points to a valid, mutable
+            // memory block of at least `cmd.size` bytes.
             unsafe { from_raw_parts_mut(cmd.addr as *mut u8, cmd.size as usize) }
         } else {
             &mut []
         };
-        let result = ptr.lock().unwrap().get_caps(cmd.cap_set_id, caps_slice);
+        let result = ptr.get_mut().unwrap().get_caps(cmd.cap_set_id, caps_slice);
         return_result(result)
     }))
     .unwrap_or(-ESRCH)
 }
 
+// SAFETY:
+// `ptr` must be a valid pointer to a `virtgpu_kumquat_ffi` obtained from
+// `virtgpu_kumquat_init`. `cmd` must be a valid pointer to a
+// `drm_kumquat_context_init` struct. `cmd.ctx_set_params` must be a valid
+// pointer to an array of `VirtGpuParam` of size `cmd.num_params`, or null
+// if `cmd.num_params` is 0.
 #[no_mangle]
 pub unsafe extern "C" fn virtgpu_kumquat_context_init(
     ptr: &mut virtgpu_kumquat_ffi,
@@ -169,7 +192,8 @@ pub unsafe extern "C" fn virtgpu_kumquat_context_init(
     catch_unwind(AssertUnwindSafe(|| {
         let context_params: &[VirtGpuParam] = if cmd.num_params != 0 {
             // SAFETY:
-            // The API user must pass in a valid array of context parameters.
+            // The caller must ensure that `cmd.ctx_set_params` points to a
+            // valid memory block of at least `cmd.num_params` `VirtGpuParam`s.
             unsafe {
                 from_raw_parts(
                     cmd.ctx_set_params as *const VirtGpuParam,
@@ -183,6 +207,7 @@ pub unsafe extern "C" fn virtgpu_kumquat_context_init(
         let mut capset_id: u64 = 0;
 
         for param in context_params {
+            #[expect(clippy::single_match)]
             match param.param {
                 VIRTGPU_KUMQUAT_CONTEXT_PARAM_CAPSET_ID => {
                     capset_id = param.value;
@@ -191,24 +216,34 @@ pub unsafe extern "C" fn virtgpu_kumquat_context_init(
             }
         }
 
-        let result = ptr.lock().unwrap().context_create(capset_id, "");
+        let result = ptr.get_mut().unwrap().context_create(capset_id, "");
         return_result(result)
     }))
     .unwrap_or(-ESRCH)
 }
 
+// SAFETY:
+// `ptr` must be a valid pointer to a `virtgpu_kumquat_ffi` obtained from
+// `virtgpu_kumquat_init`.
+// `cmd` must be a valid pointer to a `drm_kumquat_resource_create_3d` struct.
 #[no_mangle]
 pub unsafe extern "C" fn virtgpu_kumquat_resource_create_3d(
     ptr: &mut virtgpu_kumquat_ffi,
     cmd: &mut drm_kumquat_resource_create_3d,
 ) -> i32 {
     catch_unwind(AssertUnwindSafe(|| {
-        let result = ptr.lock().unwrap().resource_create_3d(cmd);
+        let result = ptr.get_mut().unwrap().resource_create_3d(cmd);
         return_result(result)
     }))
     .unwrap_or(-ESRCH)
 }
 
+// SAFETY:
+// `ptr` must be a valid pointer to a `virtgpu_kumquat_ffi` obtained from
+// `virtgpu_kumquat_init`.
+// `cmd` must be a valid pointer to a `drm_kumquat_resource_create_blob` struct.
+// `cmd.cmd` must be a valid pointer to a buffer of at least `cmd.cmd_size` bytes,
+// or null if `cmd.cmd_size` is 0.
 #[no_mangle]
 pub unsafe extern "C" fn virtgpu_kumquat_resource_create_blob(
     ptr: &mut virtgpu_kumquat_ffi,
@@ -217,80 +252,109 @@ pub unsafe extern "C" fn virtgpu_kumquat_resource_create_blob(
     catch_unwind(AssertUnwindSafe(|| {
         let blob_cmd = if cmd.cmd_size != 0 {
             // SAFETY:
-            // The API user must pass in a valid command buffer with correct size.
+            // The caller must ensure that `cmd.cmd` points to a valid memory
+            // block of at least `cmd.cmd_size` bytes.
             unsafe { from_raw_parts(cmd.cmd as *const u8, cmd.cmd_size as usize) }
         } else {
             &[]
         };
-        let result = ptr.lock().unwrap().resource_create_blob(cmd, blob_cmd);
+        let result = ptr.get_mut().unwrap().resource_create_blob(cmd, blob_cmd);
         return_result(result)
     }))
     .unwrap_or(-ESRCH)
 }
 
+// SAFETY:
+// `ptr` must be a valid pointer to a `virtgpu_kumquat_ffi` obtained from
+// `virtgpu_kumquat_init`.
+// `cmd` must be a valid pointer to a `drm_kumquat_resource_unref` struct.
 #[no_mangle]
 pub unsafe extern "C" fn virtgpu_kumquat_resource_unref(
     ptr: &mut virtgpu_kumquat_ffi,
     cmd: &mut drm_kumquat_resource_unref,
 ) -> i32 {
     catch_unwind(AssertUnwindSafe(|| {
-        let result = ptr.lock().unwrap().resource_unref(cmd.bo_handle);
+        let result = ptr.get_mut().unwrap().resource_unref(cmd.bo_handle);
         return_result(result)
     }))
     .unwrap_or(-ESRCH)
 }
 
+// SAFETY:
+// `ptr` must be a valid pointer to a `virtgpu_kumquat_ffi` obtained from
+// `virtgpu_kumquat_init`.
+// `cmd` must be a valid pointer to a `drm_kumquat_resource_map` struct and be valid for writes.
 #[no_mangle]
 pub unsafe extern "C" fn virtgpu_kumquat_resource_map(
     ptr: &mut virtgpu_kumquat_ffi,
     cmd: &mut drm_kumquat_resource_map,
 ) -> i32 {
     catch_unwind(AssertUnwindSafe(|| {
-        let result = ptr.lock().unwrap().map(cmd.bo_handle);
+        let result = ptr.get_mut().unwrap().map(cmd.bo_handle);
         let internal_map = return_on_error!(result);
-        (*cmd).ptr = internal_map.ptr as *mut c_void;
-        (*cmd).size = internal_map.size;
+        cmd.ptr = internal_map.ptr as *mut c_void;
+        cmd.size = internal_map.size;
         NO_ERROR
     }))
     .unwrap_or(-ESRCH)
 }
 
+// SAFETY:
+// `ptr` must be a valid pointer to a `virtgpu_kumquat_ffi` obtained from
+// `virtgpu_kumquat_init`.
+// `bo_handle` must be a valid resource handle that has been previously mapped.
 #[no_mangle]
 pub unsafe extern "C" fn virtgpu_kumquat_resource_unmap(
     ptr: &mut virtgpu_kumquat_ffi,
     bo_handle: u32,
 ) -> i32 {
     catch_unwind(AssertUnwindSafe(|| {
-        let result = ptr.lock().unwrap().unmap(bo_handle);
+        let result = ptr.get_mut().unwrap().unmap(bo_handle);
         return_result(result)
     }))
     .unwrap_or(-ESRCH)
 }
 
+// SAFETY:
+// `ptr` must be a valid pointer to a `virtgpu_kumquat_ffi` obtained from
+// `virtgpu_kumquat_init`.
+// `cmd` must be a valid pointer to a `drm_kumquat_transfer_to_host` struct.
 #[no_mangle]
 pub unsafe extern "C" fn virtgpu_kumquat_transfer_to_host(
     ptr: &mut virtgpu_kumquat_ffi,
     cmd: &mut drm_kumquat_transfer_to_host,
 ) -> i32 {
     catch_unwind(AssertUnwindSafe(|| {
-        let result = ptr.lock().unwrap().transfer_to_host(cmd);
+        let result = ptr.get_mut().unwrap().transfer_to_host(cmd);
         return_result(result)
     }))
     .unwrap_or(-ESRCH)
 }
 
+// SAFETY:
+// `ptr` must be a valid pointer to a `virtgpu_kumquat_ffi` obtained from
+// `virtgpu_kumquat_init`.
+// `cmd` must be a valid pointer to a `drm_kumquat_transfer_from_host` struct.
 #[no_mangle]
 pub unsafe extern "C" fn virtgpu_kumquat_transfer_from_host(
     ptr: &mut virtgpu_kumquat_ffi,
     cmd: &mut drm_kumquat_transfer_from_host,
 ) -> i32 {
     catch_unwind(AssertUnwindSafe(|| {
-        let result = ptr.lock().unwrap().transfer_from_host(cmd);
+        let result = ptr.get_mut().unwrap().transfer_from_host(cmd);
         return_result(result)
     }))
     .unwrap_or(-ESRCH)
 }
 
+// SAFETY:
+// `ptr` must be a valid pointer to a `virtgpu_kumquat_ffi` obtained from
+// `virtgpu_kumquat_init`.
+// `cmd` must be a valid pointer to a `drm_kumquat_execbuffer` struct.
+// If `cmd.num_bo_handles` is not 0, `cmd.bo_handles` must point to a valid
+// array of `u32` of at least `cmd.num_bo_handles` elements.
+// If `cmd.size` is not 0, `cmd.command` must point to a valid buffer of at
+// least `cmd.size` bytes.
 #[no_mangle]
 pub unsafe extern "C" fn virtgpu_kumquat_execbuffer(
     ptr: &mut virtgpu_kumquat_ffi,
@@ -317,7 +381,7 @@ pub unsafe extern "C" fn virtgpu_kumquat_execbuffer(
         let in_fences: &[u64] = &[0; 0];
 
         let mut descriptor: RawDescriptor = DEFAULT_RAW_DESCRIPTOR;
-        let result = ptr.lock().unwrap().submit_command(
+        let result = ptr.get_mut().unwrap().submit_command(
             cmd.flags,
             bo_handles,
             cmd_buf,
@@ -332,13 +396,17 @@ pub unsafe extern "C" fn virtgpu_kumquat_execbuffer(
     .unwrap_or(-ESRCH)
 }
 
+// SAFETY:
+// `ptr` must be a valid pointer to a `virtgpu_kumquat_ffi` obtained from
+// `virtgpu_kumquat_init`.
+// `cmd` must be a valid pointer to a `drm_kumquat_wait` struct.
 #[no_mangle]
 pub unsafe extern "C" fn virtgpu_kumquat_wait(
     ptr: &mut virtgpu_kumquat_ffi,
     cmd: &mut drm_kumquat_wait,
 ) -> i32 {
     catch_unwind(AssertUnwindSafe(|| {
-        let result = ptr.lock().unwrap().wait(cmd.bo_handle);
+        let result = ptr.get_mut().unwrap().wait(cmd.bo_handle);
         return_result(result)
     }))
     .unwrap_or(-ESRCH)
@@ -351,18 +419,23 @@ pub extern "C" fn virtgpu_kumquat_resource_export(
 ) -> i32 {
     catch_unwind(AssertUnwindSafe(|| {
         let result = ptr
-            .lock()
+            .get_mut()
             .unwrap()
             .resource_export(cmd.bo_handle, cmd.flags);
         let hnd = return_on_error!(result);
 
-        (*cmd).handle_type = hnd.handle_type;
-        (*cmd).os_handle = hnd.os_handle.into_raw_descriptor() as i64;
+        cmd.handle_type = hnd.handle_type;
+        cmd.os_handle = hnd.os_handle.into_raw_descriptor() as i64;
         NO_ERROR
     }))
     .unwrap_or(-ESRCH)
 }
 
+// SAFETY:
+// `ptr` must be a valid pointer to a `virtgpu_kumquat_ffi` obtained from
+// `virtgpu_kumquat_init`.
+// `cmd` must be a valid pointer to a `drm_kumquat_resource_import` struct.
+// `cmd.os_handle` must be a valid OS handle, and ownership is transferred to this function.
 #[no_mangle]
 pub unsafe extern "C" fn virtgpu_kumquat_resource_import(
     ptr: &mut virtgpu_kumquat_ffi,
@@ -373,12 +446,12 @@ pub unsafe extern "C" fn virtgpu_kumquat_resource_import(
             // SAFETY:
             // The API user must transfer ownership of a valid OS handle.
             os_handle: unsafe {
-                OwnedDescriptor::from_raw_descriptor((*cmd).os_handle.into_raw_descriptor())
+                OwnedDescriptor::from_raw_descriptor(cmd.os_handle.into_raw_descriptor())
             },
-            handle_type: (*cmd).handle_type,
+            handle_type: cmd.handle_type,
         };
 
-        let result = ptr.lock().unwrap().resource_import(
+        let result = ptr.get_mut().unwrap().resource_import(
             handle,
             &mut cmd.bo_handle,
             &mut cmd.res_handle,
@@ -396,28 +469,34 @@ pub extern "C" fn virtgpu_kumquat_resource_info(
     cmd: &mut drm_kumquat_resource_info,
 ) -> i32 {
     catch_unwind(AssertUnwindSafe(|| {
-        let result = ptr.lock().unwrap().resource_info(cmd.bo_handle);
+        let result = ptr.get_mut().unwrap().resource_info(cmd.bo_handle);
 
         let info = return_on_error!(result);
-        (*cmd).vulkan_info = info;
+        cmd.vulkan_info = info;
         NO_ERROR
     }))
     .unwrap_or(-ESRCH)
 }
 
+// SAFETY:
+// `ptr` must be a valid pointer to a `virtgpu_kumquat_ffi` obtained from
+// `virtgpu_kumquat_init`.
 #[no_mangle]
 pub unsafe extern "C" fn virtgpu_kumquat_snapshot_save(ptr: &mut virtgpu_kumquat_ffi) -> i32 {
     catch_unwind(AssertUnwindSafe(|| {
-        let result = ptr.lock().unwrap().snapshot();
+        let result = ptr.get_mut().unwrap().snapshot();
         return_result(result)
     }))
     .unwrap_or(-ESRCH)
 }
 
+// SAFETY:
+// `ptr` must be a valid pointer to a `virtgpu_kumquat_ffi` obtained from
+// `virtgpu_kumquat_init`.
 #[no_mangle]
 pub unsafe extern "C" fn virtgpu_kumquat_snapshot_restore(ptr: &mut virtgpu_kumquat_ffi) -> i32 {
     catch_unwind(AssertUnwindSafe(|| {
-        let result = ptr.lock().unwrap().restore();
+        let result = ptr.get_mut().unwrap().restore();
         return_result(result)
     }))
     .unwrap_or(-ESRCH)

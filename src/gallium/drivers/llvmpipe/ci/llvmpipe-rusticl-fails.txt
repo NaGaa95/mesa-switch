@@ -45,3 +45,6 @@ api@clgetdeviceinfo,Fail
 
 # (file=input,line=0,column=0,index=0): Unresolved external reference to "_Z21convert_char4_sat_rteDv4_i".
 program@execute@vector-conversion,Fail
+
+# Piglit doesn't check subbuffer alignment requirements
+api@clgetmemobjectinfo,Fail

@@ -17,6 +17,7 @@
 
 #include <vulkan/vulkan_core.h>
 
+#include "util/bitset.h"
 #include "util/u_dynarray.h"
 
 struct radv_device;
@@ -44,7 +45,17 @@ struct radv_printf_buffer_header {
    uint32_t size;
 };
 
-void radv_device_associate_nir(struct radv_device *device, nir_shader *nir);
+struct radv_valid_va_data {
+   VkDeviceMemory memory;
+   VkBuffer buffer;
+   VkDeviceAddress buffer_addr;
+   BITSET_WORD *vas;
+};
+
+struct radv_debug_nir {
+   struct radv_printf_data printf;
+   struct radv_valid_va_data valid_va;
+};
 
 /* shader printf */
 
@@ -52,7 +63,8 @@ VkResult radv_printf_data_init(struct radv_device *device);
 
 void radv_printf_data_finish(struct radv_device *device);
 
-void radv_build_printf_args(nir_builder *b, nir_def *cond, const char *format, uint32_t argc, nir_def **args);
+void radv_build_printf_args(struct radv_debug_nir *debug_nir, nir_builder *b, const char *format, uint32_t argc,
+                            nir_def **args);
 
 void radv_build_printf(nir_builder *b, nir_def *cond, const char *format, ...);
 
@@ -66,6 +78,6 @@ void radv_finish_va_validation(struct radv_device *device);
 
 void radv_va_validation_update_page(struct radv_device *device, uint64_t va, uint64_t size, bool valid);
 
-nir_def *radv_build_is_valid_va(nir_builder *b, nir_def *addr);
+nir_def *radv_build_is_valid_va(struct radv_debug_nir *debug_nir, nir_builder *b, nir_def *addr);
 
 #endif /* RADV_PRINTF_H */

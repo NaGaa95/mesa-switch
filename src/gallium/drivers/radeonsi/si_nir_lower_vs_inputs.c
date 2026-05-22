@@ -110,16 +110,16 @@ load_vs_input_from_blit_sgpr(nir_builder *b, unsigned input_index,
       nir_def *x1y1 = ac_nir_load_arg_at_offset(b, &s->args->ac, s->args->vs_blit_inputs, 0);
       nir_def *x2y2 = ac_nir_load_arg_at_offset(b, &s->args->ac, s->args->vs_blit_inputs, 1);
 
-      x1y1 = nir_i2i32(b, nir_unpack_32_2x16(b, x1y1));
-      x2y2 = nir_i2i32(b, nir_unpack_32_2x16(b, x2y2));
+      x1y1 = nir_u2u32(b, nir_unpack_32_2x16(b, x1y1));
+      x2y2 = nir_u2u32(b, nir_unpack_32_2x16(b, x2y2));
 
       nir_def *x1 = nir_channel(b, x1y1, 0);
       nir_def *y1 = nir_channel(b, x1y1, 1);
       nir_def *x2 = nir_channel(b, x2y2, 0);
       nir_def *y2 = nir_channel(b, x2y2, 1);
 
-      out[0] = nir_i2f32(b, nir_bcsel(b, sel_x1, x1, x2));
-      out[1] = nir_i2f32(b, nir_bcsel(b, sel_y1, y1, y2));
+      out[0] = nir_u2f32(b, nir_bcsel(b, sel_x1, x1, x2));
+      out[1] = nir_u2f32(b, nir_bcsel(b, sel_y1, y1, y2));
       out[2] = ac_nir_load_arg_at_offset(b, &s->args->ac, s->args->vs_blit_inputs, 2);
       out[3] = nir_imm_float(b, 1);
    } else {
@@ -494,7 +494,8 @@ load_vs_input_from_vertex_buffer(nir_builder *b, unsigned input_index,
                                        zero, zero, vertex_index,
                                        .base = fetch_stride * i,
                                        .access = ACCESS_USES_FORMAT_AMD | ACCESS_CAN_REORDER |
-                                                 ACCESS_CAN_SPECULATE);
+                                                 ACCESS_CAN_SPECULATE,
+                                       .dest_type = nir_intrinsic_dest_type(intr));
    }
 
    if (num_fetches == 1 && channels_per_fetch > 1) {

@@ -55,6 +55,7 @@ const void *pco_shader_binary_data(pco_shader *shader);
 
 void pco_validate_shader(pco_shader *shader, const char *when);
 
+void pco_print_shader_stats(pco_shader *shader, FILE *fp);
 void pco_print_shader(pco_shader *shader, FILE *fp, const char *when);
 void pco_print_binary(pco_shader *shader, FILE *fp, const char *when);
 
@@ -94,4 +95,9 @@ typedef struct _pco_smp_params {
    bool int_mode;
 } pco_smp_params;
 nir_intrinsic_instr *pco_emit_nir_smp(nir_builder *b, pco_smp_params *params);
+
+enum pco_pck_format pco_pipe_to_pck_format(enum pipe_format format,
+                                           bool *scale,
+                                           bool *roundzero,
+                                           bool *split);
 #endif /* PCO_H */

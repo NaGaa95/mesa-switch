@@ -309,6 +309,8 @@ fn prepare_options(options: &str, dev: &Device) -> Vec<CString> {
             "-cl-denorms-are-zero" => Some("-fdenormal-fp-math=positive-zero"),
             // We can ignore it as long as we don't support ifp
             "-cl-no-subgroup-ifp" => None,
+            // Some applications use this argument when they detect Intel hardware.
+            "-cl-intel-greater-than-4GB-buffer-required" => None,
             _ => Some(a),
         })
         .map(CString::new)

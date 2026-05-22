@@ -153,7 +153,7 @@ st_make_bitmap_texture(struct gl_context *ctx, GLsizei width, GLsizei height,
                             0, 0, width, height, &transfer);
 
    /* Put image into texture transfer */
-   memset(dest, 0xff, height * transfer->stride);
+   memset(dest, 0xff, height * (size_t)transfer->stride);
    unpack_bitmap(st, 0, 0, width, height, unpack, bitmap,
                  dest, transfer->stride);
 
@@ -209,7 +209,8 @@ setup_render_state(struct gl_context *ctx,
                         CSO_BIT_VIEWPORT |
                         CSO_BIT_STREAM_OUTPUTS |
                         CSO_BIT_VERTEX_ELEMENTS |
-                        CSO_BITS_ALL_SHADERS));
+                        CSO_BIT_MESH_SHADER |
+                        CSO_BITS_VERTEX_PIPE_SHADERS));
 
 
    /* rasterizer state: just scissor */
@@ -226,7 +227,6 @@ setup_render_state(struct gl_context *ctx,
    cso_set_tessctrl_shader_handle(cso, NULL);
    cso_set_tesseval_shader_handle(cso, NULL);
    cso_set_geometry_shader_handle(cso, NULL);
-   cso_set_task_shader_handle(cso, NULL);
    cso_set_mesh_shader_handle(cso, NULL);
 
    /* user samplers, plus our bitmap sampler */
@@ -255,8 +255,8 @@ setup_render_state(struct gl_context *ctx,
       pipe->set_sampler_views(pipe, MESA_SHADER_FRAGMENT, 0, num_views, 0,
                               sampler_views);
       st->state.num_sampler_views[MESA_SHADER_FRAGMENT] = num_views;
-
-      for (unsigned i = 0; i < num_views; i++)
+      /* only free YUV samplerviews */
+      u_foreach_bit(i, extra_sampler_views)
          pipe->sampler_view_release(pipe, sampler_views[i]);
    }
 
@@ -468,6 +468,7 @@ st_flush_bitmap_cache(struct st_context *st)
                           cache->fp,
                           cache->scissor_enabled,
                           cache->clamp_frag_color);
+         pipe->sampler_view_release(pipe, sv);
       }
 
       /* release/free the texture */

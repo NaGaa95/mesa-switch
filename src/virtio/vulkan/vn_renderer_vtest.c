@@ -666,7 +666,9 @@ vtest_bo_flush(struct vn_renderer *renderer,
 }
 
 static void *
-vtest_bo_map(struct vn_renderer *renderer, struct vn_renderer_bo *_bo)
+vtest_bo_map(struct vn_renderer *renderer,
+             struct vn_renderer_bo *_bo,
+             void *placed_addr)
 {
    struct vtest *vtest = (struct vtest *)renderer;
    struct vtest_bo *bo = (struct vtest_bo *)_bo;
@@ -680,8 +682,9 @@ vtest_bo_map(struct vn_renderer *renderer, struct vn_renderer_bo *_bo)
        * check for VCMD_PARAM_HOST_COHERENT_DMABUF_BLOB, we know vtest can
        * lie.
        */
-      void *ptr = mmap(NULL, bo->base.mmap_size, PROT_READ | PROT_WRITE,
-                       MAP_SHARED, bo->res_fd, 0);
+      void *ptr =
+         mmap(placed_addr, bo->base.mmap_size, PROT_READ | PROT_WRITE,
+              MAP_SHARED | (placed_addr ? MAP_FIXED : 0), bo->res_fd, 0);
       if (ptr == MAP_FAILED) {
          vn_log(vtest->instance, "failed to mmap %d of size %zu rw: %s",
                 bo->res_fd, bo->base.mmap_size, strerror(errno));
@@ -1070,6 +1073,8 @@ vtest_init(struct vtest *vtest)
    vtest->base.bo_ops.create_from_dma_buf = NULL;
    vtest->base.bo_ops.destroy = vtest_bo_destroy;
    vtest->base.bo_ops.export_dma_buf = vtest_bo_export_dma_buf;
+   vtest->base.bo_ops.export_sync_file =
+      vn_renderer_bo_export_sync_file_internal;
    vtest->base.bo_ops.map = vtest_bo_map;
    vtest->base.bo_ops.flush = vtest_bo_flush;
    vtest->base.bo_ops.invalidate = vtest_bo_invalidate;

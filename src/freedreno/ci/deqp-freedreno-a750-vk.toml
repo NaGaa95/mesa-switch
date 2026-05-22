@@ -4,9 +4,13 @@ deqp = "/deqp-vk/external/vulkancts/modules/vulkan/deqp-vk"
 caselists = ["/deqp-vk/mustpass/vk-main.txt"]
 renderer_check = "Turnip Adreno .* 750"
 tests_per_group = 10000
+[deqp.env]
+# Enable additional tests that test fp32 denorm preserve.
+tu_enable_softfloat32 = "true"
 
 # force-gmem testing
 # Autotuner forces sysmem on most CTS tests
+# Also force-enable concurrent binning.
 [[deqp]]
 deqp = "/deqp-vk/external/vulkancts/modules/vulkan/deqp-vk"
 caselists = ["/deqp-vk/mustpass/vk-main.txt"]
@@ -14,7 +18,7 @@ prefix = "gmem-"
 fraction = 20
 tests_per_group = 10000
 [deqp.env]
-TU_DEBUG = "gmem,forcebin"
+TU_DEBUG = "gmem,forcebin,forcecb"
 
 # force-gmem with unaligned gmem store testing
 [[deqp]]
@@ -73,3 +77,7 @@ TU_DEBUG = "dynamic"
 # TU_DEBUG_STALE_REGS_RANGE = "0x0c00,0xbe01"
 # TU_DEBUG_STALE_REGS_FLAGS = "cmdbuf,renderpass"
 # FREEDRENO_HANGCHECK_MS = "2000"
+
+[[vkd3d]]
+vkd3d_folder = "/vkd3d-proton-tests/"
+prefix="vkd3d-" # The test names are pretty ambiguous, otherwise.

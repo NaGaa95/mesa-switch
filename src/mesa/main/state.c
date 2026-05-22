@@ -738,7 +738,7 @@ set_vertex_processing_mode(struct gl_context *ctx, gl_vertex_processing_mode m)
        * impossible to reach.  The meta code is careful to not use shaders in
        * ES1.
        */
-      assert(ctx->API != API_OPENGLES);
+      assert(!_mesa_is_gles1(ctx));
 
       /* Other parts of the code assume that inputs[VERT_ATTRIB_POS] through
        * inputs[VERT_ATTRIB_GENERIC0-1] will be non-NULL.  However, in OpenGL

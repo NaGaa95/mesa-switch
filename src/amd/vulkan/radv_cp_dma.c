@@ -34,9 +34,7 @@
 static inline unsigned
 cp_dma_max_byte_count(enum amd_gfx_level gfx_level)
 {
-   unsigned max = gfx_level >= GFX11  ? 32767
-                  : gfx_level >= GFX9 ? S_415_BYTE_COUNT_GFX9(~0u)
-                                      : S_415_BYTE_COUNT_GFX6(~0u);
+   unsigned max = gfx_level >= GFX11 ? 32767 : gfx_level >= GFX9 ? S_506_BYTE_COUNT(~0u) : S_415_BYTE_COUNT(~0u);
 
    /* make it aligned for optimal performance */
    return max & ~(SI_CPDMA_ALIGNMENT - 1);
@@ -52,33 +50,34 @@ radv_cs_emit_cp_dma(struct radv_device *device, struct radv_cmd_stream *cs, bool
 {
    const struct radv_physical_device *pdev = radv_device_physical(device);
    const bool cp_dma_use_L2 = (flags & CP_DMA_USE_L2) && pdev->info.cp_dma_use_L2;
+   const bool cp_dma_use_mall = pdev->info.gfx_level == GFX12;
+   /* GFX12: TC_L2 means MALL, which should always be set. */
+   const bool cp_dma_tc_l2_flag = cp_dma_use_L2 || cp_dma_use_mall;
    uint32_t header = 0, command = 0;
 
    assert(size <= cp_dma_max_byte_count(pdev->info.gfx_level));
 
    radeon_check_space(device->ws, cs->b, 9);
    if (pdev->info.gfx_level >= GFX9)
-      command |= S_415_BYTE_COUNT_GFX9(size);
+      command |= S_506_BYTE_COUNT(size);
    else
-      command |= S_415_BYTE_COUNT_GFX6(size);
+      command |= S_415_BYTE_COUNT(size);
 
-   /* Sync flags. */
-   if (flags & CP_DMA_SYNC)
-      header |= S_411_CP_SYNC(1);
+   /* Sync flags. Only present for PFP/ME. MEC always sync. */
+   if ((flags & CP_DMA_SYNC) && cs->hw_ip == AMD_IP_GFX)
+      header |= S_501_CP_SYNC(1);
 
    if (flags & CP_DMA_RAW_WAIT)
-      command |= S_415_RAW_WAIT(1);
+      command |= S_506_RAW_WAIT(1);
 
    /* Src and dst flags. */
-   if (pdev->info.gfx_level >= GFX9 && !(flags & CP_DMA_CLEAR) && src_va == dst_va)
-      header |= S_411_DST_SEL(V_411_NOWHERE); /* prefetch only */
-   else if (cp_dma_use_L2)
-      header |= S_411_DST_SEL(V_411_DST_ADDR_TC_L2);
+   if (cp_dma_tc_l2_flag)
+      header |= S_501_DST_SEL(V_501_DST_ADDR_USING_L2);
 
    if (flags & CP_DMA_CLEAR)
-      header |= S_411_SRC_SEL(V_411_DATA);
-   else if (cp_dma_use_L2)
-      header |= S_411_SRC_SEL(V_411_SRC_ADDR_TC_L2);
+      header |= S_501_SRC_SEL(V_501_DATA);
+   else if (cp_dma_tc_l2_flag)
+      header |= S_501_SRC_SEL(V_501_SRC_ADDR_USING_L2);
 
    radeon_begin(cs);
    if (pdev->info.gfx_level >= GFX7) {
@@ -90,8 +89,8 @@ radv_cs_emit_cp_dma(struct radv_device *device, struct radv_cmd_stream *cs, bool
       radeon_emit(dst_va >> 32); /* DST_ADDR_HI [31:0] */
       radeon_emit(command);
    } else {
-      assert(!cp_dma_use_L2);
-      header |= S_411_SRC_ADDR_HI(src_va >> 32);
+      assert(!cp_dma_tc_l2_flag);
+      header |= S_412_SRC_ADDR_HI(src_va >> 32);
       radeon_emit(PKT3(PKT3_CP_DMA, 4, predicating));
       radeon_emit(src_va);                  /* SRC_ADDR_LO [31:0] */
       radeon_emit(header);                  /* SRC_ADDR_HI [15:0] + flags. */
@@ -118,10 +117,7 @@ radv_emit_cp_dma(struct radv_cmd_buffer *cmd_buffer, uint64_t dst_va, uint64_t s
     */
    if (flags & CP_DMA_SYNC) {
       if (cmd_buffer->qf == RADV_QUEUE_GENERAL) {
-         radeon_begin(cs);
-         radeon_emit(PKT3(PKT3_PFP_SYNC_ME, 0, cmd_buffer->state.predicating));
-         radeon_emit(0);
-         radeon_end();
+         ac_emit_cp_pfp_sync_me(cs->b, cmd_buffer->state.predicating);
       }
 
       /* CP will see the sync flag and wait for all DMAs to complete. */
@@ -170,14 +166,14 @@ radv_cs_cp_dma_prefetch(const struct radv_device *device, struct radv_cmd_stream
    uint64_t aligned_size = ((va + size + SI_CPDMA_ALIGNMENT - 1) & ~(SI_CPDMA_ALIGNMENT - 1)) - aligned_va;
 
    if (gfx_level >= GFX9) {
-      command |= S_415_BYTE_COUNT_GFX9(aligned_size) | S_415_DISABLE_WR_CONFIRM_GFX9(1);
-      header |= S_411_DST_SEL(V_411_NOWHERE);
+      command |= S_506_BYTE_COUNT(aligned_size) | S_506_DISABLE_WR_CONFIRM(1);
+      header |= S_501_DST_SEL(V_501_DST_NOWHERE);
    } else {
-      command |= S_415_BYTE_COUNT_GFX6(aligned_size) | S_415_DISABLE_WR_CONFIRM_GFX6(1);
-      header |= S_411_DST_SEL(V_411_DST_ADDR_TC_L2);
+      command |= S_415_BYTE_COUNT(aligned_size) | S_415_DISABLE_WR_CONFIRM(1);
+      header |= S_501_DST_SEL(V_501_DST_ADDR_USING_L2);
    }
 
-   header |= S_411_SRC_SEL(V_411_SRC_ADDR_TC_L2);
+   header |= S_501_SRC_SEL(V_501_SRC_ADDR_USING_L2);
 
    radeon_begin(cs);
    radeon_emit(PKT3(PKT3_DMA_DATA, 5, predicating));

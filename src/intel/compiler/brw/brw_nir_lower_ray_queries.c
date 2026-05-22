@@ -1,24 +1,6 @@
 /*
- * Copyright (c) 2021 Intel Corporation
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
- * IN THE SOFTWARE.
+ * Copyright © 2021 Intel Corporation
+ * SPDX-License-Identifier: MIT
  */
 
 #include "brw_nir_rt.h"
@@ -230,6 +212,24 @@ spill_query(nir_builder *b,
 
 
 static void
+handle_terminate_on_first_hit(nir_builder *b, nir_def *stack_addr,
+                              struct lowering_state *state)
+{
+   struct brw_nir_rt_mem_ray_defs world_ray_in = {};
+   brw_nir_rt_load_mem_ray_from_addr(b, &world_ray_in, stack_addr,
+                                     BRW_RT_BVH_LEVEL_WORLD,
+                                     state->devinfo);
+   nir_def *terminate =
+      nir_test_mask(b, nir_u2u32(b, world_ray_in.ray_flags),
+                    BRW_RT_RAY_FLAG_TERMINATE_ON_FIRST_HIT);
+   nir_push_if(b, terminate);
+   {
+      brw_nir_rt_query_mark_done(b, stack_addr);
+   }
+   nir_pop_if(b, NULL);
+}
+
+static void
 lower_ray_query_intrinsic(nir_builder *b,
                           nir_intrinsic_instr *intrin,
                           struct lowering_state *state)
@@ -355,6 +355,7 @@ lower_ray_query_intrinsic(nir_builder *b,
                               NULL, NULL,
                               nir_imm_int(b, GEN_RT_TRACE_RAY_COMMIT),
                               nir_imm_int(b, BRW_RT_BVH_LEVEL_OBJECT));
+      handle_terminate_on_first_hit(b, stack_addr, state);
       break;
    }
 
@@ -364,6 +365,7 @@ lower_ray_query_intrinsic(nir_builder *b,
                               NULL, NULL,
                               nir_imm_int(b, GEN_RT_TRACE_RAY_COMMIT),
                               nir_imm_int(b, BRW_RT_BVH_LEVEL_OBJECT));
+      handle_terminate_on_first_hit(b, stack_addr, state);
       break;
    }
 
@@ -442,8 +444,7 @@ lower_ray_query_intrinsic(nir_builder *b,
 
       case nir_ray_query_value_intersection_geometry_index: {
          nir_def *geometry_index_dw =
-            nir_load_global(b, nir_iadd_imm(b, hit_in.prim_leaf_ptr, 4), 4,
-                            1, 32);
+            nir_load_global(b, 1, 32, nir_iadd_imm(b, hit_in.prim_leaf_ptr, 4));
          sysval = nir_iand_imm(b, geometry_index_dw, BITFIELD_MASK(24));
          break;
       }

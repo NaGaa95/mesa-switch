@@ -200,8 +200,7 @@ unsafe impl CLInfo<cl_device_info> for cl_device_id {
             CL_DEVICE_MAX_WORK_ITEM_DIMENSIONS => v.write::<cl_uint>(dev.max_grid_dimensions()),
             CL_DEVICE_MAX_WORK_ITEM_SIZES => v.write::<&[usize]>(&dev.max_block_sizes()),
             CL_DEVICE_MAX_WRITE_IMAGE_ARGS => v.write::<cl_uint>(dev.caps.max_write_images),
-            // TODO proper retrival from devices
-            CL_DEVICE_MEM_BASE_ADDR_ALIGN => v.write::<cl_uint>(0x1000),
+            CL_DEVICE_MEM_BASE_ADDR_ALIGN => v.write::<cl_uint>(dev.mem_base_addr_align_bits()),
             CL_DEVICE_MIN_DATA_TYPE_ALIGN_SIZE => {
                 v.write::<cl_uint>(16 * size_of::<cl_ulong>() as cl_uint)
             }

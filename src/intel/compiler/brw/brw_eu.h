@@ -1,33 +1,10 @@
 /*
- Copyright (C) Intel Corp.  2006.  All Rights Reserved.
- Intel funded Tungsten Graphics to
- develop this 3D driver.
-
- Permission is hereby granted, free of charge, to any person obtaining
- a copy of this software and associated documentation files (the
- "Software"), to deal in the Software without restriction, including
- without limitation the rights to use, copy, modify, merge, publish,
- distribute, sublicense, and/or sell copies of the Software, and to
- permit persons to whom the Software is furnished to do so, subject to
- the following conditions:
-
- The above copyright notice and this permission notice (including the
- next paragraph) shall be included in all copies or substantial
- portions of the Software.
-
- THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
- EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
- MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
- IN NO EVENT SHALL THE COPYRIGHT OWNER(S) AND/OR ITS SUPPLIERS BE
- LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
- OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
- WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-
- **********************************************************************/
- /*
-  * Authors:
-  *   Keith Whitwell <keithw@vmware.com>
-  */
+ * Copyright © 2006 Intel Corporation
+ * SPDX-License-Identifier: MIT
+ *
+ * Intel funded Tungsten Graphics to develop this 3D driver.
+ * File originally authored by: Keith Whitwell <keithw@vmware.com>
+ */
 
 #pragma once
 
@@ -79,13 +56,6 @@ struct brw_insn_state {
    bool acc_wr_control:1;
 };
 
-
-/* A helper for accessing the last instruction emitted.  This makes it easy
- * to set various bits on an instruction without having to create temporary
- * variable and assign the emitted instruction to those.
- */
-#define brw_last_inst (&p->store[p->nr_insn - 1])
-
 struct brw_codegen {
    brw_eu_inst *store;
    int store_size;
@@ -132,6 +102,12 @@ struct brw_label {
    struct brw_label *next;
 };
 
+static inline brw_eu_inst *
+brw_eu_last_inst(struct brw_codegen *p)
+{
+   return &p->store[p->nr_insn - 1];
+}
+
 void brw_pop_insn_state( struct brw_codegen *p );
 void brw_push_insn_state( struct brw_codegen *p );
 unsigned brw_get_default_exec_size(struct brw_codegen *p);
@@ -176,6 +152,13 @@ void brw_add_reloc(struct brw_codegen *p, uint32_t id,
                    uint32_t offset, uint32_t delta);
 void brw_set_dest(struct brw_codegen *p, brw_eu_inst *insn, struct brw_reg dest);
 void brw_set_src0(struct brw_codegen *p, brw_eu_inst *insn, struct brw_reg reg);
+
+brw_eu_inst *brw_alu1(struct brw_codegen *p, unsigned opcode, struct brw_reg dest,
+                      struct brw_reg src);
+brw_eu_inst *brw_alu2(struct brw_codegen *p, unsigned opcode, struct brw_reg dest,
+                      struct brw_reg src0, struct brw_reg src1);
+brw_eu_inst *brw_alu3(struct brw_codegen *p, unsigned opcode, struct brw_reg dest,
+                      struct brw_reg src0, struct brw_reg src1, struct brw_reg src2);
 
 /* Helpers for regular instructions:
  */
@@ -222,6 +205,7 @@ ALU1(RNDE)
 ALU1(RNDU)
 ALU1(RNDZ)
 ALU2(MAC)
+ALU2(MACL)
 ALU2(MACH)
 ALU1(LZD)
 ALU2(DP4)
@@ -461,13 +445,6 @@ brw_dp_read_desc(const struct intel_device_info *devinfo,
 }
 
 static inline unsigned
-brw_dp_read_desc_msg_type(const struct intel_device_info *devinfo,
-                          uint32_t desc)
-{
-   return brw_dp_desc_msg_type(devinfo, desc);
-}
-
-static inline unsigned
 brw_dp_read_desc_msg_control(const struct intel_device_info *devinfo,
                              uint32_t desc)
 {
@@ -488,13 +465,6 @@ brw_dp_write_desc(const struct intel_device_info *devinfo,
    assert(!send_commit_msg);
    return brw_dp_desc(devinfo, binding_table_index, msg_type, msg_control) |
           SET_BITS(send_commit_msg, 17, 17);
-}
-
-static inline unsigned
-brw_dp_write_desc_msg_type(const struct intel_device_info *devinfo,
-                           uint32_t desc)
-{
-   return brw_dp_desc_msg_type(devinfo, desc);
 }
 
 static inline unsigned
@@ -1441,33 +1411,19 @@ translate_systolic_depth(unsigned d)
    }
 }
 
-/**
- * Send message to shared unit \p sfid with a possibly indirect descriptor \p
- * desc.  If \p desc is not an immediate it will be transparently loaded to an
- * address register using an OR instruction.
- */
 void
-brw_send_indirect_message(struct brw_codegen *p,
-                          unsigned sfid,
-                          struct brw_reg dst,
-                          struct brw_reg payload,
-                          struct brw_reg desc,
-                          bool eot,
-                          bool gather);
-
-void
-brw_send_indirect_split_message(struct brw_codegen *p,
-                                unsigned sfid,
-                                struct brw_reg dst,
-                                struct brw_reg payload0,
-                                struct brw_reg payload1,
-                                struct brw_reg desc,
-                                struct brw_reg ex_desc,
-                                uint32_t ex_desc_imm_inst,
-                                unsigned ex_mlen,
-                                bool ex_bso,
-                                bool eot,
-                                bool gather);
+brw_SEND(struct brw_codegen *p,
+         unsigned sfid,
+         struct brw_reg dst,
+         struct brw_reg payload0,
+         struct brw_reg payload1,
+         struct brw_reg desc,
+         struct brw_reg ex_desc,
+         uint32_t ex_desc_imm_inst,
+         unsigned ex_mlen,
+         bool ex_bso,
+         bool eot,
+         bool gather);
 
 void gfx6_math(struct brw_codegen *p,
 	       struct brw_reg dest,
@@ -1582,7 +1538,7 @@ brw_set_desc(struct brw_codegen *p, brw_eu_inst *insn, unsigned desc, bool gathe
    brw_set_desc_ex(p, insn, desc, 0, gather);
 }
 
-void brw_set_uip_jip(struct brw_codegen *p, int start_offset);
+void brw_set_uip_jip(struct brw_codegen *p, int start_offset, int final_halt_offset);
 
 enum brw_conditional_mod brw_negate_cmod(enum brw_conditional_mod cmod);
 enum brw_conditional_mod brw_swap_cmod(enum brw_conditional_mod cmod);
@@ -1639,6 +1595,19 @@ brw_max_immediate_offset_bits(enum lsc_addr_surface_type binding_type)
    };
    assert(binding_type <= LSC_ADDR_SURFTYPE_BTI);
    return max_bits[binding_type];
+}
+
+static inline bool
+brw_lsc_supports_base_offset(const struct intel_device_info *devinfo)
+{
+   return devinfo->ver >= 20;
+}
+
+static inline bool
+brw_can_coherent_fb_fetch(const struct intel_device_info *devinfo)
+{
+   /* Not functional after Gfx20 */
+   return devinfo->ver >= 9 && devinfo->ver < 20;
 }
 
 #ifdef __cplusplus

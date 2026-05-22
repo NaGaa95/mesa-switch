@@ -16,6 +16,7 @@
 #include "util/u_dynarray.h"
 
 #include "vk_command_buffer.h"
+#include "clc597.h"
 
 #include <stdio.h>
 
@@ -46,28 +47,50 @@ struct nvk_root_descriptor_table {
       } cs;
    };
 
-   /* Client push constants */
-   uint8_t push[NVK_MAX_PUSH_SIZE];
-
    /* Descriptor set addresses */
    struct nvk_buffer_address sets[NVK_MAX_SETS];
 
    /* For each descriptor set, the index in dynamic_buffers where that set's
-    * dynamic buffers start. This is maintained for every set, regardless
-    * of whether or not anything is bound there.
+    * dynamic buffers start.
     */
    uint8_t set_dynamic_buffer_start[NVK_MAX_SETS];
 
-   /* Dynamic buffer bindings */
-   union nvk_buffer_descriptor dynamic_buffers[NVK_MAX_DYNAMIC_BUFFERS];
+   uint64_t printf_buffer_addr;
 
-   /* enfore alignment to 0x100 as needed pre pascal */
-   uint8_t __padding[0xb8];
+   /* enfore total structure alignment to 0x100 as needed pre pascal */
+   uint8_t __padding[0xb0];
+
+   /*
+    * Arrays with dynamic (shader-provided) indices need to fit in a single
+    * 256-byte bank for gpus with ROOT_TABLE. We place them here after the
+    * padding so they're appropriately aligned.
+    */
+
+   /* Dynamic buffer bindings (swizzled form of nvk_buffer_descriptor) */
+   uint32_t dynamic_buffers[4][NVK_MAX_DYNAMIC_BUFFERS];
+
+   /* Client push constants */
+   uint8_t push[NVK_MAX_PUSH_SIZE];
 };
 
 /* helper macro for computing root descriptor byte offsets */
 #define nvk_root_descriptor_offset(member)\
    offsetof(struct nvk_root_descriptor_table, member)
+
+/* Push constants should be aligned properly */
+static_assert(nvk_root_descriptor_offset(push) % 8 == 0,
+              "Push constants should be aligned properly");
+
+#define nvk_hw_root_table_index(member)\
+   (nvk_root_descriptor_offset(member) / NVK_HW_ROOT_TABLE_SIZE)
+#define nvk_hw_root_table_offset(member)\
+   (nvk_root_descriptor_offset(member) % NVK_HW_ROOT_TABLE_SIZE)
+
+static inline bool nvk_use_hw_root_table(const struct nv_device_info *info,
+                                         bool is_gfx)
+{
+   return is_gfx && info->cls_eng3d >= TURING_A;
+}
 
 enum ENUM_PACKED nvk_descriptor_set_type {
    NVK_DESCRIPTOR_SET_TYPE_NONE,
@@ -105,8 +128,8 @@ struct nvk_descriptor_state {
    unsigned _start = start; \
    unsigned _count = count; \
    assert(_start + _count <= ARRAY_SIZE(root->member)); \
-   for (unsigned i = 0; i < _count; i++) \
-      (dst)[i] = root->member[i + _start]; \
+   for (unsigned _index = 0; _index < _count; _index++) \
+      (dst)[_index] = root->member[_index + _start]; \
 } while (0)
 
 #define nvk_descriptor_state_set_root(cmd, desc, member, src) do { \
@@ -128,8 +151,8 @@ struct nvk_descriptor_state {
    unsigned _start = start; \
    unsigned _count = count; \
    assert(_start + _count <= ARRAY_SIZE(root->member)); \
-   for (unsigned i = 0; i < _count; i++) \
-      root->member[i + _start] = (src)[i]; \
+   for (unsigned _index = 0; _index < _count; _index++) \
+      root->member[_index + _start] = (src)[_index]; \
    if (_desc->flush_root != NULL) { \
       size_t offset = (char *)&root->member[_start] - (char *)root; \
       _desc->flush_root((cmd), _desc, offset, \
@@ -138,6 +161,8 @@ struct nvk_descriptor_state {
 } while (0)
 
 struct nvk_attachment {
+   VkRenderingAttachmentFlagBitsKHR flags;
+
    VkFormat vk_format;
    struct nvk_image_view *iview;
 
@@ -223,6 +248,8 @@ struct nvk_cmd_buffer {
    uint32_t upload_offset;
 
    struct nvk_cmd_mem *cond_render_mem;
+   /** Array of struct nvk_cmd_mem* */
+   struct util_dynarray copy_memory_indirect_temps;
 
    struct nvk_cmd_mem *push_mem;
    uint32_t *push_mem_limit;
@@ -234,8 +261,6 @@ struct nvk_cmd_buffer {
     * buffer to use as a pushbuf.
     */
    struct util_dynarray pushes;
-
-   uint64_t tls_space_needed;
 
    uint8_t prev_subc;
 };
@@ -379,6 +404,10 @@ void nvk_cmd_invalidate_deps(struct nvk_cmd_buffer *cmd,
 void
 nvk_cmd_buffer_flush_push_descriptors(struct nvk_cmd_buffer *cmd,
                                       struct nvk_descriptor_state *desc);
+
+void
+nvk_cmd_buffer_flush_printf_buffer(struct nvk_cmd_buffer *cmd,
+                                   struct nvk_descriptor_state *desc);
 
 bool
 nvk_cmd_buffer_get_cbuf_addr(struct nvk_cmd_buffer *cmd,

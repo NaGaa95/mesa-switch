@@ -188,6 +188,29 @@ struct wsi_image {
    int dma_buf_fd;
 #endif
    void *cpu_map;
+
+   VkQueryPool query_pool;
+   VkCommandBuffer *timestamp_cmd_buffers;
+};
+
+struct wsi_presentation_timing {
+   uint64_t present_id;
+   uint64_t target_time;
+   uint64_t serial;
+   uint64_t queue_done_time; /* GPU timestamp based. */
+   uint64_t complete_time; /* Best effort timestamp we get from backend. */
+   /* If we're rendering with IMMEDIATE, it's possible for images to IDLE long before they complete.
+    * In this case, we have to ensure that queue_done_time is sampled at QueuePresentKHR time
+    * before we recycle an image. */
+   struct wsi_image *image;
+   VkPresentStageFlagsEXT requested_feedback;
+   VkBool32 complete;
+};
+
+struct wsi_image_timing_request {
+   uint64_t                    serial;
+   uint64_t                    time;
+   VkPresentTimingInfoFlagsEXT flags;
 };
 
 struct wsi_swapchain {
@@ -207,6 +230,7 @@ struct wsi_swapchain {
     * first pixel being scanned out.
     */
    VkSemaphore present_id_timeline;
+   bool present_wait_enabled;
 
    int signal_dma_buf_from_semaphore;
    /**
@@ -236,6 +260,31 @@ struct wsi_swapchain {
        */
       struct vk_queue *queue;
    } blit;
+
+   struct {
+      mtx_t lock;
+      bool active;
+
+      struct wsi_presentation_timing *timings;
+      size_t timings_capacity;
+      size_t timings_count;
+
+      size_t serial;
+
+      /* Maps to Vulkan spec definitions. */
+      uint64_t refresh_duration;
+      uint64_t refresh_interval;
+      /* When 0, we don't know yet. Every time the refresh rate changes,
+       * increase this counter. This counter must also be passed in GetPastTimings. */
+      uint64_t refresh_counter;
+
+      VkTimeDomainKHR time_domain;
+
+      VkPresentStageFlagsEXT supported_query_stages;
+      /* Ensures monotonicity for complete_time. */
+      uint64_t minimum_queue_done_time;
+      uint64_t minimum_complete_time;
+   } present_timing;
 
    bool capture_key_pressed;
 
@@ -272,6 +321,25 @@ struct wsi_swapchain {
                             VkPresentModeKHR mode);
    void (*set_hdr_metadata)(struct wsi_swapchain *swap_chain,
                             const VkHdrMetadataEXT* pMetadata);
+   void (*set_timing_request)(struct wsi_swapchain *swap_chain,
+                            const struct wsi_image_timing_request *request);
+   void (*poll_timing_request)(struct wsi_swapchain *swap_chain);
+
+   /* On some backends we may be able to query the refresh parameters before
+    * we get any feedback from the compositor.
+    * Return value is refreshDuration in the API which is intended to be minimum
+    * duration between screen refreshes. E.g. if 16.6ms, a FIFO swapchain will not update
+    * more often than 60 Hz. refreshDuration may be 0 in case we truly have no idea
+    * what the actual screen refresh rate is.
+    * The interval maps to refreshInterval in the API which has different meanings:
+    * - 0: Unknown if the monitor is VRR or FRR. Application cannot rely on fully locked frame pacing
+    *   for interval > 1.
+    * - UINT64_MAX: VRR.
+    * - Equal to refreshDuration: Normal FRR scenario.
+    * - refreshInterval * N == refreshDuration: This can be a situation where the monitor is e.g. 120 Hz,
+    *   but has been locked to maximum of 60 Hz. This would allow for application to request e.g. 40 Hz.
+    */
+   uint64_t (*poll_early_refresh)(struct wsi_swapchain *swap_chain, uint64_t *interval);
 };
 
 bool
@@ -375,6 +443,10 @@ wsi_create_image(const struct wsi_swapchain *chain,
 void
 wsi_image_init(struct wsi_image *image);
 
+VkResult
+wsi_image_init_timestamp(const struct wsi_swapchain *chain,
+                         struct wsi_image *image);
+
 void
 wsi_destroy_image(const struct wsi_swapchain *chain,
                   struct wsi_image *image);
@@ -382,6 +454,16 @@ wsi_destroy_image(const struct wsi_swapchain *chain,
 VkResult
 wsi_swapchain_wait_for_present_semaphore(const struct wsi_swapchain *chain,
                                          uint64_t present_id, uint64_t timeout);
+
+void
+wsi_swapchain_present_timing_notify_completion(struct wsi_swapchain *chain,
+                                               uint64_t timing_serial, uint64_t timestamp,
+                                               struct wsi_image *image);
+
+void
+wsi_swapchain_present_timing_update_refresh_rate(struct wsi_swapchain *chain,
+                                                 uint64_t refresh_duration, uint64_t refresh_interval,
+                                                 int minimum_delta_for_update);
 
 #ifdef HAVE_LIBDRM
 VkResult
@@ -508,6 +590,20 @@ void wsi_switch_finish_wsi(struct wsi_device *wsi_device,
 
 VK_DEFINE_NONDISP_HANDLE_CASTS(wsi_swapchain, base, VkSwapchainKHR,
                                VK_OBJECT_TYPE_SWAPCHAIN_KHR)
+
+/* This should be static inline here since this can be called by runtime,
+ * and we cannot create cyclic dependencies. */
+static inline VkTimeDomainKHR
+wsi_common_get_time_domain(VkSwapchainKHR _swapchain,
+                           VkPresentStageFlagBitsEXT stage,
+                           uint64_t time_domain_id)
+{
+   VK_FROM_HANDLE(wsi_swapchain, swapchain, _swapchain);
+   return stage == VK_PRESENT_STAGE_QUEUE_OPERATIONS_END_BIT_EXT &&
+          swapchain->wsi->timestamp_bits == 64
+             ? VK_TIME_DOMAIN_DEVICE_KHR
+             : swapchain->present_timing.time_domain;
+}
 
 #if defined(VK_USE_PLATFORM_METAL_EXT)
 struct wsi_metal_image_params {

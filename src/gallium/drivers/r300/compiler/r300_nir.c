@@ -137,6 +137,34 @@ remove_clip_vertex(nir_builder *b, nir_instr *instr, UNUSED void *_)
    return false;
 }
 
+static bool
+r300_alu_to_scalar_filter_cb(const nir_instr *instr, const void *data)
+{
+   if (instr->type != nir_instr_type_alu)
+      return false;
+
+   nir_alu_instr *alu = nir_instr_as_alu(instr);
+   switch (alu->op) {
+   case nir_op_ball_fequal2:
+   case nir_op_ball_fequal3:
+   case nir_op_ball_fequal4:
+   case nir_op_bany_fnequal2:
+   case nir_op_bany_fnequal3:
+   case nir_op_bany_fnequal4:
+   case nir_op_ball_iequal2:
+   case nir_op_ball_iequal3:
+   case nir_op_ball_iequal4:
+   case nir_op_bany_inequal2:
+   case nir_op_bany_inequal3:
+   case nir_op_bany_inequal4:
+      return true;
+   default:
+      break;
+   }
+
+   return false;
+}
+
 void
 r300_optimize_nir(struct nir_shader *s, struct r300_screen *screen)
 {
@@ -168,7 +196,8 @@ r300_optimize_nir(struct nir_shader *s, struct r300_screen *screen)
       progress = false;
       NIR_PASS(_, s, nir_lower_vars_to_ssa);
 
-      NIR_PASS(progress, s, nir_copy_prop);
+      NIR_PASS(progress, s, nir_lower_alu_to_scalar, r300_alu_to_scalar_filter_cb, NULL);
+      NIR_PASS(progress, s, nir_opt_copy_prop);
       NIR_PASS(progress, s, r300_nir_lower_flrp);
       NIR_PASS(progress, s, nir_opt_algebraic);
       if (s->info.stage == MESA_SHADER_VERTEX) {

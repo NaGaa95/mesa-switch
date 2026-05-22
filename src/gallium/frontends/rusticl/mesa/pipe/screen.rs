@@ -156,7 +156,7 @@ impl PipeScreenOwned {
     /// `screen` must be equivalent to a pointer retrieved via [PipeScreenOwned::into_raw].
     /// This function does not increase reference count; use with a pointer not accounted
     /// for in the reference count could lead to undefined behavior.
-    pub(super) unsafe fn from_raw<'s>(screen: *mut pipe_screen) -> Self {
+    pub(super) unsafe fn from_raw(screen: *mut pipe_screen) -> Self {
         // SAFETY: PipeScreenOwned is transparent over *mut pipe_screen
         unsafe { mem::transmute(screen) }
     }
@@ -189,7 +189,7 @@ impl PipeScreen {
     }
 
     pub(super) fn from_raw<'s>(screen: &'s *mut pipe_screen) -> &'s Self {
-        unsafe { mem::transmute(*screen) }
+        unsafe { &*(*screen).cast() }
     }
 
     pub fn caps(&self) -> &pipe_caps {
@@ -298,7 +298,7 @@ impl PipeScreen {
     pub fn resource_create_texture(
         &self,
         width: u32,
-        height: u16,
+        height: u32,
         depth: u16,
         array_size: u16,
         target: pipe_texture_target,
@@ -328,7 +328,7 @@ impl PipeScreen {
     pub fn resource_create_texture_from_user(
         &self,
         width: u32,
-        height: u16,
+        height: u32,
         depth: u16,
         array_size: u16,
         target: pipe_texture_target,
@@ -361,7 +361,7 @@ impl PipeScreen {
         format: pipe_format,
         stride: u32,
         width: u32,
-        height: u16,
+        height: u32,
         depth: u16,
         array_size: u16,
         support_image: bool,
@@ -469,8 +469,9 @@ impl PipeScreen {
         &self,
         format: pipe_format,
         target: pipe_texture_target,
-        bindings: u32,
+        mut bindings: u32,
     ) -> bool {
+        bindings |= PIPE_BIND_OPENCL;
         unsafe {
             self.screen().is_format_supported.unwrap()(self.pipe(), format, target, 0, 0, bindings)
         }
@@ -515,7 +516,7 @@ impl PipeScreen {
     pub fn finalize_nir(&self, nir: &NirShader) -> bool {
         if let Some(func) = self.screen().finalize_nir {
             unsafe {
-                func(self.pipe(), nir.get_nir().cast());
+                func(self.pipe(), nir.get_nir().cast(), true);
             }
             true
         } else {

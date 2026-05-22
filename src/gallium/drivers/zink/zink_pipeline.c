@@ -489,6 +489,19 @@ zink_create_compute_pipeline(struct zink_screen *screen, struct zink_compute_pro
       STATIC_ASSERT(ARRAY_SIZE(data) == ARRAY_SIZE(me));
    }
 
+   /* pin the subgroup size whenever the driver can't tell us on compute kernels. */
+   VkPipelineShaderStageRequiredSubgroupSizeCreateInfo subInfo = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO,
+   };
+   if (comp->shader->info.stage == MESA_SHADER_KERNEL &&
+       screen->info.feats13.subgroupSizeControl &&
+       (screen->info.props13.requiredSubgroupSizeStages & VK_SHADER_STAGE_COMPUTE_BIT) &&
+       screen->info.props13.minSubgroupSize != screen->info.props13.maxSubgroupSize &&
+       !screen->info.have_KHR_pipeline_executable_properties) {
+      subInfo.requiredSubgroupSize = zink_get_subgroup_size_for_block(screen, comp, state->local_size);
+      stage.pNext = &subInfo;
+   }
+
    pci.stage = stage;
 
    VkPipeline pipeline;

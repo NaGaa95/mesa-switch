@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: MIT
  */
 
-/* Tests for Backward Inter-Shader Code Motion. */
+/* Tests for Backward Inter-Shader Code Motion with binary ALU opcodes. */
 
 #include "nir_opt_varyings_test.h"
 

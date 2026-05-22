@@ -958,8 +958,9 @@ u_trace_disable_event_range(struct u_trace_iterator begin_it,
          list_entry(current_chunk->node.next, struct u_trace_chunk, node);
    }
 
-   memset(&current_chunk->traces[start_idx], 0,
-          (end_it.event_idx - start_idx) * sizeof(struct u_trace_event));
+   if (current_chunk != NULL)
+      memset(&current_chunk->traces[start_idx], 0,
+             (end_it.event_idx - start_idx) * sizeof(struct u_trace_event));
 }
 
 /**

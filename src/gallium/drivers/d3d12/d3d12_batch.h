@@ -49,7 +49,9 @@ struct d3d12_batch {
    struct util_dynarray local_bos;
    struct hash_table *sampler_tables;
    struct set *sampler_views;
+#ifdef HAVE_GALLIUM_D3D12_GRAPHICS
    struct set *surfaces;
+#endif // HAVE_GALLIUM_D3D12_GRAPHICS
    struct set *objects;
    struct set *queries;
 

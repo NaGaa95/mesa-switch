@@ -23,14 +23,10 @@ files_libradeonsi = files(
   'driinfo_radeonsi.h',
   'gfx11_query.c',
   'si_barrier.c',
-  'si_blit.c',
   'si_buffer.c',
   'si_build_pm4.h',
   'si_clear.c',
-  'si_compute.c',
-  'si_compute_blit.c',
   'si_cp_dma.c',
-  'si_cp_reg_shadowing.c',
   'si_cp_utils.c',
   'si_debug.c',
   'si_descriptors.c',
@@ -49,54 +45,35 @@ files_libradeonsi = files(
   'si_nir_clamp_shadow_comparison_value.c',
   'si_nir_kill_outputs.c',
   'si_nir_lower_abi.c',
-  'si_nir_lower_color_inputs_to_sysvals.c',
+  'si_nir_lower_intrinsics_early.c',
   'si_nir_lower_polygon_stipple.c',
-  'si_nir_lower_ps_color_inputs.c',
+  'si_nir_lower_color_flatshade_twoside.c',
   'si_nir_lower_resource.c',
   'si_nir_lower_vs_inputs.c',
   'si_nir_mark_divergent_texture_non_uniform.c',
   'si_nir_optim.c',
   'si_sdma_copy_image.c',
-  'si_shader.c',
-  'si_shader.h',
-  'si_shader_aco.c',
-  'si_shader_args.c',
-  'si_shader_info.c',
-  'si_shader_info.h',
-  'si_shader_internal.h',
-  'si_shader_nir.c',
-  'si_shader_variant_info.c',
-  'si_shaderlib_nir.c',
-  'si_sqtt.c',
   'si_state.c',
   'si_state.h',
   'si_state_binning.c',
   'si_state_msaa.c',
-  'si_state_shaders.cpp',
   'si_state_streamout.c',
   'si_state_viewport.c',
-  'si_test_blit_perf.c',
-  'si_test_dma_perf.c',
-  'si_test_image_copy_region.c',
   'si_texture.c',
   'si_utrace.c',
   'si_utrace.h',
-  'si_uvd.c',
+  'si_video.h',
+  'si_video.c',
   'si_vpe.c',
   'si_vpe.h',
-  'pspdecryptionparam.h',
-  'cencdecryptionparam.h',
-  'radeon_uvd.c',
-  'radeon_uvd.h',
+  'si_video_dec.h',
+  'si_video_dec.c',
   'radeon_uvd_enc.c',
   'radeon_uvd_enc.h',
   'radeon_vce.c',
   'radeon_vce.h',
   'radeon_vcn.h',
   'radeon_vcn.c',
-  'radeon_vcn_dec.c',
-  'radeon_vcn_dec.h',
-  'radeon_vcn_dec_jpeg.c',
   'radeon_vcn_enc.c',
   'radeon_vcn_enc.h',
   'radeon_vcn_enc_1_2.c',
@@ -104,15 +81,14 @@ files_libradeonsi = files(
   'radeon_vcn_enc_3_0.c',
   'radeon_vcn_enc_4_0.c',
   'radeon_vcn_enc_5_0.c',
-  'radeon_video.c',
-  'radeon_video.h',
   'radeon_bitstream.h',
   'radeon_bitstream.c',
 )
 
 radeonsi_include_dirs = [inc_src, inc_include, inc_gallium, inc_gallium_aux, inc_amd_common,
-                         inc_amd_common_llvm, inc_gallium_drivers, inc_compiler, inc_amd, inc_amd_vpe, inc_virtio_gpu]
-radeonsi_deps = [dep_llvm, dep_clock, dep_libdrm, idep_nir_headers, idep_amdgfxregs_h, idep_mesautil, idep_aco, idep_u_tracepoints, idep_si_tracepoints]
+                         inc_gallium_drivers, inc_compiler, inc_amd, inc_amd_vpe, inc_virtio_gpu]
+radeonsi_deps = [dep_clock, dep_libdrm, idep_nir_headers, idep_amd_generated_headers,
+                 idep_mesautil, idep_aco, idep_u_tracepoints, idep_si_tracepoints]
 
 if with_perfetto
   radeonsi_deps += dep_perfetto
@@ -122,7 +98,7 @@ files_libradeonsi += ['si_perfetto.cpp', 'si_perfetto.h']
 
 amd_common_libs = [libamd_common]
 
-if amd_with_llvm
+if amd_with_llvm and with_gfx_compute
   files_libradeonsi += files(
     'si_shader_llvm.c',
     'si_shader_llvm.h',
@@ -137,16 +113,43 @@ if amd_with_llvm
 endif
 
 radeonsi_gfx_libs = []
-foreach ver : ['6', '7', '8', '9', '10', '103', '11', '115', '12']
-  radeonsi_gfx_libs += static_library(
-    'radeonsi_gfx@0@'.format(ver),
-    ['si_state_draw.cpp'],
-    include_directories : radeonsi_include_dirs,
-    cpp_args : ['-DGFX_VER=@0@'.format(ver)],
-    gnu_symbol_visibility : 'hidden',
-    dependencies : radeonsi_deps,
+if with_gfx_compute
+  files_libradeonsi+= files(
+    'si_blit.c',
+    'si_cp_reg_shadowing.c',
+    'si_compute_blit.c',
+    'si_compute.c',
+    'si_debug_gfx_compute.c',
+    'si_nir_mediump.c',
+    'si_mesh_shader.c',
+    'si_shader_aco.c',
+    'si_shader_args.c',
+    'si_shader_binary.c',
+    'si_shader_info.c',
+    'si_shader_info.h',
+    'si_shader_internal.h',
+    'si_shader_nir.c',
+    'si_shader_variant_info.c',
+    'si_shader.c',
+    'si_shader.h',
+    'si_shaderlib_nir.c',
+    'si_state_shaders.cpp',
+    'si_sqtt.c',
+    'si_test_dma_perf.c',
+    'si_test_image_copy_region.c',
   )
-endforeach
+
+  foreach ver : ['6', '7', '8', '9', '10', '103', '11', '115', '12']
+    radeonsi_gfx_libs += static_library(
+      'radeonsi_gfx@0@'.format(ver),
+      ['si_state_draw.cpp'],
+      include_directories : radeonsi_include_dirs,
+      cpp_args : ['-DGFX_VER=@0@'.format(ver)],
+      gnu_symbol_visibility : 'hidden',
+      dependencies : radeonsi_deps,
+    )
+  endforeach
+endif
 
 libradeonsi_cflags = []
 if with_amdgpu_virtio
@@ -160,7 +163,7 @@ endif
 
 libradeonsi = static_library(
   'radeonsi',
-  [files_libradeonsi, sid_tables_h],
+  [files_libradeonsi],
   c_args : libradeonsi_cflags,
   include_directories : radeonsi_include_dirs,
   gnu_symbol_visibility : 'hidden',
@@ -170,7 +173,7 @@ libradeonsi = static_library(
 driver_radeonsi = declare_dependency(
   compile_args : ['-DGALLIUM_RADEONSI'] + libradeonsi_cflags,
   link_with : radeonsi_gfx_libs + [
-    libradeonsi, libradeonwinsys, libamdgpuwinsys, libamd_common, libamd_common_llvm, libvpe, libgm, liblanczos
+    libradeonsi, libradeonwinsys, libamdgpuwinsys, amd_common_libs, libvpe, libgm, liblanczos
   ],
   dependencies : idep_nir,
 )

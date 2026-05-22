@@ -118,7 +118,7 @@ nvk_descriptor_stride_align_for_type(const struct nvk_physical_device *pdev,
          *stride = MAX2(*stride, desc_stride);
          *alignment = MAX2(*alignment, desc_align);
       }
-      *stride = ALIGN(*stride, *alignment);
+      *stride = align(*stride, *alignment);
       break;
 
    default:
@@ -252,8 +252,8 @@ nvk_CreateDescriptorSetLayout(VkDevice device,
       switch (binding->descriptorType) {
       case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC:
          layout->binding[b].dynamic_buffer_index = dynamic_buffer_count;
-         BITSET_SET_RANGE(layout->dynamic_ubos, dynamic_buffer_count,
-                          dynamic_buffer_count + binding->descriptorCount - 1);
+         BITSET_SET_COUNT(layout->dynamic_ubos, dynamic_buffer_count,
+                         binding->descriptorCount);
          dynamic_buffer_count += binding->descriptorCount;
          break;
 
@@ -329,14 +329,14 @@ nvk_CreateDescriptorSetLayout(VkDevice device,
 
    layout->non_variable_descriptor_buffer_size = buffer_size;
    layout->max_buffer_size = buffer_size + max_variable_descriptor_size;
-   layout->dynamic_buffer_count = dynamic_buffer_count;
+   layout->vk.dynamic_descriptor_count = dynamic_buffer_count;
 
    struct mesa_blake3 blake3_ctx;
    _mesa_blake3_init(&blake3_ctx);
 
 #define BLAKE3_UPDATE_VALUE(x) _mesa_blake3_update(&blake3_ctx, &(x), sizeof(x));
    BLAKE3_UPDATE_VALUE(layout->non_variable_descriptor_buffer_size);
-   BLAKE3_UPDATE_VALUE(layout->dynamic_buffer_count);
+   BLAKE3_UPDATE_VALUE(layout->vk.dynamic_descriptor_count);
    BLAKE3_UPDATE_VALUE(layout->binding_count);
 
    for (uint32_t b = 0; b < num_bindings; b++) {

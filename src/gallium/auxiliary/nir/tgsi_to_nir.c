@@ -967,10 +967,10 @@ ttn_kill(nir_builder *b)
 static void
 ttn_kill_if(nir_builder *b, nir_def **src)
 {
-   /* flt must be exact, because NaN shouldn't discard. (apps rely on this) */
-   b->exact = true;
+   /* Apps rely on NaN not discarding. */
+   b->fp_math_ctrl = nir_fp_preserve_nan | nir_fp_preserve_inf;
    nir_def *cmp = nir_bany(b, nir_flt_imm(b, src[0], 0.0));
-   b->exact = false;
+   b->fp_math_ctrl = nir_fp_fast_math;
 
    nir_discard_if(b, cmp);
    b->shader->info.fs.uses_discard = true;
@@ -1995,7 +1995,7 @@ ttn_emit_instruction(struct ttn_compile *c)
       break;
 
    case TGSI_OPCODE_BGNLOOP:
-      nir_push_loop(&c->build);
+      nir_loop_add_continue_construct(nir_push_loop(&c->build));
       break;
 
    case TGSI_OPCODE_BRK:
@@ -2415,12 +2415,12 @@ ttn_optimize_nir(nir_shader *nir)
 
       NIR_PASS(progress, nir, nir_lower_alu);
       NIR_PASS(progress, nir, nir_lower_pack);
-      NIR_PASS(progress, nir, nir_copy_prop);
+      NIR_PASS(progress, nir, nir_opt_copy_prop);
       NIR_PASS(progress, nir, nir_opt_remove_phis);
       NIR_PASS(progress, nir, nir_opt_dce);
       if (nir_opt_loop(nir)) {
          progress = true;
-         NIR_PASS(progress, nir, nir_copy_prop);
+         NIR_PASS(progress, nir, nir_opt_copy_prop);
          NIR_PASS(progress, nir, nir_opt_dce);
       }
       NIR_PASS(progress, nir, nir_opt_if, nir_opt_if_optimize_phi_true_false);
@@ -2445,16 +2445,8 @@ ttn_optimize_nir(nir_shader *nir)
             (nir->options->lower_flrp64 ? 64 : 0);
 
          if (lower_flrp) {
-            bool lower_flrp_progress = false;
-
-            NIR_PASS(lower_flrp_progress, nir, nir_lower_flrp,
-                     lower_flrp,
-                     false /* always_precise */);
-            if (lower_flrp_progress) {
-               NIR_PASS(progress, nir,
-                        nir_opt_constant_folding);
-               progress = true;
-            }
+            NIR_PASS(progress, nir, nir_lower_flrp,
+                     lower_flrp, false /* always_precise */);
          }
 
          /* Nothing should rematerialize any flrps, so we only need to do this
@@ -2545,6 +2537,7 @@ ttn_finalize_nir(struct ttn_compile *c, struct pipe_screen *screen)
 
    MESA_TRACE_FUNC();
 
+   NIR_PASS(_, nir, nir_lower_continue_constructs);
    NIR_PASS(_, nir, nir_lower_returns);
    NIR_PASS(_, nir, nir_lower_vars_to_ssa);
    NIR_PASS(_, nir, nir_lower_reg_intrinsics_to_ssa);
@@ -2577,7 +2570,7 @@ ttn_finalize_nir(struct ttn_compile *c, struct pipe_screen *screen)
       NIR_PASS(_, nir, nir_lower_samplers);
 
    if (screen->finalize_nir) {
-      screen->finalize_nir(screen, nir);
+      screen->finalize_nir(screen, nir, true);
    } else {
       ttn_optimize_nir(nir);
    }

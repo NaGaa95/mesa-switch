@@ -63,9 +63,6 @@ struct ac_shader_abi {
    /* Clamp div by 0 (so it won't produce NaN) */
    bool clamp_div_by_zero;
 
-   /* Whether to inline the compute dispatch size in user sgprs. */
-   bool load_grid_size_from_user_sgpr;
-
    /* Whether to disable anisotropic filtering. */
    bool disable_aniso_single_level;
 };

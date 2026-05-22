@@ -5,10 +5,11 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include "pan_compile.h"
 #include "compiler/glsl_types.h"
 #include "compiler/spirv/nir_spirv.h"
-#include "panfrost/compiler/bifrost_compile.h"
+#include "panfrost/compiler/bifrost/bifrost_compile.h"
+#include "panfrost/compiler/pan_compiler.h"
+#include "panfrost/compiler/pan_nir.h"
 #include "nir.h"
 #include "nir_builder.h"
 #include "nir_builder_opcodes.h"
@@ -24,7 +25,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include "panfrost/util/pan_ir.h"
 #include "util/macros.h"
 #include "util/u_dynarray.h"
 #include "util/u_printf.h"
@@ -65,7 +65,7 @@ optimize(nir_shader *nir)
       NIR_PASS(progress, nir, nir_lower_var_copies);
       NIR_PASS(progress, nir, nir_lower_vars_to_ssa);
 
-      NIR_PASS(progress, nir, nir_copy_prop);
+      NIR_PASS(progress, nir, nir_opt_copy_prop);
       NIR_PASS(progress, nir, nir_opt_remove_phis);
       NIR_PASS(progress, nir, nir_lower_all_phis_to_scalar);
       NIR_PASS(progress, nir, nir_opt_dce);
@@ -101,12 +101,6 @@ compile(void *memctx, const uint32_t *spirv, size_t spirv_size, unsigned arch)
    nir_shader *nir =
       spirv_to_nir(spirv, spirv_size / 4, NULL, 0, MESA_SHADER_KERNEL,
                    "library", &spirv_options, nir_options);
-   /* Workgroup size may be different between different entrypoints, so we
-    * mark it as variable to prevent it from being lowered to a constant while
-    * we are still processing all entrypoints together. This is tempoary,
-    * nir_precompiled_build_variant will set the fixed workgroup size for each
-    * entrypoint and set workgroup_size_variable back to false. */
-   nir->info.workgroup_size_variable = true;
    nir_validate_shader(nir, "after spirv_to_nir");
    nir_validate_ssa_dominance(nir, "after spirv_to_nir");
    ralloc_steal(memctx, nir);
@@ -132,7 +126,7 @@ compile(void *memctx, const uint32_t *spirv, size_t spirv_size, unsigned arch)
    NIR_PASS(_, nir, nir_lower_returns);
    NIR_PASS(_, nir, nir_inline_functions);
    nir_remove_non_exported(nir);
-   NIR_PASS(_, nir, nir_copy_prop);
+   NIR_PASS(_, nir, nir_opt_copy_prop);
    NIR_PASS(_, nir, nir_opt_deref);
 
    /* We can't deal with constant data, get rid of it */
@@ -198,6 +192,13 @@ lower_sysvals(nir_builder *b, nir_intrinsic_instr *intr, UNUSED void *_data)
       val = load_sysval_from_push_const(
          b, offsetof(struct bifrost_precompiled_kernel_sysvals, num_workgroups),
          bit_size, num_comps);
+      break;
+
+   case nir_intrinsic_load_ro_sink_address_poly:
+      /* Any address with the top bit set is treated as OOB by the hardware
+       * and any reads return zero.
+       */
+      val = nir_imm_int64(b, PAN_SHADER_OOB_ADDRESS);
       break;
 
    case nir_intrinsic_load_printf_buffer_address:
@@ -352,10 +353,10 @@ main(int argc, const char **argv)
             libfunc, MESA_SHADER_COMPUTE, v, get_compiler_options(target_arch),
             &opt, load_kernel_input);
 
-         unsigned gpu_prod_id = (target_arch & 0xf) << 12;
+         uint64_t target_gpu_id = (target_arch & 0xf) << 28;
 
          struct pan_compile_inputs inputs = {
-            .gpu_id = gpu_prod_id << 16,
+            .gpu_id = target_gpu_id,
             .gpu_variant = 0,
          };
 
@@ -418,17 +419,7 @@ main(int argc, const char **argv)
          NIR_PASS(_, s, nir_lower_vars_to_explicit_types, nir_var_mem_shared,
                   glsl_get_cl_type_size_align);
 
-         /* Unroll loops before lowering indirects */
-         bool progress = false;
-         do {
-            progress = false;
-            NIR_PASS(progress, s, nir_opt_loop);
-         } while (progress);
-
-         pan_shader_preprocess(s, inputs.gpu_id);
-         pan_shader_lower_texture_early(s, inputs.gpu_id);
-         pan_shader_lower_texture(s, inputs.gpu_id);
-         pan_shader_postprocess(s, inputs.gpu_id);
+         pan_preprocess_nir(s, inputs.gpu_id);
 
          NIR_PASS(_, s, nir_opt_deref);
          NIR_PASS(_, s, nir_lower_vars_to_ssa);
@@ -437,6 +428,8 @@ main(int argc, const char **argv)
                      nir_var_mem_shared | nir_var_mem_global,
                   nir_address_format_62bit_generic);
 
+         pan_postprocess_nir(s, inputs.gpu_id);
+
          NIR_PASS(_, s, nir_shader_intrinsics_pass, lower_sysvals,
                   nir_metadata_control_flow, NULL);
 
@@ -444,7 +437,12 @@ main(int argc, const char **argv)
 
          struct util_dynarray shader_binary;
          struct pan_shader_info shader_info = {0};
-         util_dynarray_init(&shader_binary, NULL);
+         shader_binary = UTIL_DYNARRAY_INIT;
+
+         if (target_arch >= 9)
+            shader_info.cs.allow_merging_workgroups =
+               valhall_can_merge_workgroups(s);
+
          pan_shader_compile(clone, &inputs, &shader_binary, &shader_info);
 
          assert(shader_info.push.count * 4 <=

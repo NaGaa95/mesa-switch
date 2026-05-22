@@ -128,7 +128,7 @@ static struct zink_framebuffer_clear_data *
 add_new_clear(struct zink_framebuffer_clear *fb_clear)
 {
    struct zink_framebuffer_clear_data cd = {0};
-   util_dynarray_append(&fb_clear->clears, struct zink_framebuffer_clear_data, cd);
+   util_dynarray_append(&fb_clear->clears, cd);
    return zink_fb_clear_element(fb_clear, zink_fb_clear_count(fb_clear) - 1);
 }
 
@@ -148,6 +148,8 @@ get_clear_data(struct zink_context *ctx, struct zink_framebuffer_clear *fb_clear
 void
 zink_clear(struct pipe_context *pctx,
            unsigned buffers,
+           uint32_t color_clear_mask,
+           uint8_t stencil_clear_mask,
            const struct pipe_scissor_state *scissor_state,
            const union pipe_color_union *pcolor,
            double depth, unsigned stencil)
@@ -204,7 +206,7 @@ zink_clear(struct pipe_context *pctx,
    if (ctx->in_rp) {
       if (buffers & PIPE_CLEAR_DEPTHSTENCIL && (ctx->zsbuf_unused || ctx->zsbuf_readonly)) {
          /* this will need a layout change */
-         assert(!ctx->track_renderpasses);
+         assert(!ctx->track_renderpasses || screen->driver_workarounds.general_layout);
          zink_batch_no_rp(ctx);
       } else {
          clear_in_rp(pctx, buffers, scissor_state, pcolor, depth, stencil);
@@ -243,7 +245,7 @@ zink_clear(struct pipe_context *pctx,
          }
       }
       if (void_clears)
-         pctx->clear(pctx, void_clears, NULL, &color, 0, 0);
+         pctx->clear(pctx, void_clears, 0xffffffff, 0, NULL, &color, 0, 0);
    }
 
    if (buffers & PIPE_CLEAR_COLOR) {
@@ -378,6 +380,7 @@ out:
                   clear_bits |= zsclear->zs.bits;
                }
                zink_clear(&ctx->base, clear_bits,
+                          0xffffffff, 0xff,
                           clear->has_scissor ? &clear->scissor : NULL,
                           &clear->color,
                           zsclear ? zsclear->zs.depth : 0,
@@ -387,6 +390,7 @@ out:
             for (int j = !zink_fb_clear_first_needs_explicit(zs_clear); j < zink_fb_clear_count(zs_clear); j++) {
                struct zink_framebuffer_clear_data *clear = zink_fb_clear_element(zs_clear, j);
                zink_clear(&ctx->base, clear->zs.bits,
+                          0xffffffff, 0xff,
                           clear->has_scissor ? &clear->scissor : NULL,
                           NULL,
                           clear->zs.depth,
@@ -419,7 +423,7 @@ static void
 set_clear_fb(struct pipe_context *pctx, struct pipe_surface *psurf, struct pipe_surface *zsurf)
 {
    struct pipe_framebuffer_state fb_state = {0};
-   uint16_t width, height;
+   unsigned width, height;
    if (psurf)
       pipe_surface_size(psurf, &width, &height);
    else
@@ -581,7 +585,7 @@ zink_clear_render_target(struct pipe_context *pctx, struct pipe_surface *dst,
    struct pipe_scissor_state scissor = {dstx, dsty, dstx + width, dsty + height};
    zink_blit_barriers(ctx, NULL, zink_resource(pres), false);
    ctx->blitting = true;
-   pctx->clear(pctx, PIPE_CLEAR_COLOR0, &scissor, color, 0, 0);
+   pctx->clear(pctx, PIPE_CLEAR_COLOR0, 0xf, 0, &scissor, color, 0, 0);
    util_blitter_restore_fb_state(ctx->blitter);
    ctx->blitting = false;
    if (!render_condition_enabled && render_condition_active)
@@ -618,7 +622,7 @@ zink_clear_depth_stencil(struct pipe_context *pctx, struct pipe_surface *dst,
       }
    }
    struct pipe_scissor_state scissor = {dstx, dsty, dstx + width, dsty + height};
-   pctx->clear(pctx, clear_flags, &scissor, NULL, depth, stencil);
+   pctx->clear(pctx, clear_flags, 0, 0xff, &scissor, NULL, depth, stencil);
    if (!cur_attachment && !blitting) {
       util_blitter_restore_fb_state(ctx->blitter);
       ctx->blitting = false;

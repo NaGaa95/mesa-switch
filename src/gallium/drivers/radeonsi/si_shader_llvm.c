@@ -94,7 +94,7 @@ static bool si_compile_llvm(struct si_screen *sscreen, struct si_shader_binary *
 
    struct ac_rtld_binary rtld;
    if (!ac_rtld_open(&rtld, (struct ac_rtld_open_info){
-                               .info = &sscreen->info,
+                               .gfx_level = sscreen->info.gfx_level,
                                .shader_type = stage,
                                .wave_size = ac->wave_size,
                                .num_parts = 1,
@@ -102,7 +102,7 @@ static bool si_compile_llvm(struct si_screen *sscreen, struct si_shader_binary *
                                .elf_sizes = &binary->code_size}))
       return false;
 
-   bool ok = ac_rtld_read_config(&sscreen->info, &rtld, conf);
+   bool ok = ac_rtld_read_config(&sscreen->info.compiler_info, &rtld, conf);
    ac_rtld_close(&rtld);
    return ok;
 }
@@ -116,7 +116,7 @@ static void si_llvm_context_init(struct si_shader_context *ctx, struct si_screen
    ctx->screen = sscreen;
    ctx->compiler = compiler;
 
-   ac_llvm_context_init(&ctx->ac, compiler, &sscreen->info, float_mode,
+   ac_llvm_context_init(&ctx->ac, compiler, &sscreen->info.compiler_info, float_mode,
                         wave_size, exports_color_null, exports_mrtz);
 }
 
@@ -405,7 +405,7 @@ static LLVMValueRef si_llvm_load_sampler_desc(struct ac_shader_abi *abi, LLVMVal
          break;
       case AC_DESC_FMASK:
          /* The FMASK is at [8:15]. */
-         assert(ctx->screen->info.gfx_level < GFX11);
+         assert(ctx->screen->info.compiler_info.has_fmask);
          index = ac_build_imad(&ctx->ac, index, LLVMConstInt(ctx->ac.i32, 2, 0), ctx->ac.i32_1);
          break;
       case AC_DESC_SAMPLER:
@@ -450,9 +450,9 @@ static bool si_llvm_translate_nir(struct si_shader_context *ctx, struct si_shade
    case MESA_SHADER_FRAGMENT: {
       ctx->abi.kill_ps_if_inf_interp =
          ctx->screen->options.no_infinite_interp &&
-         (ctx->shader->selector->info.uses_persp_center ||
-          ctx->shader->selector->info.uses_persp_centroid ||
-          ctx->shader->selector->info.uses_persp_sample);
+         (ctx->shader->selector->info.uses_sysval_persp_center ||
+          ctx->shader->selector->info.uses_sysval_persp_centroid ||
+          ctx->shader->selector->info.uses_sysval_persp_sample);
       break;
    }
 
@@ -544,7 +544,6 @@ static bool si_llvm_translate_nir(struct si_shader_context *ctx, struct si_shade
 
    ctx->abi.clamp_shadow_reference = true;
    ctx->abi.robust_buffer_access = true;
-   ctx->abi.load_grid_size_from_user_sgpr = true;
    ctx->abi.clamp_div_by_zero = ctx->screen->options.clamp_div_by_zero ||
                                 info->options & SI_PROFILE_CLAMP_DIV_BY_ZERO;
    ctx->abi.disable_aniso_single_level = true;
@@ -675,7 +674,36 @@ bool si_llvm_compile_shader(struct si_screen *sscreen, struct ac_llvm_compiler *
       assert_registers_equal(sscreen, R_0286D0_SPI_PS_INPUT_ADDR, shader->config.spi_ps_input_addr,
                              config.spi_ps_input_addr, false);
    }
+
+   /* Set the FP ALU behavior. */
+   /* By default, we disable denormals for FP32 and enable them for FP16 and FP64
+    * for performance and correctness reasons. FP32 denormals can't be enabled because
+    * they break output modifiers and v_mad_f32 and are very slow on GFX6-7.
+    *
+    * float_controls_execution_mode defines the set of valid behaviors. Contradicting flags
+    * can be set simultaneously, which means we are allowed to choose, but not really because
+    * some options cause GLCTS failures.
+    */
+   config.float_mode = V_00B028_FP_16_64_DENORMS;
+
+   if (!(nir->info.float_controls_execution_mode & FLOAT_CONTROLS_ROUNDING_MODE_RTE_FP32) &&
+       nir->info.float_controls_execution_mode & FLOAT_CONTROLS_ROUNDING_MODE_RTZ_FP32)
+      config.float_mode |= V_00B028_FP_32_ROUND_TOWARDS_ZERO;
+
+   if (!(nir->info.float_controls_execution_mode & (FLOAT_CONTROLS_ROUNDING_MODE_RTE_FP16 |
+                                                    FLOAT_CONTROLS_ROUNDING_MODE_RTE_FP64)) &&
+       nir->info.float_controls_execution_mode & (FLOAT_CONTROLS_ROUNDING_MODE_RTZ_FP16 |
+                                                  FLOAT_CONTROLS_ROUNDING_MODE_RTZ_FP64))
+      config.float_mode |= V_00B028_FP_16_64_ROUND_TOWARDS_ZERO;
+
+   if (!(nir->info.float_controls_execution_mode & (FLOAT_CONTROLS_DENORM_PRESERVE_FP16 |
+                                                    FLOAT_CONTROLS_DENORM_PRESERVE_FP64)) &&
+       nir->info.float_controls_execution_mode & (FLOAT_CONTROLS_DENORM_FLUSH_TO_ZERO_FP16 |
+                                                  FLOAT_CONTROLS_DENORM_FLUSH_TO_ZERO_FP64))
+      config.float_mode &= ~V_00B028_FP_16_64_DENORMS;
+
    shader->config = config;
+
    return true;
 }
 

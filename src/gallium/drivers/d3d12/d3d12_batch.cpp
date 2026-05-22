@@ -59,16 +59,24 @@ d3d12_init_batch(struct d3d12_context *ctx, struct d3d12_batch *batch)
    batch->bos = _mesa_hash_table_create(NULL, _mesa_hash_pointer,
                                         _mesa_key_pointer_equal);
 
-   util_dynarray_init(&batch->local_bos, NULL);
+   batch->local_bos = UTIL_DYNARRAY_INIT;
 
+#ifdef HAVE_GALLIUM_D3D12_GRAPHICS
    batch->surfaces = _mesa_set_create(NULL, _mesa_hash_pointer,
                                       _mesa_key_pointer_equal);
+#endif // HAVE_GALLIUM_D3D12_GRAPHICS
+
    batch->objects = _mesa_set_create(NULL,
                                      _mesa_hash_pointer,
                                      _mesa_key_pointer_equal);
 
-   if (!batch->bos || !batch->surfaces || !batch->objects)
+if (!batch->bos || !batch->objects)
       return false;
+
+#ifdef HAVE_GALLIUM_D3D12_GRAPHICS
+   if (!batch->surfaces)
+      return false;
+#endif // HAVE_GALLIUM_D3D12_GRAPHICS
 
 #ifdef HAVE_GALLIUM_D3D12_GRAPHICS
    if (screen->max_feature_level >= D3D_FEATURE_LEVEL_11_0) {
@@ -89,7 +97,7 @@ d3d12_init_batch(struct d3d12_context *ctx, struct d3d12_batch *batch)
       if (!batch->sampler_tables || !batch->sampler_views || !batch->view_heap || !batch->queries)
          return false;
 
-      util_dynarray_init(&batch->zombie_samplers, NULL);
+      batch->zombie_samplers = UTIL_DYNARRAY_INIT;
 
       batch->sampler_heap =
          d3d12_descriptor_heap_new(screen->dev,
@@ -136,13 +144,6 @@ delete_sampler_view(set_entry *entry)
 }
 
 static void
-delete_surface(set_entry *entry)
-{
-   struct pipe_surface *surf = (struct pipe_surface *)entry->key;
-   pipe_surface_reference(&surf, NULL);
-}
-
-static void
 delete_object(set_entry *entry)
 {
    ID3D12Object *object = (ID3D12Object *)entry->key;
@@ -173,7 +174,14 @@ d3d12_reset_batch(struct d3d12_context *ctx, struct d3d12_batch *batch, uint64_t
    }
 
    _mesa_hash_table_clear(batch->bos, delete_bo_entry);
-   _mesa_set_clear(batch->surfaces, delete_surface);
+
+#ifdef HAVE_GALLIUM_D3D12_GRAPHICS
+   set_foreach_remove(batch->surfaces, entry) {
+      struct pipe_surface *surf = (struct pipe_surface *)entry->key;
+      pipe_surface_reference(&surf, NULL, &ctx->base, d3d12_surface_destroy);
+   }
+#endif // HAVE_GALLIUM_D3D12_GRAPHICS
+
    _mesa_set_clear(batch->objects, delete_object);
    
    util_dynarray_foreach(&batch->local_bos, d3d12_bo*, bo) {
@@ -221,9 +229,9 @@ d3d12_destroy_batch(struct d3d12_context *ctx, struct d3d12_batch *batch)
       _mesa_set_destroy(batch->queries, NULL);
       util_dynarray_fini(&batch->zombie_samplers);
    }
+   _mesa_set_destroy(batch->surfaces, NULL);
 #endif // HAVE_GALLIUM_D3D12_GRAPHICS
 
-   _mesa_set_destroy(batch->surfaces, NULL);
    _mesa_set_destroy(batch->objects, NULL);
    util_dynarray_fini(&batch->local_bos);
 }
@@ -356,7 +364,7 @@ d3d12_batch_acquire_reference(struct d3d12_batch *batch,
    if (batch->ctx_id != D3D12_CONTEXT_NO_ID) {
       if ((bo->local_reference_mask[batch->ctx_id] & (1 << batch->ctx_index)) == 0) {
          d3d12_bo_reference(bo);
-         util_dynarray_append(&batch->local_bos, d3d12_bo*, bo);
+         util_dynarray_append(&batch->local_bos, bo);
          bo->local_reference_mask[batch->ctx_id] |= (1 << batch->ctx_index);
          bo->local_reference_state[batch->ctx_id][batch->ctx_index] = batch_bo_reference_none;
       }

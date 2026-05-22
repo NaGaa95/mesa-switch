@@ -78,7 +78,8 @@ void vpe10_calculate_dst_viewport_and_active(
     struct segment_ctx *segment_ctx, uint32_t max_seg_width);
 
 void vpe10_create_stream_ops_config(struct vpe_priv *vpe_priv, uint32_t pipe_idx,
-    struct stream_ctx *stream_ctx, struct vpe_cmd_input *cmd_input, enum vpe_cmd_ops ops);
+    struct stream_ctx *stream_ctx, struct vpe_cmd_input *cmd_input, enum vpe_cmd_ops ops,
+    enum mpcc_blend_mode blend_mode);
 
 void vpe10_get_bufs_req(struct vpe_priv *vpe_priv, struct vpe_bufs_req *req);
 
@@ -105,6 +106,9 @@ bool vpe10_validate_cached_param(struct vpe_priv *vpe_priv, const struct vpe_bui
 void vpe10_setup_check_funcs(struct vpe_check_support_funcs *funcs);
 
 const struct vpe_caps *vpe10_get_capability(void);
+
+enum vpe_status vpe10_calculate_shaper(struct vpe_priv *vpe_priv, struct stream_ctx *stream_ctx);
+
 #ifdef __cplusplus
 }
 #endif

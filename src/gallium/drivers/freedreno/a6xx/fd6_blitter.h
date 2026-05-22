@@ -18,7 +18,7 @@
 
 template <chip CHIP>
 void fd6_blitter_init(struct pipe_context *pctx);
-unsigned fd6_tile_mode_for_format(enum pipe_format pfmt);
+unsigned fd6_tile_mode_for_format(const struct fd_dev_info *info, enum pipe_format pfmt);
 unsigned fd6_tile_mode(const struct pipe_resource *tmpl);
 
 /*
@@ -27,7 +27,7 @@ unsigned fd6_tile_mode(const struct pipe_resource *tmpl);
  */
 
 template <chip CHIP>
-void fd6_clear_lrz(struct fd_batch *batch, struct fd_resource *zsbuf,
+void fd6_clear_lrz(fd_cs &cs, struct fd_resource *zsbuf,
                    struct fd_bo *lrz, double depth) assert_dt;
 template <chip CHIP>
 void fd6_clear_surface(struct fd_context *ctx, fd_cs &cs,

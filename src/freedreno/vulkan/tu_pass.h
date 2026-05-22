@@ -22,6 +22,8 @@ enum tu_gmem_layout
    TU_GMEM_LAYOUT_COUNT,
 };
 
+constexpr uint32_t TU_GMEM_LAYOUT_DIVISOR_MAX = 6; /* 1x (no divisor), 2 (1/2), 3 (1/3) */
+
 struct tu_subpass_barrier {
    VkPipelineStageFlags2 src_stage_mask;
    VkPipelineStageFlags2 dst_stage_mask;
@@ -48,6 +50,7 @@ struct tu_subpass
    uint32_t input_count;
    uint32_t color_count;
    uint32_t resolve_count;
+   uint32_t unresolve_count;
    bool resolve_depth_stencil;
 
    bool legacy_dithering_enabled;
@@ -64,6 +67,7 @@ struct tu_subpass
    struct tu_subpass_attachment *input_attachments;
    struct tu_subpass_attachment *color_attachments;
    struct tu_subpass_attachment *resolve_attachments;
+   struct tu_subpass_attachment *unresolve_attachments;
    struct tu_subpass_attachment depth_stencil_attachment;
 
    uint32_t fsr_attachment;
@@ -79,6 +83,8 @@ struct tu_subpass
     */
    bool depth_used;
    bool stencil_used;
+
+   bool custom_resolve;
 
    VkSampleCountFlagBits samples;
 
@@ -99,6 +105,9 @@ struct tu_render_pass_attachment
     * determine which views to apply loadOp/storeOp to.
     */
    uint32_t used_views;
+   /* All views where this attachment is used as a resolve attachment.
+    */
+   uint32_t resolve_views;
    /* The internal MSRTSS attachment to clear when the user says to clear
     * this attachment. Clear values must be remapped to this attachment.
     */
@@ -130,7 +139,7 @@ struct tu_render_pass
 {
    struct vk_object_base base;
 
-   uint32_t attachment_count;
+   uint32_t attachment_count, user_attachment_count;
    uint32_t subpass_count;
    uint32_t gmem_pixels[TU_GMEM_LAYOUT_COUNT];
    uint32_t tile_align_w;
@@ -168,5 +177,8 @@ void tu_setup_dynamic_inheritance(struct tu_cmd_buffer *cmd_buffer,
 
 uint32_t
 tu_subpass_get_attachment_to_resolve(const struct tu_subpass *subpass, uint32_t index);
+
+uint32_t
+tu_subpass_get_attachment_to_unresolve(const struct tu_subpass *subpass, uint32_t index);
 
 #endif /* TU_PASS_H */

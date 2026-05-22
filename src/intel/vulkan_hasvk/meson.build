@@ -21,12 +21,13 @@ icd_file_name = libname_prefix + 'vulkan_intel_hasvk.' + libname_suffix
 intel_hasvk_icd = custom_target(
   'intel_hasvk_icd',
   input : [vk_icd_gen, vk_api_xml],
-  output : 'intel_hasvk_icd.@0@.json'.format(host_machine.cpu()),
+  output : 'intel_hasvk_icd.' + vulkan_manifest_suffix,
   command : [
     prog_python, '@INPUT0@',
     '--api-version', '1.3', '--xml', '@INPUT1@',
     '--sizeof-pointer', sizeof_pointer,
-    '--lib-path', vulkan_icd_lib_path / icd_file_name,
+    '--icd-lib-path', vulkan_icd_lib_path,
+    '--icd-filename', icd_file_name,
     '--out', '@OUTPUT@',
   ],
   build_by_default : true,
@@ -44,15 +45,14 @@ _dev_icd = custom_target(
     prog_python, '@INPUT0@',
     '--api-version', '1.3', '--xml', '@INPUT1@',
     '--sizeof-pointer', sizeof_pointer,
-    '--lib-path', meson.current_build_dir() / icd_file_name,
+    '--icd-lib-path', meson.current_build_dir(),
+    '--icd-filename', icd_file_name,
     '--out', '@OUTPUT@',
   ],
   build_by_default : true,
 )
 
 devenv.append('VK_DRIVER_FILES', _dev_icd.full_path())
-# Deprecated: replaced by VK_DRIVER_FILES above
-devenv.append('VK_ICD_FILENAMES', _dev_icd.full_path())
 
 libanv_per_hw_ver_libs = []
 anv_per_hw_ver_files = files(

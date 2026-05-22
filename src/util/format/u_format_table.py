@@ -110,6 +110,8 @@ def has_access(format):
         'g8r8_g8b8_422_unorm',
         'g8b8_g8r8_422_unorm',
         'b8g8_r8g8_422_unorm',
+        'r16g16_r16b16_422_unorm',
+        'x6r10x6g10_x6r10x6b10_422_unorm',
         'x6g10_x6b10x6r10_420_unorm',
         'x4g12_x4b12x4r12_420_unorm',
         'y8_400_unorm',
@@ -168,8 +170,8 @@ def write_format_enum_section(formats, type_name=None, max_formats=None):
     for idx, f in enumerate(formats):
         # Vertex formats must be first and must be <= 255.
         if idx == 0 and type_name != None:
-            print('   PIPE_FORMAT_%s_START,' % (type_name), file=sys.stdout3)
-            print('   %s = PIPE_FORMAT_%s_START,' % (f, type_name), file=sys.stdout3)
+            print('   %s,' % (f), file=sys.stdout3)
+            print('   PIPE_FORMAT_%s_START = %s,' % (type_name, f), file=sys.stdout3)
         elif idx == len(formats) - 1 and type_name != None:
             print('   %s,' % (f), file=sys.stdout3)
             print('   PIPE_FORMAT_%s_END = %s,' % (type_name, f), file=sys.stdout3)

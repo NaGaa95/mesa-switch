@@ -367,7 +367,7 @@ lower_rq_load(nir_builder *b, nir_def *index, nir_intrinsic_instr *instr,
    case nir_ray_query_value_intersection_instance_custom_index: {
       nir_def *instance_node_addr = rq_load_var(b, index, intersection->instance_addr);
       return nir_iand_imm(b,
-                          nir_build_load_global(b, 1, 32,
+                          nir_load_global(b, 1, 32,
                                                 nir_iadd_imm(b, instance_node_addr,
                                                              offsetof(struct lvp_bvh_instance_node,
                                                                       custom_instance_and_mask))),
@@ -375,7 +375,7 @@ lower_rq_load(nir_builder *b, nir_def *index, nir_intrinsic_instr *instr,
    }
    case nir_ray_query_value_intersection_instance_id: {
       nir_def *instance_node_addr = rq_load_var(b, index, intersection->instance_addr);
-      return nir_build_load_global(
+      return nir_load_global(
          b, 1, 32,
          nir_iadd_imm(b, instance_node_addr, offsetof(struct lvp_bvh_instance_node, instance_id)));
    }
@@ -397,7 +397,7 @@ lower_rq_load(nir_builder *b, nir_def *index, nir_intrinsic_instr *instr,
       nir_def *instance_node_addr = rq_load_var(b, index, intersection->instance_addr);
       nir_def *rows[3];
       for (unsigned r = 0; r < 3; ++r)
-         rows[r] = nir_build_load_global(
+         rows[r] = nir_load_global(
             b, 4, 32,
             nir_iadd_imm(b, instance_node_addr,
                          offsetof(struct lvp_bvh_instance_node, otw_matrix) + r * 16));
@@ -655,6 +655,7 @@ lvp_nir_lower_ray_queries(struct nir_shader *shader)
    ralloc_free(query_ht);
 
    if (progress) {
+      NIR_PASS(_, shader, nir_lower_continue_constructs);
       NIR_PASS(_, shader, nir_lower_global_vars_to_local);
       NIR_PASS(_, shader, nir_lower_vars_to_ssa);
 

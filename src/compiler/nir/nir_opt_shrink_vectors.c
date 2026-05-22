@@ -94,7 +94,7 @@ shrink_dest_to_read_mask(nir_def *def, bool shrink_start)
    nir_intrinsic_instr *intr = NULL;
    nir_src *offset_src = NULL;
 
-   if (def->parent_instr->type == nir_instr_type_intrinsic) {
+   if (nir_def_is_intrinsic(def)) {
       intr = nir_def_as_intrinsic(def);
       offset_src = nir_get_io_offset_src(intr);
    }
@@ -172,6 +172,9 @@ shrink_intrinsic_to_non_sparse(nir_intrinsic_instr *instr)
       break;
    case nir_intrinsic_image_deref_sparse_load:
       instr->intrinsic = nir_intrinsic_image_deref_load;
+      break;
+   case nir_intrinsic_image_heap_sparse_load:
+      instr->intrinsic = nir_intrinsic_image_heap_load;
       break;
    default:
       break;
@@ -370,6 +373,7 @@ opt_shrink_vectors_intrinsic(nir_builder *b, nir_intrinsic_instr *instr,
    case nir_intrinsic_load_ssbo:
    case nir_intrinsic_load_ssbo_intel:
    case nir_intrinsic_load_push_constant:
+   case nir_intrinsic_load_push_data_intel:
    case nir_intrinsic_load_constant:
    case nir_intrinsic_load_shared:
    case nir_intrinsic_load_global:
@@ -390,6 +394,7 @@ opt_shrink_vectors_intrinsic(nir_builder *b, nir_intrinsic_instr *instr,
    case nir_intrinsic_image_sparse_load:
    case nir_intrinsic_bindless_image_sparse_load:
    case nir_intrinsic_image_deref_sparse_load:
+   case nir_intrinsic_image_heap_sparse_load:
       return shrink_intrinsic_to_non_sparse(instr);
    default:
       return false;
@@ -522,7 +527,7 @@ opt_shrink_vectors_phi(nir_builder *b, nir_phi_instr *instr)
          if (src_idx != alu->src[src_idx].swizzle[0]) {
             mask |= src_read_mask;
          }
-      } else if (!nir_alu_src_is_trivial_ssa(alu, src_idx)) {
+      } else if (!nir_alu_has_trivial_src(alu, src_idx)) {
          mask |= src_read_mask;
       }
    }
@@ -555,7 +560,7 @@ opt_shrink_vectors_phi(nir_builder *b, nir_phi_instr *instr)
     * used only in the phi, the movs will disappear later after copy propagate.
     */
    nir_foreach_phi_src(phi_src, instr) {
-      b->cursor = nir_after_instr_and_phis(phi_src->src.ssa->parent_instr);
+      b->cursor = nir_after_instr_and_phis(nir_def_instr(phi_src->src.ssa));
 
       nir_alu_src alu_src = {
          .src = nir_src_for_ssa(phi_src->src.ssa)

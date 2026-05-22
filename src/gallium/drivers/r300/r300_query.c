@@ -4,6 +4,7 @@
  */
 
 #include "util/u_memory.h"
+#include "util/os_time.h"
 
 #include "r300_context.h"
 #include "r300_screen.h"
@@ -142,6 +143,27 @@ static bool r300_get_query_result(struct pipe_context* pipe,
         return vresult->b;
     }
 
+    if (q->num_results == 0) {
+        if (wait) {
+            struct pipe_fence_handle *fence = NULL;
+
+            r300_flush(pipe, PIPE_FLUSH_ASYNC, &fence);
+            if (fence) {
+                pipe->screen->fence_finish(pipe->screen, pipe, fence,
+                                           OS_TIMEOUT_INFINITE);
+                pipe->screen->fence_reference(pipe->screen, &fence, NULL);
+            }
+        }
+
+        if (q->type == PIPE_QUERY_OCCLUSION_PREDICATE ||
+            q->type == PIPE_QUERY_OCCLUSION_PREDICATE_CONSERVATIVE) {
+            vresult->b = false;
+        } else {
+            vresult->u64 = 0;
+        }
+        return true;
+    }
+
     map = r300->rws->buffer_map(r300->rws, q->buf, &r300->cs,
                                 PIPE_MAP_READ |
                                 (!wait ? PIPE_MAP_DONTBLOCK : 0));
@@ -194,6 +216,19 @@ static void r300_render_condition(struct pipe_context *pipe,
 static void
 r300_set_active_query_state(struct pipe_context *pipe, bool enable)
 {
+    struct r300_context *r300 = r300_context(pipe);
+
+    if (enable) {
+        if (r300->blitter_saved_query && !r300->query_current) {
+            r300_resume_query(r300, r300->blitter_saved_query);
+            r300->blitter_saved_query = NULL;
+        }
+    } else {
+        if (r300->query_current && !r300->blitter_saved_query) {
+            r300->blitter_saved_query = r300->query_current;
+            r300_stop_query(r300);
+        }
+    }
 }
 
 void r300_init_query_functions(struct r300_context* r300)

@@ -1,24 +1,6 @@
 /*
  * Copyright (C) 2023 Collabora Ltd.
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
+ * SPDX-License-Identifier: MIT
  */
 
 #include "decode.h"
@@ -33,6 +15,7 @@
 #include "pan_csf.h"
 #include "pan_fb_preload.h"
 #include "pan_job.h"
+#include "pan_trace.h"
 
 #if PAN_ARCH < 10
 #error "CSF helpers are only used for gen >= 10"
@@ -167,8 +150,8 @@ csf_oom_handler_init(struct panfrost_context *ctx)
       cs_wait_slot(&b, 0);
 
       /* Run the fragment job and wait */
-      cs_select_sb_entries_for_async_ops(&b, 3);
-      cs_run_fragment(&b, MALI_TILE_RENDER_ORDER_Z_ORDER, false);
+      cs_select_endpoint_sb(&b, 3);
+      cs_run_fragment(&b, false, MALI_TILE_RENDER_ORDER_Z_ORDER);
       cs_wait_slot(&b, 3);
 
       /* Increment counter */
@@ -197,7 +180,7 @@ csf_oom_handler_init(struct panfrost_context *ctx)
 
       cs_wait_slot(&b, 0);
 
-      cs_select_sb_entries_for_async_ops(&b, 2);
+      cs_select_endpoint_sb(&b, 2);
    }
 
    assert(cs_is_valid(&b));
@@ -225,6 +208,8 @@ fail:
 void
 GENX(csf_cleanup_batch)(struct panfrost_batch *batch)
 {
+   PAN_TRACE_FUNC(PAN_TRACE_GL_CSF);
+
    if (batch->csf.cs.builder) {
       cs_builder_fini(batch->csf.cs.builder);
       free(batch->csf.cs.builder);
@@ -244,6 +229,8 @@ alloc_fbd(struct panfrost_batch *batch)
 int
 GENX(csf_init_batch)(struct panfrost_batch *batch)
 {
+   PAN_TRACE_FUNC(PAN_TRACE_GL_CSF);
+
    struct panfrost_device *dev = pan_device(batch->ctx->base.screen);
 
    /* Initialize the CS chunk pool. */
@@ -276,7 +263,7 @@ GENX(csf_init_batch)(struct panfrost_batch *batch)
 
    /* Set up entries */
    struct cs_builder *b = batch->csf.cs.builder;
-   cs_select_sb_entries_for_async_ops(b, 2);
+   cs_select_endpoint_sb(b, 2);
 
    batch->framebuffer = alloc_fbd(batch);
    if (!batch->framebuffer.gpu)
@@ -426,7 +413,7 @@ csf_submit_collect_wait_ops(struct panfrost_batch *batch,
          .timeline_value = bo_sync_point,
       };
 
-      util_dynarray_append(syncops, struct drm_panthor_sync_op, waitop);
+      util_dynarray_append(syncops, waitop);
    }
 
    if (vm_sync_wait_point > 0) {
@@ -437,7 +424,7 @@ csf_submit_collect_wait_ops(struct panfrost_batch *batch,
          .timeline_value = vm_sync_wait_point,
       };
 
-      util_dynarray_append(syncops, struct drm_panthor_sync_op, waitop);
+      util_dynarray_append(syncops, waitop);
    }
 
    if (ctx->in_sync_fd >= 0) {
@@ -452,7 +439,7 @@ csf_submit_collect_wait_ops(struct panfrost_batch *batch,
          .handle = ctx->in_sync_obj,
       };
 
-      util_dynarray_append(syncops, struct drm_panthor_sync_op, waitop);
+      util_dynarray_append(syncops, waitop);
 
       close(ctx->in_sync_fd);
       ctx->in_sync_fd = -1;
@@ -603,7 +590,7 @@ csf_submit_wait_and_dump(struct panfrost_batch *batch,
 
    /* Wait so we can get errors reported back */
    if (wait) {
-      int ret =
+      ASSERTED int ret =
          drmSyncobjTimelineWait(panfrost_device_fd(dev), &vm_sync_handle,
                                 &vm_sync_signal_point, 1, INT64_MAX, 0, NULL);
       assert(ret >= 0);
@@ -618,10 +605,8 @@ csf_submit_wait_and_dump(struct panfrost_batch *batch,
 
    /* Jobs won't be complete if blackhole rendering, that's ok */
    if (!ctx->is_noop && (dev->debug & PAN_DBG_SYNC) &&
-       *((uint64_t *)batch->csf.cs.state.cpu) != 0) {
+       *((uint64_t *)batch->csf.cs.state.cpu) != 0)
       crash = true;
-      dump = true;
-   }
 
    if (dump) {
       const struct drm_panthor_queue_submit *qsubmits =
@@ -647,6 +632,8 @@ csf_submit_wait_and_dump(struct panfrost_batch *batch,
 int
 GENX(csf_submit_batch)(struct panfrost_batch *batch)
 {
+   PAN_TRACE_FUNC(PAN_TRACE_GL_CSF);
+
    int ret;
 
    /* Close the batch before submitting. */
@@ -661,7 +648,7 @@ GENX(csf_submit_batch)(struct panfrost_batch *batch)
    uint32_t vm_sync_handle = panthor_kmod_vm_sync_handle(dev->kmod.vm);
    struct util_dynarray syncops;
 
-   util_dynarray_init(&syncops, NULL);
+   syncops = UTIL_DYNARRAY_INIT;
 
    ret = csf_submit_collect_wait_ops(batch, &syncops, vm_sync_handle);
    if (ret)
@@ -677,7 +664,7 @@ GENX(csf_submit_batch)(struct panfrost_batch *batch)
       .timeline_value = vm_sync_signal_point,
    };
 
-   util_dynarray_append(&syncops, struct drm_panthor_sync_op, signalop);
+   util_dynarray_append(&syncops, signalop);
 
    struct drm_panthor_queue_submit qsubmit;
    struct drm_panthor_group_submit gsubmit;
@@ -759,6 +746,8 @@ GENX(csf_prepare_tiler)(struct panfrost_batch *batch, struct pan_fb_info *fb)
 void
 GENX(csf_preload_fb)(struct panfrost_batch *batch, struct pan_fb_info *fb)
 {
+   PAN_TRACE_FUNC(PAN_TRACE_GL_CSF);
+
    struct panfrost_device *dev = pan_device(batch->ctx->base.screen);
 
    GENX(pan_preload_fb)
@@ -775,6 +764,8 @@ void
 GENX(csf_emit_fbds)(struct panfrost_batch *batch, struct pan_fb_info *fb,
                     struct pan_tls_info *tls)
 {
+   PAN_TRACE_FUNC(PAN_TRACE_GL_CSF);
+
    struct panfrost_device *dev = pan_device(batch->ctx->base.screen);
 
    /* Default framebuffer descriptor */
@@ -851,6 +842,8 @@ void
 GENX(csf_emit_fragment_job)(struct panfrost_batch *batch,
                             const struct pan_fb_info *pfb)
 {
+   PAN_TRACE_FUNC(PAN_TRACE_GL_CSF);
+
    struct cs_builder *b = batch->csf.cs.builder;
    struct pan_csf_tiler_oom_ctx *oom_ctx = batch->csf.tiler_oom_ctx.cpu;
 
@@ -884,7 +877,7 @@ GENX(csf_emit_fragment_job)(struct panfrost_batch *batch,
    }
 
    /* Run the fragment job and wait */
-   cs_run_fragment(b, MALI_TILE_RENDER_ORDER_Z_ORDER, false);
+   cs_run_fragment(b, false, MALI_TILE_RENDER_ORDER_Z_ORDER);
    cs_wait_slot(b, 2);
 
    /* Gather freed heap chunks and add them to the heap context free list
@@ -930,6 +923,8 @@ void
 GENX(csf_launch_grid)(struct panfrost_batch *batch,
                       const struct pipe_grid_info *info)
 {
+   PAN_TRACE_FUNC(PAN_TRACE_GL_CSF);
+
    /* Empty compute programs are invalid and don't make sense */
    if (batch->rsd[MESA_SHADER_COMPUTE] == 0)
       return;
@@ -971,8 +966,8 @@ GENX(csf_launch_grid)(struct panfrost_batch *batch,
    cs_move32_to(b, cs_sr_reg32(b, COMPUTE, JOB_OFFSET_Z), 0);
 
    unsigned threads_per_wg = info->block[0] * info->block[1] * info->block[2];
-   unsigned max_thread_cnt =
-      pan_compute_max_thread_count(&dev->kmod.props, cs->info.work_reg_count);
+   unsigned max_thread_cnt = pan_compute_max_thread_count(
+      &dev->kmod.dev->props, cs->info.work_reg_count);
 
    if (info->indirect) {
       /* Load size in workgroups per dimension from memory */
@@ -1052,6 +1047,8 @@ void
 GENX(csf_launch_xfb)(struct panfrost_batch *batch,
                      const struct pipe_draw_info *info, unsigned count)
 {
+   PAN_TRACE_FUNC(PAN_TRACE_GL_CSF);
+
    struct cs_builder *b = batch->csf.cs.builder;
 
    cs_move64_to(b, cs_sr_reg64(b, COMPUTE, TSD_0), batch->tls.gpu);
@@ -1120,7 +1117,7 @@ csf_emit_draw_state(struct panfrost_batch *batch,
    struct panfrost_compiled_shader *vs = ctx->prog[MESA_SHADER_VERTEX];
    struct panfrost_compiled_shader *fs = ctx->prog[MESA_SHADER_FRAGMENT];
 
-   bool idvs = vs->info.vs.idvs;
+   ASSERTED bool idvs = vs->info.vs.idvs;
    bool fs_required = panfrost_fs_required(
       fs, ctx->blend, &ctx->pipe_framebuffer, ctx->depth_stencil);
    bool secondary_shader = vs->info.vs.secondary_enable && fs_required;
@@ -1170,9 +1167,9 @@ csf_emit_draw_state(struct panfrost_batch *batch,
    cs_move64_to(b, cs_sr_reg64(b, IDVS, SCISSOR_BOX), *sbd);
 
 #if PAN_ARCH >= 12
-   uint64_t *avalon_viewport = (uint64_t *)batch->avalon_viewport;
-   cs_move64_to(b, cs_sr_reg64(b, IDVS, VIEWPORT_HIGH), avalon_viewport[0]);
-   cs_move64_to(b, cs_sr_reg64(b, IDVS, VIEWPORT_LOW), avalon_viewport[1]);
+   uint64_t *fifthgen_viewport = (uint64_t *)batch->fifthgen_viewport;
+   cs_move64_to(b, cs_sr_reg64(b, IDVS, VIEWPORT_HIGH), fifthgen_viewport[0]);
+   cs_move64_to(b, cs_sr_reg64(b, IDVS, VIEWPORT_LOW), fifthgen_viewport[1]);
 #else
    cs_move32_to(b, cs_sr_reg32(b, IDVS, LOW_DEPTH_CLAMP),
                 fui(batch->minimum_z));
@@ -1180,14 +1177,14 @@ csf_emit_draw_state(struct panfrost_batch *batch,
                 fui(batch->maximum_z));
 #endif
 
-   if (ctx->occlusion_query && ctx->active_queries) {
+   if (panfrost_occlusion_query_active(ctx)) {
       struct panfrost_resource *rsrc = pan_resource(ctx->occlusion_query->rsrc);
       cs_move64_to(b, cs_sr_reg64(b, IDVS, OQ), rsrc->plane.base);
       panfrost_batch_write_rsrc(ctx->batch, rsrc, MESA_SHADER_FRAGMENT);
    }
 
    cs_move32_to(b, cs_sr_reg32(b, IDVS, VARY_SIZE),
-                panfrost_vertex_attribute_stride(vs, fs));
+                vs->info.varyings.formats.generic_size_B);
    cs_move64_to(b, cs_sr_reg64(b, IDVS, BLEND_DESC),
                 batch->blend | MAX2(batch->key.nr_cbufs, 1));
    cs_move64_to(b, cs_sr_reg64(b, IDVS, ZSD), batch->depth_stencil);
@@ -1377,6 +1374,8 @@ GENX(csf_launch_draw)(struct panfrost_batch *batch,
                       const struct pipe_draw_start_count_bias *draw,
                       unsigned vertex_count)
 {
+   PAN_TRACE_FUNC(PAN_TRACE_GL_CSF);
+
    struct cs_builder *b = batch->csf.cs.builder;
 
    uint32_t flags_override = csf_emit_draw_state(batch, info, drawid_offset);
@@ -1384,6 +1383,7 @@ GENX(csf_launch_draw)(struct panfrost_batch *batch,
 
    cs_move32_to(b, cs_sr_reg32(b, IDVS, INDEX_COUNT), draw->count);
    cs_move32_to(b, cs_sr_reg32(b, IDVS, INSTANCE_COUNT), info->instance_count);
+   cs_move32_to(b, cs_sr_reg32(b, IDVS, INDEX_OFFSET), 0);
    cs_move32_to(b, cs_sr_reg32(b, IDVS, INSTANCE_OFFSET), 0);
 
    /* Base vertex offset on Valhall is used for both indexed and
@@ -1413,6 +1413,8 @@ GENX(csf_launch_draw_indirect)(struct panfrost_batch *batch,
                                unsigned drawid_offset,
                                const struct pipe_draw_indirect_info *indirect)
 {
+   PAN_TRACE_FUNC(PAN_TRACE_GL_CSF);
+
    struct cs_builder *b = batch->csf.cs.builder;
 
    uint32_t flags_override = csf_emit_draw_state(batch, info, drawid_offset);
@@ -1489,6 +1491,8 @@ get_device_reset_status(struct pipe_context *pctx)
 int
 GENX(csf_init_context)(struct panfrost_context *ctx)
 {
+   PAN_TRACE_FUNC(PAN_TRACE_GL_CSF);
+
    struct panfrost_screen *screen = pan_screen(ctx->base.screen);
    struct panfrost_device *dev = pan_device(ctx->base.screen);
    struct drm_panthor_queue_create qc[] = {{
@@ -1656,6 +1660,8 @@ err_group_create:
 void
 GENX(csf_cleanup_context)(struct panfrost_context *ctx)
 {
+   PAN_TRACE_FUNC(PAN_TRACE_GL_CSF);
+
    if (!ctx->csf.is_init)
       return;
 
@@ -1663,7 +1669,7 @@ GENX(csf_cleanup_context)(struct panfrost_context *ctx)
    struct drm_panthor_tiler_heap_destroy thd = {
       .handle = ctx->csf.heap.handle,
    };
-   int ret;
+   ASSERTED int ret;
 
    /* Make sure all jobs are done before destroying the heap. */
    ret = drmSyncobjWait(panfrost_device_fd(dev), &ctx->syncobj, 1, INT64_MAX, 0,

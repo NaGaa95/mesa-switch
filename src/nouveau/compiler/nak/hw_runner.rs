@@ -404,7 +404,7 @@ pub struct Runner {
     qmd_heap: QMDHeap,
 }
 
-impl<'a> Runner {
+impl Runner {
     pub fn new(dev_id: Option<usize>) -> Runner {
         let dev = Device::new(dev_id).expect("Failed to create nouveau device");
         let ctx = Context::new(dev.clone()).expect("Failed to create context");
@@ -614,7 +614,7 @@ impl<'a> Runner {
                 data.len().try_into().unwrap(),
                 stride.try_into().unwrap(),
                 data.as_mut_ptr().cast(),
-                data.len() * stride,
+                size_of_val(data),
             )
         }
     }

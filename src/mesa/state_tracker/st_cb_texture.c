@@ -45,7 +45,7 @@
 #include "main/pixeltransfer.h"
 #include "main/renderbuffer.h"
 #include "main/texcompress.h"
-#include "main/texcompress_astc.h"
+#include "util/texcompress_astc.h"
 #include "main/texcompress_bptc.h"
 #include "main/texcompress_etc.h"
 #include "main/texcompress_rgtc.h"
@@ -300,7 +300,7 @@ copy_to_staging_dest(struct gl_context * ctx, struct pipe_resource *dst,
 
       assert(util_format_is_compressed(src->format));
 
-      rgba = malloc(width * height * 4 * sizeof(GLfloat));
+      rgba = malloc((size_t)width * height * 4 * sizeof(GLfloat));
       if (!rgba) {
          goto end;
       }
@@ -545,7 +545,7 @@ compressed_tex_fallback_allocate(struct st_context *st,
       FREE(texImage->compressed_data);
    }
 
-   unsigned data_size = _mesa_format_image_size(texImage->TexFormat,
+   size_t data_size = _mesa_format_image_size(texImage->TexFormat,
                                                 texImage->Width2,
                                                 texImage->Height2,
                                                 texImage->Depth2);
@@ -768,7 +768,7 @@ st_UnmapTextureImage(struct gl_context *ctx,
                                                         texImage->pt->format);
          } else if (util_format_is_compressed(texImage->pt->format)) {
             /* Transcode into a different compressed format. */
-            unsigned size =
+            size_t size =
                _mesa_format_image_size(PIPE_FORMAT_R8G8B8A8_UNORM,
                                        transfer->box.width,
                                        transfer->box.height, 1);
@@ -1070,8 +1070,8 @@ guess_and_alloc_texture(struct st_context *st,
    const struct gl_texture_image *firstImage;
    GLuint lastLevel, width, height, depth;
    GLuint bindings;
-   unsigned ptWidth;
-   uint16_t ptHeight, ptDepth, ptLayers;
+   unsigned ptWidth, ptHeight;
+   uint16_t ptDepth, ptLayers;
    enum pipe_format fmt;
    bool guessed_box = false;
 
@@ -1239,8 +1239,8 @@ st_AllocTextureImageBuffer(struct gl_context *ctx,
       enum pipe_format format =
          st_mesa_format_to_pipe_format(st, texImage->TexFormat);
       GLuint bindings = default_bindings(st, format);
-      unsigned ptWidth;
-      uint16_t ptHeight, ptDepth, ptLayers;
+      unsigned ptWidth, ptHeight;
+      uint16_t ptDepth, ptLayers;
 
       st_gl_texture_dims_to_pipe_dims(stObj->Target,
                                       width, height, depth,
@@ -1759,7 +1759,8 @@ try_pbo_upload_common(struct gl_context *ctx,
                         CSO_BIT_SAMPLE_MASK |
                         CSO_BIT_MIN_SAMPLES |
                         CSO_BIT_RENDER_CONDITION |
-                        CSO_BITS_ALL_SHADERS));
+                        CSO_BIT_MESH_SHADER |
+                        CSO_BITS_VERTEX_PIPE_SHADERS));
 
    cso_set_sample_mask(cso, ~0);
    cso_set_min_samples(cso, 1);
@@ -1793,7 +1794,7 @@ try_pbo_upload_common(struct gl_context *ctx,
       pipe_sampler_view_release(sampler_view);
    }
 
-   uint16_t width, height;
+   unsigned width, height;
    pipe_surface_size(surface, &width, &height);
 
    /* Framebuffer_state */
@@ -1939,7 +1940,6 @@ try_pbo_upload(struct gl_context *ctx, GLuint dims,
    templ.level = level;
    templ.first_layer = MIN2(zoffset, max_layer);
    templ.last_layer = MIN2(zoffset + depth - 1, max_layer);
-   templ.context = st->pipe;
    templ.texture = texture;
 
    success = try_pbo_upload_common(ctx, &templ, &addr, src_format);
@@ -2020,7 +2020,8 @@ try_pbo_download(struct st_context *st,
                         CSO_BIT_SAMPLE_MASK |
                         CSO_BIT_MIN_SAMPLES |
                         CSO_BIT_RENDER_CONDITION |
-                        CSO_BITS_ALL_SHADERS));
+                        CSO_BIT_MESH_SHADER |
+                        CSO_BITS_VERTEX_PIPE_SHADERS));
 
    cso_set_sample_mask(cso, ~0);
    cso_set_min_samples(cso, 1);
@@ -2454,7 +2455,7 @@ st_CompressedTexSubImage(struct gl_context *ctx, GLuint dims,
                          struct gl_texture_image *texImage,
                          GLint x, GLint y, GLint z,
                          GLsizei w, GLsizei h, GLsizei d,
-                         GLenum format, GLsizei imageSize, const void *data)
+                         GLenum format, size_t imageSize, const void *data)
 {
    struct st_context *st = st_context(ctx);
    struct gl_texture_image *stImage = texImage;
@@ -2556,7 +2557,6 @@ st_CompressedTexSubImage(struct gl_context *ctx, GLuint dims,
    memset(&templ, 0, sizeof(templ));
    templ.format = copy_format;
    templ.texture = texture;
-   templ.context = st->pipe;
    templ.level = level;
    templ.first_layer = MIN2(layer, max_layer);
    templ.last_layer = MIN2(layer + d - 1, max_layer);
@@ -2576,7 +2576,7 @@ st_CompressedTexSubImage(struct gl_context *ctx, GLuint dims,
          /* By incrementing layer here, we ensure the fallback only uploads
          * layers we failed to upload.
          */
-         buf_offset += addr.pixels_per_row * addr.image_height;
+         buf_offset += (size_t)addr.pixels_per_row * addr.image_height;
          layer++;
          addr.depth--;
       }
@@ -2598,7 +2598,7 @@ fallback:
 void
 st_CompressedTexImage(struct gl_context *ctx, GLuint dims,
                       struct gl_texture_image *texImage,
-                      GLsizei imageSize, const void *data)
+                      size_t imageSize, const void *data)
 {
    prep_teximage(ctx, texImage, GL_NONE, GL_NONE);
 
@@ -2898,7 +2898,7 @@ fallback_copy_texsubimage(struct gl_context *ctx,
    else {
       /* RGBA format */
       GLfloat *tempSrc =
-         malloc(width * height * 4 * sizeof(GLfloat));
+         malloc((size_t)width * height * 4 * sizeof(GLfloat));
 
       if (tempSrc) {
          const GLint dims = 2;
@@ -3159,8 +3159,8 @@ st_finalize_texture(struct gl_context *ctx,
    GLuint face;
    const struct gl_texture_image *firstImage;
    enum pipe_format firstImageFormat;
-   unsigned ptWidth;
-   uint16_t ptHeight, ptDepth, ptLayers, ptNumSamples;
+   unsigned ptWidth, ptHeight;
+   uint16_t ptDepth, ptLayers, ptNumSamples;
 
    if (tObj->Immutable)
       return GL_TRUE;
@@ -3208,8 +3208,8 @@ st_finalize_texture(struct gl_context *ctx,
 
    /* Find size of level=0 Gallium mipmap image, plus number of texture layers */
    {
-      unsigned width;
-      uint16_t height, depth;
+      unsigned width, height;
+      uint16_t depth;
 
       st_gl_texture_dims_to_pipe_dims(tObj->Target,
                                       firstImage->Width2,
@@ -3439,8 +3439,8 @@ st_texture_storage(struct gl_context *ctx,
    struct gl_texture_image *texImage = texObj->Image[0][0];
    struct st_context *st = st_context(ctx);
    struct pipe_screen *screen = st->screen;
-   unsigned ptWidth, bindings;
-   uint16_t ptHeight, ptDepth, ptLayers;
+   unsigned ptWidth, ptHeight, bindings;
+   uint16_t ptDepth, ptLayers;
    enum pipe_format fmt;
    GLint level;
    GLuint num_samples = texImage->NumSamples;
@@ -3695,8 +3695,8 @@ find_mipmap_level(const struct gl_texture_image *texImage,
    GLint texWidth = texImage->Width;
    GLint texHeight = texImage->Height;
    GLint texDepth = texImage->Depth;
-   unsigned level, w;
-   uint16_t h, d, layers;
+   unsigned level, w, h;
+   uint16_t d, layers;
 
    st_gl_texture_dims_to_pipe_dims(target, texWidth, texHeight, texDepth,
                                    &w, &h, &d, &layers);

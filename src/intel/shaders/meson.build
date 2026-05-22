@@ -9,7 +9,6 @@ if with_intel_vk
     command : [
       prog_python, '@INPUT@', '@OUTPUT@',
       prog_glslang,
-      '--create-entry', 'main',
       '--vn', 'float64_spv_source',
       '--glsl-version', '450',
       '-Olib',
@@ -34,7 +33,9 @@ intel_shaders_gens = [ [ 80,   8],
                        [120,  12],
                        [125, 125],
                        [200,  20],
-                       [300,  30] ]
+                       [300,  30],
+                       [350,  35],
+                     ]
 intel_shaders = []
 intel_shaders_headers = []
 foreach gen : intel_shaders_gens

@@ -647,6 +647,23 @@ gallivm_compile_module(struct gallivm_state *gallivm)
 
    lp_build_coro_add_malloc_hooks(gallivm);
 
+   /* Dump bitcode to a file */
+   if (gallivm_debug & GALLIVM_DEBUG_DUMP_BC &&
+       !(gallivm->cache && gallivm->cache->data_size)) {
+      char filename[256];
+      assert(gallivm->module_name);
+      snprintf(filename, sizeof(filename), "ir_%s.bc", gallivm->module_name);
+      LLVMWriteBitcodeToFile(gallivm->module, filename);
+      debug_printf("%s written\n", filename);
+      debug_printf("Invoke as \"opt -passes=%s %s | llc -O%d %s%s\"\n",
+                   gallivm_perf & GALLIVM_PERF_NO_OPT ? "mem2reg" :
+                   "sroa,early-cse,simplifycfg,reassociate,"
+                   "mem2reg,instsimplify,instcombine",
+                   filename, gallivm_perf & GALLIVM_PERF_NO_OPT ? 0 : 2,
+                   "[-mcpu=<-mcpu option>] ",
+                   "[-mattr=<-mattr option(s)>]");
+   }
+
    LPJit::add_ir_module_to_jd(gallivm->_ts_context, gallivm->module,
       gallivm->_per_module_jd);
    /* ownership of module is now transferred into orc jit,

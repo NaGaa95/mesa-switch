@@ -151,10 +151,9 @@ optimize_lower_ps_outputs(nir_builder *b, nir_intrinsic_instr *intrin, lower_ps_
 
    unsigned writemask = nir_intrinsic_write_mask(intrin);
    unsigned component = nir_intrinsic_component(intrin);
-   unsigned color_index = (slot >= FRAG_RESULT_DATA0 ? slot - FRAG_RESULT_DATA0 : 0) +
-                          nir_intrinsic_io_semantics(intrin).dual_source_blend_index;
    nir_def *value = intrin->src[0].ssa;
    bool progress = false;
+   int color_index = mesa_frag_result_get_color_index(slot);
 
    /* Clamp color. */
    if (s->options->clamp_color) {
@@ -364,6 +363,34 @@ fbfetch_color_buffer0(nir_builder *b, lower_ps_early_state *s)
 }
 
 static bool
+lower_color_inputs_to_load_color01(nir_builder *b, nir_intrinsic_instr *intr)
+{
+   nir_io_semantics sem = nir_intrinsic_io_semantics(intr);
+
+   if (sem.location != VARYING_SLOT_COL0 &&
+       sem.location != VARYING_SLOT_COL1)
+      return false;
+
+   nir_def *load = NULL;
+
+   if (sem.location == VARYING_SLOT_COL0) {
+      load = nir_load_color0_amd(b, 32);
+   } else {
+      assert(sem.location == VARYING_SLOT_COL1);
+      load = nir_load_color1_amd(b, 32);
+   }
+
+   if (intr->num_components != 4) {
+      unsigned start = nir_intrinsic_component(intr);
+      unsigned count = intr->num_components;
+      load = nir_channels(b, load, BITFIELD_RANGE(start, count));
+   }
+
+   nir_def_replace(&intr->def, load);
+   return true;
+}
+
+static bool
 lower_ps_intrinsic(nir_builder *b, nir_intrinsic_instr *intrin, void *state)
 {
    lower_ps_early_state *s = (lower_ps_early_state *)state;
@@ -371,6 +398,11 @@ lower_ps_intrinsic(nir_builder *b, nir_intrinsic_instr *intrin, void *state)
    b->cursor = nir_before_instr(&intrin->instr);
 
    switch (intrin->intrinsic) {
+   case nir_intrinsic_load_input:
+   case nir_intrinsic_load_interpolated_input:
+      if (s->options->lower_color_inputs_to_load_color01)
+         return lower_color_inputs_to_load_color01(b, intrin);
+      break;
    case nir_intrinsic_store_output:
       return optimize_lower_ps_outputs(b, intrin, s);
    case nir_intrinsic_load_barycentric_pixel:
@@ -426,7 +458,7 @@ lower_ps_intrinsic(nir_builder *b, nir_intrinsic_instr *intrin, void *state)
       }
 
       if (s->options->ps_iter_samples >= 2 &&
-          sample_id->parent_instr->type == nir_instr_type_intrinsic &&
+          nir_def_is_intrinsic(sample_id) &&
           nir_def_as_intrinsic(sample_id)->intrinsic == nir_intrinsic_load_sample_id) {
          nir_def_replace(&intrin->def, nir_load_barycentric_sample(b, 32, .interp_mode = mode));
          return true;
@@ -514,8 +546,7 @@ gather_info(nir_builder *b, nir_intrinsic_instr *intr, void *state)
        * FRAG_RESULT_COLOR output exists with dual_src_blend_index=1. This happens
        * with gl_SecondaryFragColorEXT in GLES.
        */
-      if (nir_intrinsic_io_semantics(intr).location == FRAG_RESULT_COLOR &&
-          nir_intrinsic_io_semantics(intr).dual_source_blend_index)
+      if (nir_intrinsic_io_semantics(intr).location == FRAG_RESULT_DUAL_SRC_BLEND)
          s->frag_color_is_frag_data0 = true;
       break;
    case nir_intrinsic_load_frag_coord:

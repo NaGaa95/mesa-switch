@@ -12,9 +12,15 @@
 
 #include "tu_common.h"
 
+#include "radix_sort/radix_sort_vk.h"
+#include "util/rwlock.h"
+#include "util/u_vector.h"
+#include "util/vma.h"
 #include "vk_device_memory.h"
 #include "vk_meta.h"
 
+#include "common/fd6_gmem_cache.h"
+#include "common/freedreno_rd_output.h"
 #include "tu_autotune.h"
 #include "tu_cs.h"
 #include "tu_pass.h"
@@ -22,12 +28,6 @@
 #include "tu_queue.h"
 #include "tu_suballoc.h"
 #include "tu_util.h"
-
-#include "radix_sort/radix_sort_vk.h"
-
-#include "common/freedreno_rd_output.h"
-#include "util/vma.h"
-#include "util/u_vector.h"
 
 /* queue types */
 #define TU_QUEUE_GENERAL 0
@@ -43,6 +43,7 @@
 
 enum global_shader {
    GLOBAL_SH_VS_BLIT,
+   GLOBAL_SH_VS_MULTI_BLIT,
    GLOBAL_SH_VS_CLEAR,
    GLOBAL_SH_FS_BLIT,
    GLOBAL_SH_FS_BLIT_ZSCALE,
@@ -110,13 +111,7 @@ struct tu_physical_device
    uint64_t gmem_base;
 
    uint32_t usable_gmem_size_gmem;
-   uint32_t ccu_offset_gmem;
-   uint32_t ccu_offset_bypass;
-   uint32_t ccu_depth_offset_bypass;
-   uint32_t vpc_attr_buf_offset_gmem;
-   uint32_t vpc_attr_buf_size_gmem;
-   uint32_t vpc_attr_buf_offset_bypass;
-   uint32_t vpc_attr_buf_size_bypass;
+   struct fd6_gmem_config config_gmem, config_sysmem;
 
    uint64_t uche_trap_base;
 
@@ -144,6 +139,9 @@ struct tu_physical_device
    struct fdl_ubwc_config ubwc_config;
 
    bool has_preemption;
+
+   /* Whether performance counter selector registers can be written by userspace CSes. */
+   bool is_perf_cntr_selectable;
 
    struct {
       uint32_t non_lazy_type_count;
@@ -189,6 +187,7 @@ struct tu_instance
    struct driOptionCache dri_options;
    struct driOptionCache available_dri_options;
 
+   uint32_t force_vk_vendor;
    bool dont_care_as_load;
 
    /* Conservative LRZ (default true) invalidates LRZ on draws with
@@ -227,6 +226,20 @@ struct tu_instance
 
    /* Apps may be accidentally incorrect  */
    bool ignore_frag_depth_direction;
+
+   /* D3D12 SM6.2 requires float32 denorm support which we have to emulate.
+    * However we don't want native Vulkan apps using this.
+    */
+   bool enable_softfloat32;
+
+   /* The hardware implementation of alpha-to-coverage gives visually poor
+    * results for many games. Set this option to enable it in the shader
+    * instead.
+    */
+   bool emulate_alpha_to_coverage;
+
+   /* Configuration option to use a specific autotune algorithm by default. */
+   const char *autotune_algo;
 };
 VK_DEFINE_HANDLE_CASTS(tu_instance, vk.base, VkInstance,
                        VK_OBJECT_TYPE_INSTANCE)
@@ -255,9 +268,16 @@ struct tu6_global
 
    uint32_t vsc_state[32];
 
+   uint64_t bv_predicate;
+
    volatile uint32_t vtx_stats_query_not_running;
 
-   /* To know when renderpass stats for autotune are valid */
+   /* A fence with a monotonically increasing value that is
+    * incremented by the GPU on each submission that includes
+    * a tu_autotune::submission_entry CS. This is used to track
+    * which submissions have been processed by the GPU before
+    * processing the autotune packet on the CPU.
+    */
    volatile uint32_t autotune_fence;
 
    /* For recycling command buffers for dynamic suspend/resume comamnds */
@@ -279,6 +299,27 @@ struct tu6_global
    volatile uint32_t userspace_fence;
    uint32_t _pad5;
 
+   /* Autotune preemption delay tracking */
+   uint64_t cur_rp_hash;
+
+   uint64_t base_preemption_latency;
+   uint64_t new_preemption_latency;
+   volatile uint64_t preemption_latency;
+
+   uint64_t base_always_count;
+   uint64_t new_always_count;
+   uint64_t base_aon;
+   uint64_t new_aon;
+
+   /* These four fields must be contiguous so that snapshot_preempt_data can copy them all in a single CP_MEMCPY. */
+   volatile uint64_t max_preemption_latency;
+   volatile uint64_t max_preemption_latency_rp_hash;
+   volatile uint64_t max_always_count_delta;
+   volatile uint64_t max_aon_delta;
+
+   uint64_t preemption_latency_cmp_scratch;
+   uint64_t zero_64b;
+
    struct bcolor_entry bcolor[];
 };
 #define gb_offset(member) offsetof(struct tu6_global, member)
@@ -293,7 +334,6 @@ struct tu_pvtmem_bo {
 };
 
 struct tu_virtio_device;
-struct tu_queue;
 
 struct tu_device
 {
@@ -313,6 +353,10 @@ struct tu_device
    struct vk_pipeline_cache *mem_cache;
 
    struct vk_meta_device meta;
+
+   struct nir_shader *float32_shader;
+   struct nir_shader *float64_shader;
+   mtx_t softfloat_mutex;
 
    radix_sort_vk_t *radix_sort;
    mtx_t radix_sort_mutex;
@@ -343,12 +387,6 @@ struct tu_device
    struct tu_suballocator pipeline_suballoc;
    mtx_t pipeline_mutex;
 
-   /* Device-global BO suballocator for reducing BO management for small
-    * gmem/sysmem autotune result buffers.  Synchronized by autotune_mutex.
-    */
-   struct tu_suballocator autotune_suballoc;
-   mtx_t autotune_mutex;
-
    /* KGSL requires a small chunk of GPU mem to retrieve raw GPU time on
     * each submission.
     */
@@ -363,10 +401,11 @@ struct tu_device
    struct tu_suballocator *trace_suballoc;
    mtx_t trace_mutex;
 
-   /* the blob seems to always use 8K factor and 128K param sizes, copy them */
-#define TU_TESS_FACTOR_SIZE (8 * 1024)
-#define TU_TESS_PARAM_SIZE (128 * 1024)
-#define TU_TESS_BO_SIZE (TU_TESS_FACTOR_SIZE + TU_TESS_PARAM_SIZE)
+   /* VSC patchpoint BO suballocator.
+    */
+   struct tu_suballocator vis_stream_suballocator;
+   mtx_t vis_stream_suballocator_mtx;
+
    /* Lazily allocated, protected by the device mutex. */
    struct tu_bo *tess_bo;
 
@@ -431,7 +470,12 @@ struct tu_device
 
    struct tu_cs_entry cmdbuf_start_a725_quirk_entry;
 
-   struct tu_cs_entry bin_preamble_entry;
+   struct tu_cs_entry bin_preamble_entry, bin_preamble_bv_entry;
+
+   struct tu_cs_entry switch_away_amble_entry, switch_back_amble_entry;
+
+   struct tu_bo *vis_stream_bo;
+   mtx_t vis_stream_mtx;
 
    struct util_dynarray dynamic_rendering_pending;
    VkCommandPool dynamic_rendering_pool;
@@ -442,7 +486,7 @@ struct tu_device
    pthread_cond_t timeline_cond;
    pthread_mutex_t submit_mutex;
 
-   struct tu_autotune autotune;
+   struct tu_autotune *autotune;
 
    struct breadcrumbs_context *breadcrumbs_ctx;
 
@@ -457,6 +501,12 @@ struct tu_device
 
    /* Address space and global fault count for this local_fd with DRM backend */
    uint64_t fault_count;
+
+   /* Temporary storage for multisampled attachments backed by a
+    * single-sampled image view in sysmem mode.
+    */
+   struct tu_device_memory *msrtss_color_temporary;
+   struct tu_device_memory *msrtss_depth_temporary;
 
    struct u_trace_context trace_context;
    struct list_head copy_timestamp_cs_pool;
@@ -473,8 +523,30 @@ struct tu_device
 
    /* This is an internal queue for mapping/unmapping non-sparse BOs */
    uint32_t vm_bind_queue_id;
+
+   uint32_t vis_stream_count;
+   uint32_t vis_stream_size;
 };
 VK_DEFINE_HANDLE_CASTS(tu_device, vk.base, VkDevice, VK_OBJECT_TYPE_DEVICE)
+
+template <chip_range_support>
+struct TU_TESS;
+
+template <chip CHIP>
+struct TU_TESS<chip_range(CHIP <= A7XX)> {
+   /* the blob seems to always use 8K factor and 128K param sizes, copy them */
+   static const size_t FACTOR_SIZE = 8 * 1024;
+   static const size_t PARAM_SIZE = 128 * 1024;
+   static const size_t BO_SIZE = FACTOR_SIZE + PARAM_SIZE;
+};
+
+template <chip CHIP>
+struct TU_TESS<chip_range(CHIP >= A8XX)> {
+   /* for gen8, buffers are sized for two draws: */
+   static const size_t FACTOR_SIZE = 0x4040;
+   static const size_t PARAM_SIZE = 0x40000;
+   static const size_t BO_SIZE = FACTOR_SIZE + PARAM_SIZE;
+};
 
 struct tu_device_memory
 {
@@ -482,6 +554,8 @@ struct tu_device_memory
 
    uint64_t iova;
    uint64_t size;
+
+   uint32_t refcnt;
 
    /* For lazy memory */
    bool lazy;
@@ -497,14 +571,13 @@ struct tu_device_memory
 VK_DEFINE_NONDISP_HANDLE_CASTS(tu_device_memory, vk.base, VkDeviceMemory,
                                VK_OBJECT_TYPE_DEVICE_MEMORY)
 
+void
+tu_destroy_memory(struct tu_device *device,
+                  struct tu_device_memory *mem);
+
 VkResult
 tu_allocate_lazy_memory(struct tu_device *dev,
                         struct tu_device_memory *mem);
-
-struct tu_attachment_info
-{
-   struct tu_image_view *attachment;
-};
 
 struct tu_vsc_config {
    /* number of tiles */
@@ -517,8 +590,11 @@ struct tu_vsc_config {
    /* Whether binning could be used for gmem rendering using this framebuffer. */
    bool binning_possible;
 
-   /* Whether binning should be used for gmem rendering using this framebuffer. */
-   bool binning;
+   /* Whether binning is useful for GMEM rendering performance using this framebuffer. This is independent of whether
+    * binning is possible, and is determined by the tile count. Not binning when it's useful would be a performance
+    * hazard, and GMEM rendering should be avoided in the case where it's useful to bin but not possible to do so.
+    */
+   bool binning_useful;
 
    /* pipe register values */
    uint32_t pipe_config[MAX_VSC_PIPES];
@@ -543,10 +619,15 @@ struct tu_framebuffer
    uint32_t height;
    uint32_t layers;
 
-   struct tu_tiling_config tiling[TU_GMEM_LAYOUT_COUNT];
+   struct tu_device_memory *depth_mem, *color_mem;
+
+   uint32_t max_tile_w_constraint;
+   uint32_t max_tile_h_constraint;
+   uint32_t initd_divisor; /* The tile divisors up to this have been initialized, for lazy init. */
+   struct tu_tiling_config tiling[TU_GMEM_LAYOUT_COUNT * TU_GMEM_LAYOUT_DIVISOR_MAX];
 
    uint32_t attachment_count;
-   struct tu_attachment_info attachments[0];
+   const struct tu_image_view *attachments[0];
 };
 VK_DEFINE_NONDISP_HANDLE_CASTS(tu_framebuffer, base, VkFramebuffer,
                                VK_OBJECT_TYPE_FRAMEBUFFER)
@@ -586,6 +667,9 @@ tu_get_scratch_bo(struct tu_device *dev, uint64_t size, struct tu_bo **bo);
 
 void tu_setup_dynamic_framebuffer(struct tu_cmd_buffer *cmd_buffer,
                                   const VkRenderingInfo *pRenderingInfo);
+
+VkResult
+tu_setup_dynamic_msrtss(struct tu_cmd_buffer *cmd_buffer);
 
 void
 tu_copy_buffer(struct u_trace_context *utctx, void *cmdstream,
@@ -673,6 +757,5 @@ tu_bo_init_new_cached(struct tu_device *dev, struct vk_object_base *base,
           VK_MEMORY_PROPERTY_HOST_CACHED_BIT : 0),
       flags, NULL, name);
 }
-
 
 #endif /* TU_DEVICE_H */

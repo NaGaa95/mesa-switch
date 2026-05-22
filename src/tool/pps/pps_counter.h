@@ -72,6 +72,9 @@ class Counter
    /// Name of the counter
    std::string name = "";
 
+   /// Description of the counter
+   std::string description = "";
+
    /// ID of the group this counter belongs to
    int32_t group = -1;
 

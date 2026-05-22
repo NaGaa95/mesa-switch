@@ -40,9 +40,9 @@ struct radv_drirc {
 
    struct {
       bool disable_aniso_single_level;
+      bool disable_dcc;
       bool disable_dcc_mips;
       bool disable_dcc_stores;
-      bool disable_depth_storage;
       bool disable_shrink_image_store;
       bool disable_sinking_load_input_fs;
       bool disable_tc_compat_htile_in_general;
@@ -57,7 +57,9 @@ struct radv_drirc {
       bool ssbo_non_uniform;
       bool tex_non_uniform;
       bool zero_vram;
+      bool wait_for_vm_map_updates;
       bool no_implicit_varying_subgroup_size;
+      bool rt_wave64;
       bool hide_rebar_on_dgpu;
       char *app_layer;
       int override_uniform_offset_alignment;
@@ -67,11 +69,13 @@ struct radv_drirc {
       bool disable_ngg_gs;
       bool enable_unified_heap_on_apu;
       bool report_llvm9_version_string;
+      bool prefer_2d_swizzle_for_3d_storage;
       char *gfx12_hiz_wa;
    } performance;
 
    struct {
       bool cooperative_matrix2_nv;
+      bool allow_dgc_multiview;
       bool emulate_rt;
       bool expose_float16_gfx8;
       bool vk_require_astc;
@@ -96,6 +100,7 @@ struct radv_instance {
 
    uint64_t debug_flags;
    uint64_t perftest_flags;
+   uint64_t experimental_flags;
    uint64_t trap_excp_flags;
    enum radeon_ctx_pstate profile_pstate;
 
@@ -109,5 +114,20 @@ VK_DEFINE_HANDLE_CASTS(radv_instance, vk.base, VkInstance, VK_OBJECT_TYPE_INSTAN
 const char *radv_get_debug_option_name(int id);
 
 const char *radv_get_perftest_option_name(int id);
+
+bool radv_is_rt_wave64_enabled(const struct radv_instance *instance);
+
+static const char *
+radv_bvh_stats_file()
+{
+   return os_get_option_secure("RADV_BVH_STATS_FILE");
+}
+
+static bool
+radv_bvh_dumping_enabled(const struct radv_instance *instance)
+{
+   /* Gathering bvh stats uses a large part of the rra code for dumping bvhs. */
+   return (instance->vk.trace_mode & RADV_TRACE_MODE_RRA) || radv_bvh_stats_file();
+}
 
 #endif /* RADV_INSTANCE_H */

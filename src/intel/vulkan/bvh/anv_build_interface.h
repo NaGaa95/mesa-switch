@@ -27,6 +27,9 @@ struct encode_args {
    /* The offset from start of anv header to output_bvh */
    uint32_t output_bvh_offset;
 
+   /* This tracks pointers to all anv_instance_leaves for BLAS */
+   VOID_REF instance_leaves_addr;
+
    uint32_t leaf_node_count;
    uint32_t geometry_type;
 };
@@ -39,6 +42,11 @@ struct header_args {
    uint32_t bvh_offset;
 
    uint32_t instance_count;
+
+   uint32_t instance_leaves_offset;
+
+   uint64_t bvh_size;
+   uint8_t is_compacted;
 };
 
 #define ANV_COPY_MODE_COPY        0

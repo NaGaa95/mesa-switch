@@ -94,6 +94,7 @@ struct nvk_shader {
    float min_sample_shading;
 
    struct nak_shader_bin *nak;
+   const char *nir_str;
    const void *code_ptr;
    uint32_t code_size;
 

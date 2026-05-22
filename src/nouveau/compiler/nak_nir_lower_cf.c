@@ -238,9 +238,7 @@ block_is_merge(const nir_block *block)
       return false;
 
    unsigned num_preds = 0;
-   set_foreach(&block->predecessors, entry) {
-      const nir_block *pred = entry->key;
-
+   nir_foreach_pred(pred, block) {
       /* We don't care about unreachable blocks */
       if (pred->imm_dom == NULL)
          continue;

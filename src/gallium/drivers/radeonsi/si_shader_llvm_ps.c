@@ -176,9 +176,8 @@ static bool si_llvm_init_ps_export_args(struct si_shader_context *ctx, LLVMValue
    /* Specify the target we are exporting */
    args->target = V_008DFC_SQ_EXP_MRT + compacted_mrt_index;
 
-   if (key->ps.part.epilog.dual_src_blend_swizzle &&
+   if (key->ps.part.epilog.dual_src_blend && ctx->ac.gfx_level >= GFX11 &&
        (compacted_mrt_index == 0 || compacted_mrt_index == 1)) {
-      assert(ctx->ac.gfx_level >= GFX11);
       args->target += 21;
    }
 
@@ -374,8 +373,8 @@ void si_llvm_ps_build_end(struct si_shader_context *ctx)
          samplemask = LLVMBuildLoad2(builder, ctx->ac.f32, ctx->abi.outputs[4 * i + 0], "");
          break;
       default:
-         if (semantic >= FRAG_RESULT_DATA0 && semantic <= FRAG_RESULT_DATA7) {
-            unsigned index = semantic - FRAG_RESULT_DATA0;
+         if (semantic >= FRAG_RESULT_DATA0) {
+            int index = mesa_frag_result_get_color_index(semantic);
 
             for (j = 0; j < 4; j++) {
                if (!ctx->abi.outputs[4 * i + j])
@@ -398,9 +397,8 @@ void si_llvm_ps_build_end(struct si_shader_context *ctx)
    ret = ctx->return_value;
 
    /* Set SGPRs. */
-   ret = LLVMBuildInsertValue(
-      builder, ret, ac_to_integer(&ctx->ac, LLVMGetParam(ctx->main_fn.value, SI_PARAM_ALPHA_REF)),
-      SI_SGPR_ALPHA_REF, "");
+   ret = LLVMBuildInsertValue(builder, ret, LLVMGetParam(ctx->main_fn.value, SI_PARAM_ALPHA_REF),
+                              SI_SGPR_ALPHA_REF, "");
 
    /* Set VGPRs */
    vgpr = SI_SGPR_ALPHA_REF + 1;
@@ -774,9 +772,22 @@ void si_llvm_build_ps_epilog(struct si_shader_context *ctx, union si_shader_part
    const unsigned first_color_export = exp.num;
    colors_written = key->ps_epilog.colors_written;
 
+   unsigned color_types = key->ps_epilog.color_types;
+
+   /* If only one dual source blend output is written, fill in the other one with undef. This is
+    * always needed on GFX11+, and on GFX6-10.5 if the missing output is index=0 (otherwise we
+    * will write the index=1 output using mrt0). */
+   if (key->ps_epilog.states.dual_src_blend && util_bitcount(colors_written & 0x3) == 1) {
+      unsigned idx = colors_written & 0x2 ? 1 : 0;
+      color_types |= idx ? (color_types >> 2) & 0x3 : (color_types << 2) & 0xc;
+      for (unsigned i = 0; i < 4; i++)
+         color[!idx][i] = LLVMGetUndef(LLVMTypeOf(color[idx][i]));
+      colors_written |= 0x3;
+   }
+
    while (colors_written) {
       int write_i = u_bit_scan(&colors_written);
-      unsigned color_type = (key->ps_epilog.color_types >> (write_i * 2)) & 0x3;
+      unsigned color_type = (color_types >> (write_i * 2)) & 0x3;
 
       si_export_mrt_color(ctx, color[write_i], write_i, first_color_export, color_type,
                           key->ps_epilog.writes_all_cbufs, &exp);
@@ -786,9 +797,7 @@ void si_llvm_build_ps_epilog(struct si_shader_context *ctx, union si_shader_part
       exp.args[exp.num - 1].valid_mask = 1;  /* whether the EXEC mask is valid */
       exp.args[exp.num - 1].done = 1;        /* DONE bit */
 
-      if (key->ps_epilog.states.dual_src_blend_swizzle) {
-         assert(ctx->ac.gfx_level >= GFX11);
-         assert((key->ps_epilog.colors_written & 0x3) == 0x3);
+      if (key->ps_epilog.states.dual_src_blend && ctx->ac.gfx_level >= GFX11) {
          ac_build_dual_src_blend_swizzle(&ctx->ac, &exp.args[first_color_export],
                                          &exp.args[first_color_export + 1]);
       }

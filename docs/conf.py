@@ -44,7 +44,6 @@ extensions = [
     'formatting',
     'hawkmoth',
     'nir',
-    'redirects',
     'sphinx.ext.graphviz',
 ]
 
@@ -123,12 +122,6 @@ html_extra_path = [
     'README.VCE',
 ]
 
-html_redirects = [
-    ('webmaster', 'https://www.mesa3d.org/website/'),
-    ('developers', 'https://www.mesa3d.org/developers/'),
-    ('thanks', 'https://gitlab.freedesktop.org/mesa/mesa/-/blob/amber/docs/thanks.rst'),
-]
-
 
 # -- Options for linkcheck ------------------------------------------------
 
@@ -141,10 +134,14 @@ linkcheck_ignore = [
     r'https://github.com/.*#.*',  # needs JS eval
     r'https://www.intel.com/.*',  # intel.com is blocking the linkcheck user-agent; maybe it can be customized to look like a browser?
     r'https://sourceforge.net/.*',  # blocking the linkcheck user-agent
-    r'https://.*\.sourceforge\.net/.*',  # blocking the linkcheck user-agent
+    r'https://.*\.sourceforge\.(net|io)/.*',  # blocking the linkcheck user-agent
     r'https://stackoverflow.com/.*',  # blocking the linkcheck user-agent
     r'https://(www|dev)\.vulkan\.org/.*',  # blocking the linkcheck user-agent
     r'https://crates.io/.*',  # blocking the linkcheck user-agent
+    r'https://docs.vulkan.org/.*',  # blocking the linkcheck user-agent
+    r'https://wikis.khronos.org/.*',  # blocking the linkcheck user-agent
+    r'https://en.wikipedia.org/.*',  # rate-limited, which linkcheck doesn't respect
+    r'https://www.freedesktop.org/.*',  # protected by anubis
 ]
 linkcheck_exclude_documents = [r'relnotes/.*']
 

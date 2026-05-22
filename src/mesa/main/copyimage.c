@@ -32,6 +32,7 @@
 #include "textureview.h"
 #include "glformats.h"
 #include "api_exec_decl.h"
+#include "pipe/p_screen.h"
 
 #include "state_tracker/st_cb_copyimage.h"
 
@@ -550,35 +551,45 @@ copy_image_subdata(struct gl_context *ctx,
                    int dstX, int dstY, int dstZ, int dstLevel,
                    int srcWidth, int srcHeight, int srcDepth)
 {
-   /* loop over 2D slices/faces/layers */
-   for (int i = 0; i < srcDepth; ++i) {
-      int newSrcZ = srcZ + i;
-      int newDstZ = dstZ + i;
+   bool src_is_cubemap = srcTexImage &&
+                         srcTexImage->TexObject->Target == GL_TEXTURE_CUBE_MAP;
+   bool dst_is_cubemap = dstTexImage &&
+                         dstTexImage->TexObject->Target == GL_TEXTURE_CUBE_MAP;
 
-      if (srcTexImage &&
-          srcTexImage->TexObject->Target == GL_TEXTURE_CUBE_MAP) {
-         /* need to update srcTexImage pointer for the cube face */
-         assert(srcZ + i < MAX_FACES);
-         srcTexImage = srcTexImage->TexObject->Image[srcZ + i][srcLevel];
-         assert(srcTexImage);
-         newSrcZ = 0;
-      }
+   if (src_is_cubemap || dst_is_cubemap || !ctx->screen->caps.blit_3d) {
+       /* loop over cubemap faces/layers */
+       for (int i = 0; i < srcDepth; ++i) {
+          int newSrcZ = srcZ + i;
+          int newDstZ = dstZ + i;
 
-      if (dstTexImage &&
-          dstTexImage->TexObject->Target == GL_TEXTURE_CUBE_MAP) {
-         /* need to update dstTexImage pointer for the cube face */
-         assert(dstZ + i < MAX_FACES);
-         dstTexImage = dstTexImage->TexObject->Image[dstZ + i][dstLevel];
-         assert(dstTexImage);
-         newDstZ = 0;
-      }
+          if (src_is_cubemap) {
+             /* need to update srcTexImage pointer for the cube face */
+             assert(srcZ + i < MAX_FACES);
+             srcTexImage = srcTexImage->TexObject->Image[srcZ + i][srcLevel];
+             assert(srcTexImage);
+             newSrcZ = 0;
+          }
 
-      st_CopyImageSubData(ctx,
-                          srcTexImage, srcRenderbuffer,
-                          srcX, srcY, newSrcZ,
-                          dstTexImage, dstRenderbuffer,
-                          dstX, dstY, newDstZ,
-                          srcWidth, srcHeight);
+          if (dst_is_cubemap) {
+             /* need to update dstTexImage pointer for the cube face */
+             assert(dstZ + i < MAX_FACES);
+             dstTexImage = dstTexImage->TexObject->Image[dstZ + i][dstLevel];
+             assert(dstTexImage);
+             newDstZ = 0;
+          }
+
+          st_CopyImageSubData(ctx,
+                              srcTexImage, srcRenderbuffer,
+                              srcX, srcY, newSrcZ,
+                              dstTexImage, dstRenderbuffer,
+                              dstX, dstY, newDstZ,
+                              srcWidth, srcHeight, 1);
+       }
+   } else {
+       st_CopyImageSubData(ctx,
+                           srcTexImage, srcRenderbuffer, srcX, srcY, srcZ,
+                           dstTexImage, dstRenderbuffer, dstX, dstY, dstZ,
+                           srcWidth, srcHeight, srcDepth);
    }
 }
 

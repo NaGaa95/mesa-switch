@@ -251,7 +251,8 @@ util_make_fragment_tex_shader(struct pipe_context *pipe,
                               enum tgsi_return_type stype,
                               enum tgsi_return_type dtype,
                               bool load_level_zero,
-                              bool use_txf)
+                              bool use_txf,
+                              bool use_persp)
 {
    struct ureg_program *ureg;
    struct ureg_src sampler;
@@ -270,8 +271,9 @@ util_make_fragment_tex_shader(struct pipe_context *pipe,
    ureg_DECL_sampler_view(ureg, 0, tex_target, stype, stype, stype, stype);
 
    tex = ureg_DECL_fs_input( ureg, 
-                             TGSI_SEMANTIC_GENERIC, 0, 
-                             TGSI_INTERPOLATE_LINEAR );
+                             TGSI_SEMANTIC_GENERIC, 0,
+                             use_persp ? TGSI_INTERPOLATE_PERSPECTIVE :
+                                         TGSI_INTERPOLATE_LINEAR );
 
    out = ureg_DECL_output( ureg, 
                            TGSI_SEMANTIC_COLOR,
@@ -314,7 +316,7 @@ util_make_fragment_tex_shader(struct pipe_context *pipe,
 void *
 util_make_fs_blit_zs(struct pipe_context *pipe, unsigned zs_mask,
                      enum tgsi_texture_type tex_target,
-                     bool load_level_zero, bool use_txf)
+                     bool load_level_zero, bool use_txf, bool use_persp)
 {
    struct ureg_program *ureg;
    struct ureg_src depth_sampler, stencil_sampler, coord;
@@ -325,7 +327,8 @@ util_make_fs_blit_zs(struct pipe_context *pipe, unsigned zs_mask,
       return NULL;
 
    coord = ureg_DECL_fs_input(ureg, TGSI_SEMANTIC_GENERIC, 0,
-                              TGSI_INTERPOLATE_LINEAR);
+                              use_persp ? TGSI_INTERPOLATE_PERSPECTIVE :
+                                          TGSI_INTERPOLATE_LINEAR );
    tmp = ureg_DECL_temporary(ureg);
 
    if (zs_mask & PIPE_MASK_Z) {
@@ -457,6 +460,7 @@ static void *
 util_make_fs_blit_msaa_gen(struct pipe_context *pipe,
                            enum tgsi_texture_type tgsi_tex,
                            bool sample_shading, bool has_txq,
+                           bool use_persp,
                            const char *samp_type,
                            const char *output_semantic,
                            const char *output_mask,
@@ -469,7 +473,7 @@ util_make_fs_blit_msaa_gen(struct pipe_context *pipe,
    if (has_txq) {
       static const char shader_templ[] =
             "FRAG\n"
-            "DCL IN[0], GENERIC[0], LINEAR\n"
+            "DCL IN[0], GENERIC[0], %s\n"
             "DCL SAMP[0]\n"
             "DCL SVIEW[0], %s, %s\n"
             "DCL OUT[0], %s\n"
@@ -500,14 +504,15 @@ util_make_fs_blit_msaa_gen(struct pipe_context *pipe,
       assert(tgsi_tex == TGSI_TEXTURE_2D_MSAA ||
              tgsi_tex == TGSI_TEXTURE_2D_ARRAY_MSAA);
 
-      snprintf(text, sizeof(text), shader_templ, type, samp_type,
+      snprintf(text, sizeof(text), shader_templ,
+               use_persp ? "PERSPECTIVE" : "LINEAR", type, samp_type,
                output_semantic, sample_shading ? "DCL SV[0], SAMPLEID\n" : "",
                type, sample_shading ? "MOV TEMP[0].w, SV[0].xxxx\n" : "",
                type, conversion, output_mask);
    } else {
       static const char shader_templ[] =
             "FRAG\n"
-            "DCL IN[0], GENERIC[0], LINEAR\n"
+            "DCL IN[0], GENERIC[0], %s\n"
             "DCL SAMP[0]\n"
             "DCL SVIEW[0], %s, %s\n"
             "DCL OUT[0], %s\n"
@@ -535,7 +540,8 @@ util_make_fs_blit_msaa_gen(struct pipe_context *pipe,
       assert(tgsi_tex == TGSI_TEXTURE_2D_MSAA ||
              tgsi_tex == TGSI_TEXTURE_2D_ARRAY_MSAA);
 
-      snprintf(text, sizeof(text), shader_templ, type, samp_type,
+      snprintf(text, sizeof(text), shader_templ,
+               use_persp ? "PERSPECTIVE" : "LINEAR", type, samp_type,
                output_semantic, sample_shading ? "DCL SV[0], SAMPLEID\n" : "",
                sample_shading ? "MOV TEMP[0].w, SV[0].xxxx\n" : "",
                type, conversion, output_mask);
@@ -565,7 +571,7 @@ util_make_fs_blit_msaa_color(struct pipe_context *pipe,
                              enum tgsi_texture_type tgsi_tex,
                              enum tgsi_return_type stype,
                              enum tgsi_return_type dtype,
-                             bool sample_shading, bool has_txq)
+                             bool sample_shading, bool has_txq, bool use_persp)
 {
    const char *samp_type;
    const char *conversion = "";
@@ -588,7 +594,8 @@ util_make_fs_blit_msaa_color(struct pipe_context *pipe,
    }
 
    return util_make_fs_blit_msaa_gen(pipe, tgsi_tex, sample_shading, has_txq,
-                                     samp_type, "COLOR[0]", "", conversion);
+                                     use_persp, samp_type, "COLOR[0]", "",
+                                     conversion);
 }
 
 
@@ -600,10 +607,10 @@ util_make_fs_blit_msaa_color(struct pipe_context *pipe,
 void *
 util_make_fs_blit_msaa_depth(struct pipe_context *pipe,
                              enum tgsi_texture_type tgsi_tex,
-                             bool sample_shading, bool has_txq)
+                             bool sample_shading, bool has_txq, bool use_persp)
 {
    return util_make_fs_blit_msaa_gen(pipe, tgsi_tex, sample_shading, has_txq,
-                                     "FLOAT", "POSITION", ".z",
+                                     use_persp, "FLOAT", "POSITION", ".z",
                                      "MOV TEMP[0].z, TEMP[0].xxxx\n");
 }
 
@@ -616,10 +623,11 @@ util_make_fs_blit_msaa_depth(struct pipe_context *pipe,
 void *
 util_make_fs_blit_msaa_stencil(struct pipe_context *pipe,
                                enum tgsi_texture_type tgsi_tex,
-                               bool sample_shading, bool has_txq)
+                               bool sample_shading, bool has_txq,
+                               bool use_persp)
 {
    return util_make_fs_blit_msaa_gen(pipe, tgsi_tex, sample_shading, has_txq,
-                                     "UINT", "STENCIL", ".y",
+                                     use_persp, "UINT", "STENCIL", ".y",
                                      "MOV TEMP[0].y, TEMP[0].xxxx\n");
 }
 
@@ -634,7 +642,8 @@ util_make_fs_blit_msaa_stencil(struct pipe_context *pipe,
 void *
 util_make_fs_blit_msaa_depthstencil(struct pipe_context *pipe,
                                     enum tgsi_texture_type tgsi_tex,
-                                    bool sample_shading, bool has_txq)
+                                    bool sample_shading, bool has_txq,
+                                    bool use_persp)
 {
    const char *type = tgsi_texture_names[tgsi_tex];
    char text[1000];
@@ -647,7 +656,7 @@ util_make_fs_blit_msaa_depthstencil(struct pipe_context *pipe,
    if (has_txq) {
       static const char shader_templ[] =
             "FRAG\n"
-            "DCL IN[0], GENERIC[0], LINEAR\n"
+            "DCL IN[0], GENERIC[0], %s\n"
             "DCL SAMP[0..1]\n"
             "DCL SVIEW[0], %s, FLOAT\n"
             "DCL SVIEW[1], %s, UINT\n"
@@ -674,14 +683,15 @@ util_make_fs_blit_msaa_depthstencil(struct pipe_context *pipe,
             "TXF OUT[1].y, TEMP[0], SAMP[1], %s\n"
             "END\n";
 
-      sprintf(text, shader_templ, type, type,
+      sprintf(text, shader_templ, use_persp ? "PERSPECTIVE" : "LINEAR",
+              type, type,
               sample_shading ? "DCL SV[0], SAMPLEID\n" : "", type,
               sample_shading ? "MOV TEMP[0].w, SV[0].xxxx\n" : "",
               type, type);
    } else {
       static const char shader_templ[] =
             "FRAG\n"
-            "DCL IN[0], GENERIC[0], LINEAR\n"
+            "DCL IN[0], GENERIC[0], %s\n"
             "DCL SAMP[0..1]\n"
             "DCL SVIEW[0], %s, FLOAT\n"
             "DCL SVIEW[1], %s, UINT\n"
@@ -705,7 +715,8 @@ util_make_fs_blit_msaa_depthstencil(struct pipe_context *pipe,
             "TXF OUT[1].y, TEMP[0], SAMP[1], %s\n"
             "END\n";
 
-      sprintf(text, shader_templ, type, type,
+      sprintf(text, shader_templ, use_persp ? "PERSPECTIVE" : "LINEAR",
+              type, type,
               sample_shading ? "DCL SV[0], SAMPLEID\n" : "",
               sample_shading ? "MOV TEMP[0].w, SV[0].xxxx\n" : "",
               type, type);
@@ -727,7 +738,7 @@ util_make_fs_blit_msaa_depthstencil(struct pipe_context *pipe,
 void *
 util_make_fs_msaa_resolve(struct pipe_context *pipe,
                           enum tgsi_texture_type tgsi_tex, unsigned nr_samples,
-                          bool has_txq)
+                          bool has_txq, bool use_persp)
 {
    struct ureg_program *ureg;
    struct ureg_src sampler, coord;
@@ -744,7 +755,8 @@ util_make_fs_msaa_resolve(struct pipe_context *pipe,
                           TGSI_RETURN_TYPE_FLOAT, TGSI_RETURN_TYPE_FLOAT,
                           TGSI_RETURN_TYPE_FLOAT, TGSI_RETURN_TYPE_FLOAT);
    coord = ureg_DECL_fs_input(ureg, TGSI_SEMANTIC_GENERIC, 0,
-                              TGSI_INTERPOLATE_LINEAR);
+                              use_persp ? TGSI_INTERPOLATE_PERSPECTIVE :
+                                          TGSI_INTERPOLATE_LINEAR);
    out = ureg_DECL_output(ureg, TGSI_SEMANTIC_COLOR, 0);
    tmp_sum = ureg_DECL_temporary(ureg);
    tmp_coord = ureg_DECL_temporary(ureg);
@@ -794,7 +806,8 @@ util_make_fs_msaa_resolve(struct pipe_context *pipe,
 void *
 util_make_fs_msaa_resolve_bilinear(struct pipe_context *pipe,
                                    enum tgsi_texture_type tgsi_tex,
-                                   unsigned nr_samples, bool has_txq)
+                                   unsigned nr_samples, bool has_txq,
+                                   bool use_persp)
 {
    struct ureg_program *ureg;
    struct ureg_src sampler, coord;
@@ -812,7 +825,8 @@ util_make_fs_msaa_resolve_bilinear(struct pipe_context *pipe,
                           TGSI_RETURN_TYPE_FLOAT, TGSI_RETURN_TYPE_FLOAT,
                           TGSI_RETURN_TYPE_FLOAT, TGSI_RETURN_TYPE_FLOAT);
    coord = ureg_DECL_fs_input(ureg, TGSI_SEMANTIC_GENERIC, 0,
-                              TGSI_INTERPOLATE_LINEAR);
+                              use_persp ? TGSI_INTERPOLATE_PERSPECTIVE :
+                                          TGSI_INTERPOLATE_LINEAR);
    out = ureg_DECL_output(ureg, TGSI_SEMANTIC_COLOR, 0);
    for (c = 0; c < 4; c++)
       tmp_sum[c] = ureg_DECL_temporary(ureg);
@@ -980,7 +994,8 @@ void *
 util_make_fs_pack_color_zs(struct pipe_context *pipe,
                            enum tgsi_texture_type tex_target,
                            enum pipe_format zs_format,
-                           bool dst_is_color)
+                           bool dst_is_color,
+                           bool use_persp)
 {
    struct ureg_program *ureg;
    struct ureg_src depth_sampler, stencil_sampler, color_sampler, coord;
@@ -1003,7 +1018,8 @@ util_make_fs_pack_color_zs(struct pipe_context *pipe,
       return NULL;
 
    coord = ureg_DECL_fs_input(ureg, TGSI_SEMANTIC_GENERIC, 0,
-                              TGSI_INTERPOLATE_LINEAR);
+                              use_persp ? TGSI_INTERPOLATE_PERSPECTIVE :
+                                          TGSI_INTERPOLATE_LINEAR);
 
    if (dst_is_color) {
       /* Load depth. */
@@ -1313,19 +1329,25 @@ util_make_fs_stencil_blit(struct pipe_context *pipe, bool msaa_src, bool has_txq
 }
 
 void *
-util_make_fs_clear_color(struct pipe_context *pipe, bool write_all_cbufs)
+util_make_fs_clear_color(struct pipe_context *pipe,
+                         bool write_all_cbufs,
+                         bool use_const_buf)
 {
    static const char text_templ[] =
       "FRAG\n"
       "PROPERTY FS_COLOR0_WRITES_ALL_CBUFS %u\n"
       "DCL OUT[0], COLOR[0]\n"
-      "DCL CONST[0][0]\n"
+      "%s"
+      "IMM[0] INT32 {0, 0, 0, 0}\n"
 
-      "MOV OUT[0], CONST[0][0]\n"
+      "MOV OUT[0], %s\n"
       "END\n";
    char text[1000];
 
-   snprintf(text, ARRAY_SIZE(text), text_templ, write_all_cbufs);
+   snprintf(text, ARRAY_SIZE(text), text_templ,
+            write_all_cbufs,
+            use_const_buf ? "DCL CONST[0][0]\n" : "",
+            use_const_buf ? "CONST[0][0]" : "IMM[0]");
 
    struct tgsi_token tokens[1000];
    struct pipe_shader_state state = { 0 };

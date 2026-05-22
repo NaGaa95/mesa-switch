@@ -54,11 +54,9 @@ pass(nir_builder *b, nir_intrinsic_instr *intrin, void *data)
       if (!(nir_def_components_read(&intrin->def) & (1 << 2)))
          return false;
 
-      nir_def *frag_z = nir_channel(b, &intrin->def, 2);
+      b->fp_math_ctrl = nir_fp_no_fast_math;
 
-      /* adjusted_frag_z = dFdxFine(frag_z) * 0.0625 + frag_z */
-      nir_def *adjusted_frag_z = nir_ddx_fine(b, frag_z);
-      adjusted_frag_z = nir_ffma_imm1(b, adjusted_frag_z, 0.0625f, frag_z);
+      nir_def *frag_z = nir_channel(b, &intrin->def, 2);
 
       /* VRS Rate X = Ancillary[2:3] */
       nir_def *ancillary = nir_load_vector_arg_amd(b, 1, .base = args->ac.ancillary.arg_index);
@@ -66,10 +64,15 @@ pass(nir_builder *b, nir_intrinsic_instr *intrin, void *data)
 
       /* xRate = xRate == 0x1 ? adjusted_frag_z : frag_z. */
       nir_def *cond = nir_ieq_imm(b, x_rate, 1);
-      frag_z = nir_bcsel(b, cond, adjusted_frag_z, frag_z);
+      nir_def *mul = nir_bcsel(b, cond, nir_imm_float(b, 0.0625f), nir_imm_float(b, -0.0));
+
+      /* adjusted_frag_z = dFdxFine(frag_z) * 0.0625 + frag_z */
+      frag_z = nir_ffma(b, nir_ddx_fine(b, frag_z), mul, frag_z);
 
       nir_def *new_dest = nir_vector_insert_imm(b, &intrin->def, frag_z, 2);
       nir_def_rewrite_uses_after(&intrin->def, new_dest);
+
+      b->fp_math_ctrl = 0;
       return true;
    }
    case nir_intrinsic_load_barycentric_at_sample: {

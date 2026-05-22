@@ -45,11 +45,15 @@ const VkExternalMemoryProperties nvk_dma_buf_mem_props = {
 
 static enum nvkmd_mem_flags
 nvk_memory_type_flags(const VkMemoryType *type,
-                      VkExternalMemoryHandleTypeFlagBits handle_types)
+                      VkExternalMemoryHandleTypeFlagBits handle_types,
+                      bool pinned_to_vram)
 {
    enum nvkmd_mem_flags flags = 0;
    if (type->propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
-      flags = NVKMD_MEM_LOCAL;
+      if (pinned_to_vram)
+         flags = NVKMD_MEM_VRAM;
+      else
+         flags = NVKMD_MEM_LOCAL;
    else
       flags = NVKMD_MEM_GART;
 
@@ -99,7 +103,7 @@ nvk_GetMemoryFdPropertiesKHR(VkDevice device,
    for (unsigned t = 0; t < ARRAY_SIZE(pdev->mem_types); t++) {
       const VkMemoryType *type = &pdev->mem_types[t];
       const enum nvkmd_mem_flags type_flags =
-         nvk_memory_type_flags(type, handleType);
+         nvk_memory_type_flags(type, handleType, false);
 
       /* Flags required to be set on mem to be imported as type
        *
@@ -137,6 +141,11 @@ nvk_AllocateMemory(VkDevice device,
    struct nvk_device_memory *mem;
    VkResult result = VK_SUCCESS;
 
+   mem = vk_device_memory_create(&dev->vk, pAllocateInfo,
+                                 pAllocator, sizeof(*mem));
+   if (!mem)
+      return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
+
    const VkImportMemoryFdInfoKHR *fd_info =
       vk_find_struct_const(pAllocateInfo->pNext, IMPORT_MEMORY_FD_INFO_KHR);
    const VkExportMemoryAllocateInfo *export_info =
@@ -152,31 +161,23 @@ nvk_AllocateMemory(VkDevice device,
    if (fd_info != NULL)
       handle_types |= fd_info->handleType;
 
-   const enum nvkmd_mem_flags flags = nvk_memory_type_flags(type, handle_types);
+   const bool not_shared = handle_types == 0;
+   bool pinned_to_vram = false;
 
-   uint32_t alignment = (1ULL << 12);
-   if (flags & NVKMD_MEM_LOCAL)
-      alignment = (1ULL << 16);
+   /* Align to os page size (typically 4K) as a start as this works for
+    * everything, and then depending on placement and size, we either keep
+    * it as is or increase it to 64K or 2M.
+    */
+   uint32_t alignment = pdev->nvkmd->bind_align_B;
 
    uint8_t pte_kind = 0, tile_mode = 0;
-   if (dedicated_info != NULL) {
+   if (dedicated_info != NULL && dedicated_info->image != VK_NULL_HANDLE) {
       VK_FROM_HANDLE(nvk_image, image, dedicated_info->image);
-      const bool dedicated_for_drm_modifier = image != NULL &&
-         image->vk.tiling == VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
-#ifdef __SWITCH__
-      /* On Switch, dedicated optimal tiled images need the backing NvMap to be
-       * created with the same pte_kind/tile_mode that NIL selected for the
-       * image.  This covers WSI scanout and explicit dedicated app image
-       * allocations.
-       */
-      const bool dedicated_for_switch_tiled_image = image != NULL &&
-         image->vk.tiling == VK_IMAGE_TILING_OPTIMAL &&
-         image->plane_count == 1 &&
-         image->planes[0].nil.pte_kind != 0;
-#else
-      const bool dedicated_for_switch_tiled_image = false;
-#endif
-      if (dedicated_for_drm_modifier || dedicated_for_switch_tiled_image) {
+
+      mem->dedicated_image = image;
+
+      if (image->vk.tiling == VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT &&
+          image->vk.drm_format_mod != DRM_FORMAT_MOD_LINEAR) {
          /* This image might be shared with GL so we need to set the BO flags
           * such that GL can bind and use it.
           */
@@ -184,16 +185,48 @@ nvk_AllocateMemory(VkDevice device,
          alignment = MAX2(alignment, image->planes[0].nil.align_B);
          pte_kind = image->planes[0].nil.pte_kind;
          tile_mode = image->planes[0].nil.tile_mode;
+      } else if (image->can_compress && not_shared) {
+         /* If it's a dedicated alloc and it's not modifiers or shared, then
+          * it's marked for compression and larger pages, so we set the pinned
+          * bit and up the alignment.
+          *
+          * Disabling compression for export/import is a bit nicer to apps.
+          * Eg. QtWebEngine likes to export/import buffers with
+          * VK_IMAGE_TILING_OPTIMAL and renders incorrectly if we remove
+          * the not_shared check.
+          * https://qt-project.atlassian.net/browse/QTBUG-141866
+          */
+         pinned_to_vram = true;
+         pte_kind = image->planes[0].nil.compressed_pte_kind;
+         tile_mode = image->planes[0].nil.tile_mode;
+         /* Align to 2MiB if size is >= 2MiB, otherwise align to 64KiB. */
+         if (pAllocateInfo->allocationSize >= (1ULL << 21))
+            alignment = (1ULL << 21);
+         else
+            alignment = (1ULL << 16);
       }
+#ifdef __SWITCH__
+      /* On Switch, dedicated optimal tiled images need the backing NvMap to be
+       * created with the same pte_kind/tile_mode that NIL selected for the
+       * image.  This covers WSI scanout and explicit dedicated app image
+       * allocations.  The DRM modifier path above doesn't fire on Switch, and
+       * can_compress targets desktop discrete VRAM, so we need a separate path.
+       */
+      else if (image->vk.tiling == VK_IMAGE_TILING_OPTIMAL &&
+               image->plane_count == 1 &&
+               image->planes[0].nil.pte_kind != 0) {
+         alignment = MAX2(alignment, image->planes[0].nil.align_B);
+         pte_kind = image->planes[0].nil.pte_kind;
+         tile_mode = image->planes[0].nil.tile_mode;
+      }
+#endif
    }
+
+   const enum nvkmd_mem_flags flags =
+      nvk_memory_type_flags(type, handle_types, pinned_to_vram);
 
    const uint64_t aligned_size =
       align64(pAllocateInfo->allocationSize, alignment);
-
-   mem = vk_device_memory_create(&dev->vk, pAllocateInfo,
-                                 pAllocator, sizeof(*mem));
-   if (!mem)
-      return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
 
    const bool is_import = fd_info && fd_info->handleType;
    if (is_import) {

@@ -106,7 +106,7 @@ impl ALUType {
 
 impl nir_def {
     pub fn parent_instr(&self) -> &nir_instr {
-        unsafe { self.parent_instr.as_ref() }.unwrap()
+        unsafe { &*nir_def_instr_noninline(self as *const _) }
     }
 
     pub fn components_read(&self) -> nir_component_mask_t {
@@ -392,6 +392,10 @@ impl nir_intrinsic_instr {
 
     pub fn num_matrices(&self) -> u8 {
         self.get_const_index(NIR_INTRINSIC_NUM_MATRICES) as u8
+    }
+
+    pub fn offset_shift_nv(&self) -> u8 {
+        self.get_const_index(NIR_INTRINSIC_OFFSET_SHIFT_NV) as u8
     }
 }
 

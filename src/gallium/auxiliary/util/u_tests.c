@@ -181,7 +181,7 @@ util_set_common_states_and_clear(struct cso_context *cso, struct pipe_context *c
    util_set_rasterizer_normal(cso);
    util_set_max_viewport(cso, cb);
 
-   ctx->clear(ctx, PIPE_CLEAR_COLOR0, NULL, (void*)clear_color, 0, 0);
+   ctx->clear(ctx, PIPE_CLEAR_COLOR0, 0xf, 0xff, NULL, (void*)clear_color, 0, 0);
 }
 
 static void
@@ -399,7 +399,8 @@ null_sampler_view(struct pipe_context *ctx, unsigned tgsi_tex_target)
    /* Fragment shader. */
    fs = util_make_fragment_tex_shader(ctx, tgsi_tex_target,
                                       TGSI_RETURN_TYPE_FLOAT,
-                                      TGSI_RETURN_TYPE_FLOAT, false, false);
+                                      TGSI_RETURN_TYPE_FLOAT,
+                                      false, false, false);
    cso_set_fragment_shader_handle(cso, fs);
 
    /* Vertex shader. */

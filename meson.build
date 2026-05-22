@@ -17,6 +17,8 @@ project(
   ],
 )
 
+project_version = meson.project_version()
+
 if host_machine.system() == 'darwin'
   add_languages('objc', native : false)
   libname_prefix = 'lib'
@@ -39,6 +41,16 @@ null_dep = dependency('', required : false)
 
 if get_option('layout') != 'mirror'
   error('`mirror` is the only build directory layout supported')
+endif
+
+if get_option('b_lto')
+  project_version += '-lto'
+  # LTO causes random issues that are nearly impossible to debug, so bug reports from LTO builds have been
+  # rejected for a long time now.
+  # Explicitly reject LTO when building to prevent more people from running into bugs that end up inactionable.
+  if not get_option('allow-broken-lto')
+     error('Building Mesa with LTO is not supported. Please disable LTO for building Mesa.')
+  endif
 endif
 
 with_llvm = get_option('llvm')
@@ -78,7 +90,7 @@ pre_args = [
   '-D__STDC_CONSTANT_MACROS',
   '-D__STDC_FORMAT_MACROS',
   '-D__STDC_LIMIT_MACROS',
-  '-DPACKAGE_VERSION="@0@"'.format(meson.project_version()),
+  '-DPACKAGE_VERSION="@0@"'.format(project_version),
   '-DPACKAGE_BUGREPORT="https://gitlab.freedesktop.org/mesa/mesa/-/issues"',
 ]
 # Arguments for c or cpp compiler, can be compiler options
@@ -157,7 +169,13 @@ if gallium_drivers.contains('auto')
         'r300', 'r600', 'radeonsi', 'nouveau', 'virgl', 'svga', 'llvmpipe', 'softpipe',
         'iris', 'crocus', 'i915', 'zink'
       ]
-    elif ['arm', 'aarch64'].contains(host_machine.cpu_family())
+    elif ['aarch64'].contains(host_machine.cpu_family())
+      gallium_drivers = [
+        'v3d', 'vc4', 'freedreno', 'etnaviv', 'nouveau', 'svga',
+        'tegra', 'virgl', 'lima', 'panfrost', 'llvmpipe', 'softpipe', 'iris',
+        'zink', 'asahi'
+      ]
+    elif ['arm'].contains(host_machine.cpu_family())
       gallium_drivers = [
         'v3d', 'vc4', 'freedreno', 'etnaviv', 'nouveau', 'svga',
         'tegra', 'virgl', 'lima', 'panfrost', 'llvmpipe', 'softpipe', 'iris',
@@ -226,7 +244,6 @@ with_llvm = with_llvm \
   .enable_if(with_gallium_i915, error_message : 'i915 Gallium driver requires LLVM for vertex shaders') \
   .enable_if(with_gallium_llvmpipe, error_message : 'LLVMPipe Gallium driver requires LLVM') \
   .enable_if(with_gallium_r300 and draw_with_llvm, error_message : 'R300 Gallium driver requires LLVM for vertex shaders on IGP parts') \
-  .enable_if(with_gallium_r600 and amd_with_llvm, error_message : 'R600 Gallium driver configured to require LLVM') \
   .enable_if(with_gallium_radeonsi and amd_with_llvm, error_message : 'RadeonSI Gallium driver configured to require LLVM')
 
 # compatibility for "swrast" as an internal-ish driver name
@@ -236,7 +253,7 @@ if with_gallium_swrast
 endif
 
 with_gallium = gallium_drivers.length() != 0
-with_gallium_kmsro = system_has_kms_drm and [
+with_gallium_drm = system_has_kms_drm and [
   with_gallium_asahi,
   with_gallium_etnaviv,
   with_gallium_freedreno,
@@ -244,7 +261,6 @@ with_gallium_kmsro = system_has_kms_drm and [
   with_gallium_panfrost,
   with_gallium_v3d,
   with_gallium_vc4,
-  with_gallium_zink,
 ].contains(true)
 
 _vulkan_drivers = get_option('vulkan-drivers')
@@ -253,7 +269,9 @@ if _vulkan_drivers.contains('auto')
   if system_has_kms_drm
     if host_machine.cpu_family().startswith('x86')
       _vulkan_drivers = ['amd', 'intel', 'intel_hasvk', 'nouveau', 'swrast']
-    elif ['arm', 'aarch64'].contains(host_machine.cpu_family())
+    elif ['aarch64'].contains(host_machine.cpu_family())
+      _vulkan_drivers = ['swrast', 'intel', 'panfrost', 'freedreno', 'asahi']
+    elif ['arm'].contains(host_machine.cpu_family())
       _vulkan_drivers = ['swrast', 'intel', 'panfrost', 'freedreno']
     elif ['mips', 'mips64', 'ppc', 'ppc64', 'riscv32', 'riscv64'].contains(host_machine.cpu_family())
       _vulkan_drivers = ['amd', 'swrast']
@@ -275,7 +293,7 @@ elif _vulkan_drivers.contains('all')
    _vulkan_drivers = ['amd', 'intel', 'intel_hasvk', 'swrast',
                       'freedreno', 'panfrost', 'virtio', 'broadcom',
                       'imagination', 'microsoft-experimental',
-                      'nouveau', 'asahi', 'gfxstream']
+                      'nouveau', 'asahi', 'gfxstream', 'kosmickrisp']
 endif
 
 with_intel_vk = _vulkan_drivers.contains('intel')
@@ -292,6 +310,7 @@ with_microsoft_vk = _vulkan_drivers.contains('microsoft-experimental')
 with_nouveau_vk = _vulkan_drivers.contains('nouveau')
 with_asahi_vk = _vulkan_drivers.contains('asahi')
 with_gfxstream_vk = _vulkan_drivers.contains('gfxstream')
+with_kosmickrisp_vk = _vulkan_drivers.contains('kosmickrisp')
 with_any_vk = _vulkan_drivers.length() != 0
 
 with_llvm = with_llvm \
@@ -305,8 +324,8 @@ freedreno_kmds = get_option('freedreno-kmds')
 if freedreno_kmds.length() != 0 and freedreno_kmds != [ 'msm' ] and with_freedreno_vk
   if freedreno_kmds.contains('msm')
       warning('Turnip with the DRM KMD will require libdrm to always be present at runtime which may not always be the case on platforms such as Android.')
-  elif with_gallium_kmsro
-      warning('As a side-effect, Turnip is forced to link with libdrm when built alongside Gallium DRM drivers which platforms such as Android may not have available at runtime.')
+  elif with_gallium_drm
+      warning('Turnip is forced to link with libdrm when built alongside Gallium DRM drivers which platforms such as Android may not have available at runtime.')
   elif _vulkan_drivers != [ 'freedreno' ]
       warning('Turnip is forced to link with libdrm when built alongside other Vulkan drivers which platforms such as Android may not have available at runtime.')
   else
@@ -316,9 +335,17 @@ if freedreno_kmds.length() != 0 and freedreno_kmds != [ 'msm' ] and with_freedre
   endif
 endif
 
+# This has to be below the freedreno_kmds check since that can change system_has_kms_drm
+with_gallium_kmsro = with_gallium_drm or (system_has_kms_drm and with_gallium_zink)
+
 pre_args += ['-DMESA_SYSTEM_HAS_KMS_DRM=@0@'.format(system_has_kms_drm.to_int())]
 if host_machine.cpu_family() == 'x86' and with_glx_read_only_text
     pre_args += ['-DGLX_X86_READONLY_TEXT']
+endif
+
+with_intel_virtio = get_option('intel-virtio-experimental')
+if with_intel_virtio
+  pre_args += '-DHAVE_INTEL_VIRTIO'
 endif
 
 with_vdrm = [
@@ -326,10 +353,11 @@ with_vdrm = [
   freedreno_kmds.contains('virtio'),
   with_gallium_asahi,
   with_asahi_vk,
+  with_intel_virtio,
 ].contains(true)
 
 with_dri = false
-if with_gallium and system_has_kms_drm
+if with_gallium and (system_has_kms_drm or (freedreno_kmds.contains('kgsl') and with_gallium_zink))
   _glx = get_option('glx')
   _egl = get_option('egl')
   if _glx == 'dri' or _egl.enabled() or (_glx == 'disabled' and _egl.allowed())
@@ -370,8 +398,14 @@ endif
 if with_aco_tests and not with_amd_vk
   error('ACO tests require Radv')
 endif
+if with_aco_tests and not with_tools.contains('drm-shim')
+  error('ACO tests require AMDGPU drm-shim')
+endif
 if with_radv_tests and not with_amd_vk
   error('RADV tests require RADV')
+endif
+if with_radv_tests and not with_tools.contains('drm-shim')
+  error('RADV tests require AMDGPU drm-shim')
 endif
 
 with_microsoft_clc = get_option('microsoft-clc').enabled()
@@ -384,6 +418,8 @@ elif ['windows', 'cygwin'].contains(host_machine.system())
   with_dri_platform = 'windows'
 elif system_has_kms_drm
   with_dri_platform = 'drm'
+elif host_machine.system() == 'gnu' or (freedreno_kmds.contains('kgsl') and with_gallium_zink)
+  with_dri_platform = 'pseudo-drm'
 else
   # FIXME: haiku doesn't use dri, and xlib doesn't use dri, probably should
   # assert here that one of those cases has been met.
@@ -402,7 +438,7 @@ endif
 
 _codecs = get_option('video-codecs')
 patent_codecs = ['vc1dec', 'h264dec', 'h264enc', 'h265dec', 'h265enc']
-free_codecs = ['av1dec', 'av1enc', 'vp9dec']
+free_codecs = ['av1dec', 'av1enc', 'vp9dec', 'mpeg12dec', 'jpegdec']
 all_codecs = patent_codecs + free_codecs
 
 if _codecs.contains('all')
@@ -443,6 +479,27 @@ with_platform_switch = _platforms.contains('switch')
 with_platform_surfaceless = _platforms.contains('surfaceless')
 with_platform_windows = _platforms.contains('windows')
 with_platform_macos = _platforms.contains('macos')
+
+with_gfxstream_emulated_android = with_gfxstream_vk and with_platform_android and host_machine.system() == 'linux'
+if with_gfxstream_emulated_android
+  # When building the android_stub with a non-Bionic sysroot/target, we to have
+  # define macros that are typically in <sys/cdefs.h> when using a Bionic
+  # sysroot
+  pre_args += '-D__INTRODUCED_IN(api_level)='
+
+  # We don't want to build Vulkan common code when running the emulated
+  # gfxstream Android platform.  This causes issues when building in
+  # tandem with host Lavapipe.
+  #
+  # TODO(gfxstream-devs@): Modifying the user-provided platform can be removed
+  # when Cuttlefish moves it's host library builds off Soong, and on to Github.
+  # For now, add basic sanity checks before modifying user arguments.
+  if _platforms.contains('android') and _platforms.length() != 1
+    error('You cannot enable platform "android" at the same time as another platform')
+  endif
+  _platforms = []
+  with_platform_android = false
+endif
 
 with_glx = get_option('glx')
 if with_glx == 'auto'
@@ -490,7 +547,7 @@ with_gbm = get_option('gbm') \
   .allowed()
 
 with_xlib_lease = get_option('xlib-lease') \
-  .require(with_platform_x11 and (system_has_kms_drm or with_dri_platform == 'apple'), error_message : 'xlib-lease requires X11 and KMS/DRM support') \
+  .require(with_platform_x11 and (system_has_kms_drm or with_dri_platform == 'apple' or with_dri_platform == 'pseudo-drm'), error_message : 'xlib-lease requires X11 and KMS/DRM support') \
   .allowed()
 
 with_egl = get_option('egl') \
@@ -498,6 +555,10 @@ with_egl = get_option('egl') \
   .require(with_glx != 'xlib', error_message :'EGL requires DRI, but GLX is being built with xlib support') \
   .disable_auto_if(with_platform_haiku) \
   .allowed()
+
+if with_gbm
+  pre_args += '-DHAVE_LIBGBM'
+endif
 
 if with_egl
   _platforms += 'surfaceless'
@@ -605,7 +666,7 @@ if with_vulkan_icd_dir == ''
   with_vulkan_icd_dir = join_paths(get_option('datadir'), 'vulkan/icd.d')
 endif
 
-with_dri2 = (with_dri or with_any_vk) and (with_dri_platform == 'drm' or with_dri_platform == 'apple')
+with_dri2 = (with_dri or with_any_vk) and (with_dri_platform == 'drm' or with_dri_platform == 'apple' or  with_dri_platform == 'pseudo-drm')
 
 if with_dri
   if with_glx == 'disabled' and not with_egl and not with_gbm
@@ -618,7 +679,7 @@ if with_gallium_d3d12 or with_microsoft_clc or with_microsoft_vk or (with_any_vk
   dep_dxheaders = dependency('directx-headers', required : false)
   if not dep_dxheaders.found()
     dep_dxheaders = dependency('DirectX-Headers',
-      version : '>= 1.618.1',
+      version : '>= 1.619.1',
       fallback : ['DirectX-Headers', 'dep_dxheaders'],
       required : with_gallium_d3d12 or with_microsoft_vk
     )
@@ -682,17 +743,26 @@ _va_drivers = [
   with_gallium_virgl,
 ]
 
+allow_fallback_for_libva = get_option('allow-fallback-for').contains('libva')
+fallback_libva_options = []
 _va = get_option('gallium-va') \
   .require(_va_drivers.contains(true),
            error_message : 'VA state tracker requires at least one of the following gallium drivers: r600, radeonsi, nouveau, d3d12 (with option gallium-d3d12-video), virgl.')
 _dep_va_name = host_machine.system() == 'windows' ? 'libva-win32' : 'libva'
-dep_va = dependency(_dep_va_name, version : '>= 1.8.0', required : _va)
+dep_va = dependency(
+  _dep_va_name, version : '>= 1.8.0',
+  required : _va,
+  allow_fallback: allow_fallback_for_libva,
+  default_options: fallback_libva_options
+)
 if dep_va.found()
-  dep_va_headers = dep_va.partial_dependency(compile_args : true)
+  dep_va_headers = dep_va.partial_dependency(compile_args : true, includes : true)
   if cc.has_header_symbol('va/va.h', 'VASurfaceAttribDRMFormatModifiers',
                           dependencies: dep_va_headers)
     pre_args += '-DHAVE_VA_SURFACE_ATTRIB_DRM_FORMAT_MODIFIERS'
   endif
+  libva_version = cc.get_define('VA_VERSION', prefix: '#include "va/va_version.h"',
+                                dependencies: dep_va_headers).split('.')
 endif
 with_gallium_va = dep_va.found()
 
@@ -760,6 +830,14 @@ if with_gallium_rusticl
   endif
 endif
 
+# Do built drivers need to include gfx/compute queues support?
+# TODO: add a separate option to allow to build a VA-API driver without the features
+# that depend on these queues. When added a lightweight decode-only VA-API driver could be built
+with_gfx_compute = with_any_opengl or get_option('vulkan-drivers').length() > 0 or with_gallium_rusticl or with_gallium_va
+if with_gfx_compute
+  pre_args += '-DHAVE_GFX_COMPUTE'
+endif
+
 with_virtgpu_kumquat = get_option('virtgpu_kumquat') and with_gfxstream_vk
 if with_gallium_rusticl or with_nouveau_vk or with_tools.contains('etnaviv') or with_virtgpu_kumquat
   # rust.bindgen() does not pass `--rust-target` to bindgen until 1.7.0.
@@ -771,9 +849,7 @@ if with_gallium_rusticl or with_nouveau_vk or with_tools.contains('etnaviv') or 
   rustc = meson.get_compiler('rust')
   rust = import('rust')
 
-  # Keep this in sync with the MINIMUM_SUPPORTED_RUST_VERSION in
-  # .gitlab-ci/container/build-rust.sh and the `rustup default` line in
-  # .gitlab-ci/meson/build.sh
+  # Keep this in sync with the `msrv` in clippy.toml
   if rustc.version().version_compare('< 1.82')
     error('Mesa requires Rust 1.82.0 or newer')
   endif
@@ -805,6 +881,19 @@ if with_gallium_rusticl or with_nouveau_vk or with_tools.contains('etnaviv') or 
     bindgen_output_args += ['--raw-line', '#![allow(unnecessary_transmutes)]']
   endif
 
+  rust_global_args = [
+    # We want to be able to write `else { if {} }` when it makes more sense than
+    # collapsing it into `else if {}`.
+    '-Aclippy::collapsible_else_if',
+
+    # "Needless lifetimes" might be needless but they're harmless and we
+    # prefer being explicit, so allow them.
+    '-Aclippy::needless_lifetimes',
+
+    # Being explicit has value, allow it.
+    '-Aclippy::question_mark',
+  ]
+
   rust_2024_lint_args = [
     '-Dboxed_slice_into_iter',
     '-Ddeprecated_safe_2024',
@@ -833,10 +922,11 @@ else
 endif
 
 with_driver_using_cl = [
-  with_gallium_iris, with_intel_vk,
+  with_gallium_iris, with_gallium_crocus, with_intel_vk, with_intel_hasvk,
   with_gallium_asahi, with_asahi_vk, with_tools.contains('asahi'),
   with_gallium_panfrost, with_panfrost_vk,
   with_nouveau_vk, with_imagination_vk,
+  with_kosmickrisp_vk,
 ].contains(true)
 
 if get_option('mesa-clc') == 'system'
@@ -852,6 +942,10 @@ endif
 
 with_llvm = with_llvm \
   .enable_if(with_clc, error_message : 'CLC requires LLVM')
+
+with_poly = [
+  with_gallium_asahi, with_asahi_vk, with_tools.contains('asahi'),
+].contains(true)
 
 dep_clc = null_dep
 if with_clc
@@ -893,8 +987,9 @@ endif
 pre_args += '-DGLAPI_EXPORT_PROTO_ENTRY_POINTS=@0@'.format(with_glapi_export_proto_entry_points.to_int())
 
 with_android_stub = get_option('android-stub')
-if with_android_stub and not with_platform_android
-  error('`-D android-stub=true` makes no sense without `-D platforms=android`')
+need_android_stub = with_platform_android or with_gfxstream_emulated_android
+if with_android_stub and not need_android_stub
+  error('`-D android-stub=true` makes no sense without `-D platforms=android` or emulated Android')
 endif
 
 with_libbacktrace = get_option('android-libbacktrace') \
@@ -925,6 +1020,10 @@ if with_platform_android
     if get_option('platform-sdk-version') >= 35
       dep_android_ui = dependency('ui', required : false)
     endif
+    dep_hwvulkan_headers = dependency('android-hwvulkan-headers', required : false)
+    if dep_hwvulkan_headers.found() and with_any_vk
+      dep_android += dep_hwvulkan_headers
+    endif
   endif
   pre_args += '-DANDROID_API_LEVEL=' + get_option('platform-sdk-version').to_string()
   if get_option('android-strict')
@@ -942,12 +1041,22 @@ if get_option('allow-kcmp') \
   pre_args += '-DALLOW_KCMP'
 endif
 
-# On Windows, a venv has no versioned aliased to 'python'.
-prog_python = find_program('python3', 'python', version : '>= 3.9')
+# Find a python executable that meets our version requirement.
+# - On Windows, a venv has no versioned aliased to 'python'.
+# - On RHEL 9, python3 is 3.9, so we must use python3.12.
+python_version_req = '>= 3.10'
+python_exec_list = ['python3.16', 'python3.15', 'python3.14', 'python3.13',
+                    'python3.12', 'python3.11', 'python3.10', 'python3', 'python']
 
-has_mako = run_command(
-  prog_python, '-c',
-  '''
+foreach p : python_exec_list
+  prog_python = find_program(p, required : false, version : python_version_req)
+  if not prog_python.found()
+    continue
+  endif
+
+  has_mako = run_command(
+    prog_python, '-c',
+    '''
 import sys
 
 try:
@@ -966,6 +1075,21 @@ except:
 if Version(mako.__version__) < Version("0.8.0"):
     sys.exit(1)
 ''', check: false)
+  if has_mako.returncode() != 0
+    continue
+  endif
+
+  has_yaml = run_command(prog_python, '-c', 'import yaml', check: false)
+  if has_yaml.returncode() != 0
+    continue
+  endif
+
+  break
+endforeach
+
+if not prog_python.found()
+  error('Python ' + python_version_req + ' not found')
+endif
 
 if has_mako.returncode() == 1
   error('Python (3.x) mako module >= 0.8.0 required to build mesa.')
@@ -973,11 +1097,6 @@ elif has_mako.returncode() == 2
   error('One of Python (3.x) packaging or distutils module is required.')
 endif
 
-has_yaml = run_command(
-  prog_python, '-c',
-  '''
-import yaml
-  ''', check: false)
 if has_yaml.returncode() != 0
   error('Python (3.x) yaml module (PyYAML) required to build mesa.')
 endif
@@ -1151,6 +1270,7 @@ if cc.get_argument_syntax() == 'msvc'
     '/we4024',  # Error when passing different type of parameter
     '/we4189',  # 'identifier' : local variable is initialized but not referenced
     '/Zc:__cplusplus', #Set __cplusplus macro to match the /std:c++<version> on the command line
+    '/Zc:enumTypes', # Enables C++ conforming enum underlying type and enumerator type deduction
     '/Zc:preprocessor', # Use the standards-conforming preprocessor
   ]
   c_args += cc.get_supported_arguments(_trial)
@@ -1239,7 +1359,12 @@ else
   # Check for C and C++ arguments for MSVC compatibility. These are only used
   # in parts of the mesa code base that need to compile with MSVC, mainly
   # common code
-  _trial_msvc = ['-Werror=pointer-arith', '-Werror=vla', '-Werror=gnu-empty-initializer']
+  _trial_msvc = [
+    '-Werror=pointer-arith',
+    '-Werror=vla',
+    '-Werror=gnu-empty-initializer',
+    '-Wgnu-pointer-arith',
+  ]
   c_msvc_compat_args += cc.get_supported_arguments(_trial_msvc)
   cpp_msvc_compat_args += cpp.get_supported_arguments(_trial_msvc)
 
@@ -1414,7 +1539,8 @@ if not ['linux'].contains(host_machine.system())
 endif
 
 foreach h : ['xlocale.h', 'linux/futex.h', 'endian.h', 'dlfcn.h', 'sys/shm.h',
-             'cet.h', 'pthread_np.h', 'sys/inotify.h', 'linux/udmabuf.h']
+             'cet.h', 'pthread_np.h', 'poll.h', 'sys/inotify.h',
+             'linux/udmabuf.h']
   if cc.check_header(h)
     pre_args += '-DHAVE_@0@'.format(h.to_upper().underscorify())
   endif
@@ -1487,7 +1613,10 @@ endif
 if cc.has_header_symbol('errno.h', 'program_invocation_name',
                         args : '-D_GNU_SOURCE')
    pre_args += '-DHAVE_PROGRAM_INVOCATION_NAME'
-elif with_tools.contains('intel')
+elif with_tools.contains('intel') and not with_platform_android
+  # Intel tools is supported on Android where the program name is from
+  # `getprogname()` without `program_invocation_name` in glibc.
+  # See `src/util/u_process.c` for more details.
   error('Intel tools require the program_invocation_name variable')
 endif
 
@@ -1634,7 +1763,7 @@ if dep_thread.found()
 endif
 
 with_expat = get_option('expat') \
-  .disable_auto_if(with_platform_android or with_platform_windows) \
+  .disable_auto_if(with_platform_windows) \
   .enable_if(with_intel_tools, error_message : 'Intel tools require expat')
 
 if host_machine.system() == 'darwin'
@@ -1754,11 +1883,8 @@ endif
 
 llvm_modules = ['bitwriter', 'engine', 'mcdisassembler', 'mcjit', 'core', 'executionengine', 'scalaropts', 'transformutils', 'instcombine']
 llvm_optional_modules = ['coroutines']
-if with_amd_vk or with_gallium_radeonsi or with_gallium_r600
+if with_amd_vk or with_gallium_radeonsi
   llvm_modules += ['amdgpu', 'bitreader', 'ipo']
-  if with_gallium_r600
-    llvm_modules += 'asmparser'
-  endif
 endif
 if with_clc
   llvm_modules += ['coverage', 'target', 'linker', 'irreader', 'option', 'libdriver', 'lto']
@@ -1908,6 +2034,9 @@ if with_clc
     if dep_llvm.version().version_compare('>= 18.0')
       clang_modules += 'clangAPINotes'
     endif
+    if dep_llvm.version().version_compare('>= 22.0')
+      clang_modules += ['clangAnalysisLifetimeSafety', 'clangOptions']
+    endif
 
     dep_clang = []
     foreach m : clang_modules
@@ -1920,6 +2049,7 @@ dep_lua = dependency('lua54', 'lua5.4', 'lua-5.4',
                      'lua53', 'lua5.3', 'lua-5.3',
                      'lua', required: false,
                      allow_fallback: with_tools.contains('freedreno'),
+                     disabler : true,
                      version: '>=5.3')
 
 # Be explicit about only using this lib on Windows, to avoid picking
@@ -2016,6 +2146,8 @@ else
   prog_flex = find_program('flex', required : needs_flex_bison, disabler : true)
   prog_flex_cpp = prog_flex
 endif
+
+prog_ln = find_program('ln', required : false)
 
 _libunwind = get_option('libunwind') \
   .require(not with_platform_android, error_message : 'Android requires the use of the backtrace library, not libunwind')
@@ -2119,7 +2251,7 @@ if with_platform_x11
       error('libdrm required for gallium video statetrackers when using x11')
     endif
   endif
-  if with_dri_platform == 'drm'
+  if with_dri_platform == 'drm' or with_dri_platform == 'pseudo-drm'
     dep_xcb_dri3 = dependency('xcb-dri3', version : dep_xcb_dri3_version)
     dep_xcb_present = dependency('xcb-present', version : dep_xcb_present_version)
     if (dep_xcb_dri3.version().version_compare('>= 1.17') and
@@ -2135,7 +2267,7 @@ if with_platform_x11
     dep_glproto = dependency('glproto', version : dep_glproto_version)
   endif
   if with_glx == 'dri'
-    if with_dri_platform == 'drm'
+    if with_dri_platform == 'drm' or with_dri_platform == 'pseudo-drm'
       if with_glx_direct
         dep_xxf86vm = dependency('xxf86vm')
       endif
@@ -2209,7 +2341,7 @@ renderdoc_integration_supported = [
   'linux',
   'android',
 ].contains(host_machine.system())
-pre_args += '-DHAVE_RENDERDOC_INTEGRATION=@0@'.format(renderdoc_integration_supported)
+pre_args += '-DHAVE_RENDERDOC_INTEGRATION=@0@'.format(renderdoc_integration_supported.to_int())
 
 with_teflon = get_option('teflon')
 if with_teflon and with_tests
@@ -2245,7 +2377,7 @@ elif with_glx == 'dri'
   gl_priv_reqs += [
     'x11', 'xext', 'xfixes', 'x11-xcb', 'xcb',
     'xcb-glx >= 1.8.1']
-  if with_dri_platform == 'drm'
+  if with_dri_platform == 'drm' or with_dri_platform == 'pseudo-drm'
     gl_priv_reqs += 'xcb-dri2 >= 1.8'
     if with_glx_direct
       gl_priv_reqs += 'xxf86vm'
@@ -2311,6 +2443,14 @@ else
   vulkan_icd_lib_path = get_option('prefix') / get_option('libdir')
 endif
 
+vulkan_manifest_per_architecture = get_option('vulkan-manifest-per-architecture')
+
+if vulkan_manifest_per_architecture
+  vulkan_manifest_suffix = '@0@.json'.format(host_machine.cpu())
+else
+  vulkan_manifest_suffix = 'json'
+endif
+
 subdir('include')
 subdir('bin')
 subdir('src')
@@ -2371,7 +2511,7 @@ if with_egl
   if with_dri
     egl_drivers += 'builtin:egl_dri2'
   endif
-  if with_dri_platform == 'drm'
+  if with_dri_platform == 'drm' or with_dri_platform == 'pseudo-drm'
     egl_drivers += 'builtin:egl_dri3'
   endif
   if with_platform_windows

@@ -329,7 +329,7 @@ void _mesa_glthread_disable(struct gl_context *ctx)
    /* Unbind VBOs in all VAOs that glthread bound for non-VBO vertex uploads
     * to restore original states.
     */
-   if (ctx->API != API_OPENGL_CORE)
+   if (!_mesa_is_desktop_gl_core(ctx))
       _mesa_glthread_unbind_uploaded_vbos(ctx);
 }
 

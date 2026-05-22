@@ -492,7 +492,7 @@ search_drawpixels_cache(struct st_context *st,
             continue;
 
          /* check if the pixel data is the same */
-         if (memcmp(pixels, entry->image, width * height * bpp) == 0) {
+         if (memcmp(pixels, entry->image, (size_t)width * height * bpp) == 0) {
             /* Success - found a cache match */
             pipe_resource_reference(&pt, entry->texture);
             /* refcount of returned texture should be at least two here.  One
@@ -556,6 +556,7 @@ cache_drawpixels_image(struct st_context *st,
       const GLint bpp = _mesa_bytes_per_pixel(format, type);
       struct drawpix_cache_entry *entry =
          find_oldest_drawpixels_cache_entry(st);
+      const size_t n_bytes = (size_t)width * height * bpp;
       assert(entry);
       entry->width = width;
       entry->height = height;
@@ -565,9 +566,9 @@ cache_drawpixels_image(struct st_context *st,
              sizeof(struct gl_pixelmaps));
       entry->user_pointer = pixels;
       free(entry->image);
-      entry->image = malloc(width * height * bpp);
+      entry->image = malloc(n_bytes);
       if (entry->image) {
-         memcpy(entry->image, pixels, width * height * bpp);
+         memcpy(entry->image, pixels, n_bytes);
          pipe_resource_reference(&entry->texture, pt);
          entry->age = ++st->drawpix_cache.age;
       }
@@ -747,7 +748,8 @@ draw_textured_quad(struct gl_context *ctx, GLint x, GLint y, GLfloat z,
                      CSO_BIT_FRAGMENT_SAMPLERS |
                      CSO_BIT_STREAM_OUTPUTS |
                      CSO_BIT_VERTEX_ELEMENTS |
-                     CSO_BITS_ALL_SHADERS);
+                     CSO_BIT_MESH_SHADER |
+                     CSO_BITS_VERTEX_PIPE_SHADERS);
    if (write_stencil) {
       cso_state_mask |= (CSO_BIT_DEPTH_STENCIL_ALPHA |
                          CSO_BIT_BLEND);
@@ -805,7 +807,6 @@ draw_textured_quad(struct gl_context *ctx, GLint x, GLint y, GLfloat z,
    cso_set_tessctrl_shader_handle(cso, NULL);
    cso_set_tesseval_shader_handle(cso, NULL);
    cso_set_geometry_shader_handle(cso, NULL);
-   cso_set_task_shader_handle(cso, NULL);
    cso_set_mesh_shader_handle(cso, NULL);
 
    /* user samplers, plus the drawpix samplers */
@@ -1410,7 +1411,7 @@ copy_stencil_pixels(struct gl_context *ctx, GLint srcx, GLint srcy,
    uint8_t *buffer;
    int i;
 
-   buffer = malloc(width * height * sizeof(uint8_t));
+   buffer = malloc((size_t)width * height * sizeof(uint8_t));
    if (!buffer) {
       _mesa_error(ctx, GL_OUT_OF_MEMORY, "glCopyPixels(stencil)");
       return;

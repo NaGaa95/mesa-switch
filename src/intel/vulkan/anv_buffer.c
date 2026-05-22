@@ -33,6 +33,11 @@ anv_bind_buffer_memory(struct anv_device *device,
 
    ANV_RMV(buffer_bind, device, buffer);
 
+   ANV_ADDR_BINDING_REPORT_ADDR_BIND(device,
+                                     &buffer->vk.base,
+                                     buffer->vk.device_address,
+                                     buffer->vk.size);
+
    if (bind_status)
       *bind_status->pResult = VK_SUCCESS;
 }
@@ -154,8 +159,8 @@ void anv_GetDeviceBufferMemoryRequirements(
        pInfo->pCreateInfo->flags & (VK_BUFFER_CREATE_SPARSE_BINDING_BIT |
                                     VK_BUFFER_CREATE_SPARSE_RESIDENCY_BIT |
                                     VK_BUFFER_CREATE_SPARSE_ALIASED_BIT))
-      fprintf(stderr, "=== %s %s:%d flags:0x%08x\n", __func__, __FILE__,
-              __LINE__, pInfo->pCreateInfo->flags);
+      mesa_logi("=== %s %s:%d flags:0x%08x\n", __func__, __FILE__,
+                __LINE__, pInfo->pCreateInfo->flags);
 
    anv_get_buffer_memory_requirements(device,
                                       pInfo->pCreateInfo->flags,
@@ -179,8 +184,8 @@ VkResult anv_CreateBuffer(
        pCreateInfo->flags & (VK_BUFFER_CREATE_SPARSE_BINDING_BIT |
                              VK_BUFFER_CREATE_SPARSE_RESIDENCY_BIT |
                              VK_BUFFER_CREATE_SPARSE_ALIASED_BIT))
-      fprintf(stderr, "=== %s %s:%d flags:0x%08x\n", __func__, __FILE__,
-              __LINE__, pCreateInfo->flags);
+      mesa_logi("=== %s %s:%d flags:0x%08x\n", __func__, __FILE__,
+                __LINE__, pCreateInfo->flags);
 
    if ((pCreateInfo->flags & VK_BUFFER_CREATE_SPARSE_BINDING_BIT) &&
        device->physical->sparse_type == ANV_SPARSE_TYPE_TRTT) {
@@ -247,6 +252,10 @@ VkResult anv_CreateBuffer(
       }
 
       buffer->vk.device_address = anv_address_physical(buffer->address);
+
+      ANV_ADDR_BINDING_REPORT_ADDR_BIND(device, &buffer->vk.base,
+                                        buffer->vk.device_address,
+                                        buffer->sparse_data.size);
    }
 
    ANV_RMV(buffer_create, device, false, buffer);
@@ -272,6 +281,13 @@ void anv_DestroyBuffer(
    if (anv_buffer_is_sparse(buffer)) {
       assert(buffer->address.offset == buffer->sparse_data.address);
       anv_free_sparse_bindings(device, &buffer->sparse_data);
+      ANV_ADDR_BINDING_REPORT_ADDR_UNBIND(device, &buffer->vk.base,
+                                          buffer->vk.device_address,
+                                          buffer->sparse_data.size);
+   } else {
+      ANV_ADDR_BINDING_REPORT_ADDR_UNBIND(device, &buffer->vk.base,
+                                          buffer->vk.device_address,
+                                          buffer->vk.size);
    }
 
    vk_buffer_destroy(&device->vk, pAllocator, &buffer->vk);

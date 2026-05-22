@@ -1,28 +1,6 @@
 /*
  * Copyright © 2010 Intel Corporation
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
- * IN THE SOFTWARE.
- *
- * Authors:
- *    Eric Anholt <eric@anholt.net>
- *
+ * SPDX-License-Identifier: MIT
  */
 
 #include "brw_eu.h"
@@ -52,7 +30,7 @@ brw_assign_regs_trivial(brw_shader &s)
    int reg_width = s.dispatch_width / 8;
 
    /* Note that compressed instructions require alignment to 2 registers. */
-   hw_reg_mapping[0] = ALIGN(s.first_non_payload_grf, reg_width);
+   hw_reg_mapping[0] = align(s.first_non_payload_grf, reg_width);
    for (i = 1; i <= s.alloc.count; i++) {
       hw_reg_mapping[i] = (hw_reg_mapping[i - 1] +
                            DIV_ROUND_UP(s.alloc.sizes[i - 1],
@@ -264,7 +242,7 @@ public:
        * for reg_width == 2.
        */
       int reg_width = fs->dispatch_width / 8;
-      payload_node_count = ALIGN(fs->first_non_payload_grf, reg_width);
+      payload_node_count = align(fs->first_non_payload_grf, reg_width);
 
       /* Get payload IP information */
       payload_last_use_ip = ralloc_array(mem_ctx, int, payload_node_count);
@@ -295,8 +273,6 @@ private:
    void setup_inst_interference(const brw_inst *inst);
 
    bool build_interference_graph(bool allow_spilling);
-
-   brw_reg build_ex_desc(const brw_builder &bld, unsigned reg_size, bool unspill);
 
    brw_reg build_lane_offsets(const brw_builder &bld,
                               uint32_t spill_offset, int ip);
@@ -505,6 +481,10 @@ brw_inst_has_source_and_destination_hazard(const struct intel_device_info *devin
        * be overly conservative.
        */
       return inst->as_dpas()->rcount > 1;
+
+   case SHADER_OPCODE_LSC_FILL:
+      return false;
+
    default:
       /* The SIMD16 compressed instruction
        *
@@ -631,6 +611,13 @@ brw_reg_alloc::setup_inst_interference(const brw_inst *inst)
       ra_add_node_interference(g,
          first_vgrf_node + inst->src[SEND_SRC_PAYLOAD1].nr,
          first_vgrf_node + inst->src[SEND_SRC_PAYLOAD2].nr);
+   } else if (inst->opcode == SHADER_OPCODE_LSC_SPILL &&
+              inst->src[SPILL_SRC_PAYLOAD1].file == VGRF &&
+              inst->src[SPILL_SRC_PAYLOAD2].file == VGRF &&
+              inst->src[SPILL_SRC_PAYLOAD1].nr != inst->src[SPILL_SRC_PAYLOAD2].nr) {
+      ra_add_node_interference(g,
+         first_vgrf_node + inst->src[SPILL_SRC_PAYLOAD1].nr,
+         first_vgrf_node + inst->src[SPILL_SRC_PAYLOAD2].nr);
    }
 
    /* When we do send-from-GRF for FB writes, we need to ensure that the last
@@ -775,43 +762,6 @@ brw_reg_alloc::build_single_offset(const brw_builder &bld, uint32_t spill_offset
 }
 
 brw_reg
-brw_reg_alloc::build_ex_desc(const brw_builder &bld, unsigned reg_size, bool unspill)
-{
-   /* Use a different area of the address register than what is used in
-    * brw_lower_logical_sends.c (brw_address_reg(2)) so we don't have
-    * interactions between the spill/fill instructions and the other send
-    * messages.
-    */
-   brw_reg ex_desc = bld.vaddr(BRW_TYPE_UD,
-                               BRW_ADDRESS_SUBREG_INDIRECT_SPILL_DESC);
-
-   brw_builder ubld = bld.uniform();
-
-   brw_inst *inst = ubld.AND(ex_desc,
-                             retype(brw_vec1_grf(0, 5), BRW_TYPE_UD),
-                             brw_imm_ud(INTEL_MASK(31, 10)));
-   _mesa_set_add(spill_insts, inst);
-
-   const intel_device_info *devinfo = bld.shader->devinfo;
-   if (devinfo->verx10 >= 200) {
-      inst = ubld.SHR(ex_desc, ex_desc, brw_imm_ud(4));
-      _mesa_set_add(spill_insts, inst);
-   } else {
-      if (unspill) {
-         inst = ubld.OR(ex_desc, ex_desc, brw_imm_ud(BRW_SFID_UGM));
-         _mesa_set_add(spill_insts, inst);
-      } else {
-         inst = ubld.OR(ex_desc,
-                        ex_desc,
-                        brw_imm_ud(brw_message_ex_desc(devinfo, reg_size) | BRW_SFID_UGM));
-         _mesa_set_add(spill_insts, inst);
-      }
-   }
-
-   return ex_desc;
-}
-
-brw_reg
 brw_reg_alloc::build_lane_offsets(const brw_builder &bld, uint32_t spill_offset, int ip)
 {
    assert(bld.dispatch_width() <= 16 * reg_unit(bld.shader->devinfo));
@@ -905,7 +855,6 @@ brw_reg_alloc::emit_unspill(const brw_builder &bld,
    for (unsigned i = 0; i < DIV_ROUND_UP(count, reg_size); i++) {
       ++stats->fill_count;
 
-      brw_send_inst *unspill_inst;
       if (devinfo->verx10 >= 125) {
          /* LSC is limited to SIMD16 (SIMD32 on Xe2) load/store but we can
           * load more using transpose messages.
@@ -921,46 +870,26 @@ brw_reg_alloc::emit_unspill(const brw_builder &bld,
             offset = build_lane_offsets(ubld, spill_offset, ip);
          }
 
-         uint32_t desc = lsc_msg_desc(devinfo, LSC_OP_LOAD,
-                                      LSC_ADDR_SURFTYPE_SS,
-                                      LSC_ADDR_SIZE_A32,
-                                      LSC_DATA_SIZE_D32,
-                                      use_transpose ? reg_size * 8 : 1 /* num_channels */,
-                                      use_transpose,
-                                      LSC_CACHE(devinfo, LOAD, L1STATE_L3MOCS));
-
-         const brw_reg ex_desc_reg = build_ex_desc(bld, reg_size, true);
-
-         unspill_inst = ubld.SEND();
+         const bool exec_all = use_transpose || bld.has_writemask_all();
+         brw_scratch_inst *unspill_inst = bld.exec_all(exec_all).FILL();
          unspill_inst->dst = dst;
 
-         unspill_inst->src[SEND_SRC_DESC]     = brw_imm_ud(0);
-         unspill_inst->src[SEND_SRC_EX_DESC]  = ex_desc_reg;
-         unspill_inst->src[SEND_SRC_PAYLOAD1] = offset;
-         unspill_inst->src[SEND_SRC_PAYLOAD2] = brw_reg();
+         unspill_inst->src[FILL_SRC_PAYLOAD1] = offset;
 
-         unspill_inst->sfid = BRW_SFID_UGM;
-         unspill_inst->header_size = 0;
-         unspill_inst->mlen = lsc_msg_addr_len(devinfo, LSC_ADDR_SIZE_A32,
-                                               unspill_inst->exec_size);
-         unspill_inst->ex_mlen = 0;
+         unspill_inst->offset = spill_offset;
+         unspill_inst->use_transpose = use_transpose;
          unspill_inst->size_written =
             lsc_msg_dest_len(devinfo, LSC_DATA_SIZE_D32, bld.dispatch_width()) * REG_SIZE;
-         unspill_inst->has_side_effects = false;
-         unspill_inst->is_volatile = true;
+         assert(unspill_inst->size_written == (reg_size * REG_SIZE));
 
-         unspill_inst->src[0] = brw_imm_ud(
-            desc |
-            brw_message_desc(devinfo,
-                             unspill_inst->mlen,
-                             unspill_inst->size_written / REG_SIZE,
-                             unspill_inst->header_size));
+         _mesa_set_add(spill_insts, unspill_inst);
+         assert(unspill_inst->force_writemask_all || count % reg_size == 0);
       } else {
          brw_reg header = build_legacy_scratch_header(bld, spill_offset, ip);
 
          const unsigned bti = GFX8_BTI_STATELESS_NON_COHERENT;
 
-         unspill_inst = bld.SEND();
+         brw_send_inst *unspill_inst = bld.SEND();
          unspill_inst->dst = dst;
 
          unspill_inst->src[SEND_SRC_DESC]     = brw_imm_ud(0);
@@ -983,9 +912,10 @@ brw_reg_alloc::emit_unspill(const brw_builder &bld,
                              unspill_inst->mlen,
                              unspill_inst->size_written / REG_SIZE,
                              unspill_inst->header_size));
+
+         _mesa_set_add(spill_insts, unspill_inst);
+         assert(unspill_inst->force_writemask_all || count % reg_size == 0);
       }
-      _mesa_set_add(spill_insts, unspill_inst);
-      assert(unspill_inst->force_writemask_all || count % reg_size == 0);
 
       dst.offset += reg_size * REG_SIZE;
       spill_offset += reg_size * REG_SIZE;
@@ -1005,48 +935,26 @@ brw_reg_alloc::emit_spill(const brw_builder &bld,
    for (unsigned i = 0; i < DIV_ROUND_UP(count, reg_size); i++) {
       ++stats->spill_count;
 
-      brw_send_inst *spill_inst;
       if (devinfo->verx10 >= 125) {
          brw_reg offset = build_lane_offsets(bld, spill_offset, ip);
 
-         const brw_reg ex_desc_reg = build_ex_desc(bld, reg_size, false);
-
-         spill_inst = bld.SEND();
+         brw_scratch_inst *spill_inst = bld.SPILL();
          spill_inst->dst = bld.null_reg_f();
 
-         spill_inst->src[SEND_SRC_DESC]     = brw_imm_ud(0);
-         spill_inst->src[SEND_SRC_EX_DESC]  = ex_desc_reg;
-         spill_inst->src[SEND_SRC_PAYLOAD1] = offset;
-         spill_inst->src[SEND_SRC_PAYLOAD2] = src;
+         spill_inst->src[SPILL_SRC_PAYLOAD1] = offset;
+         spill_inst->src[SPILL_SRC_PAYLOAD2] = src;
 
-         spill_inst->sfid = BRW_SFID_UGM;
-         uint32_t desc = lsc_msg_desc(devinfo, LSC_OP_STORE,
-                                      LSC_ADDR_SURFTYPE_SS,
-                                      LSC_ADDR_SIZE_A32,
-                                      LSC_DATA_SIZE_D32,
-                                      1 /* num_channels */,
-                                      false /* transpose */,
-                                      LSC_CACHE(devinfo, LOAD, L1STATE_L3MOCS));
-         spill_inst->header_size = 0;
-         spill_inst->mlen = lsc_msg_addr_len(devinfo, LSC_ADDR_SIZE_A32,
-                                             bld.dispatch_width());
-         spill_inst->ex_mlen = reg_size;
-         spill_inst->size_written = 0;
-         spill_inst->has_side_effects = true;
-         spill_inst->is_volatile = false;
+         spill_inst->offset = spill_offset;
+         spill_inst->use_transpose = false;
 
-         spill_inst->src[0] = brw_imm_ud(
-            desc |
-            brw_message_desc(devinfo,
-                             spill_inst->mlen,
-                             spill_inst->size_written / REG_SIZE,
-                             spill_inst->header_size));
+         _mesa_set_add(spill_insts, spill_inst);
+         assert(spill_inst->force_writemask_all || count % reg_size == 0);
       } else {
          brw_reg header = build_legacy_scratch_header(bld, spill_offset, ip);
 
          const unsigned bti = GFX8_BTI_STATELESS_NON_COHERENT;
 
-         spill_inst = bld.SEND();
+         brw_send_inst *spill_inst = bld.SEND();
          spill_inst->dst = bld.null_reg_f();
 
          spill_inst->src[SEND_SRC_DESC]     = brw_imm_ud(0);
@@ -1072,9 +980,10 @@ brw_reg_alloc::emit_spill(const brw_builder &bld,
                              spill_inst->header_size));
          spill_inst->src[1] = brw_imm_ud(
             brw_message_ex_desc(devinfo, spill_inst->ex_mlen));
+
+         _mesa_set_add(spill_insts, spill_inst);
+         assert(spill_inst->force_writemask_all || count % reg_size == 0);
       }
-      _mesa_set_add(spill_insts, spill_inst);
-      assert(spill_inst->force_writemask_all || count % reg_size == 0);
 
       src.offset += reg_size * REG_SIZE;
       spill_offset += reg_size * REG_SIZE;
@@ -1180,7 +1089,7 @@ brw_reg_alloc::choose_spill_reg()
 brw_reg
 brw_reg_alloc::alloc_spill_reg(unsigned size, int ip)
 {
-   int vgrf = brw_allocate_vgrf_units(*fs, ALIGN(size, reg_unit(devinfo))).nr;
+   int vgrf = brw_allocate_vgrf_units(*fs, align(size, reg_unit(devinfo))).nr;
    int class_idx = DIV_ROUND_UP(size, reg_unit(devinfo)) - 1;
    int n = ra_add_node(g, compiler->reg_set.classes[class_idx]);
    assert(n == first_vgrf_node + vgrf);
@@ -1216,7 +1125,7 @@ brw_reg_alloc::spill_reg(unsigned spill_reg)
 {
    int size = fs->alloc.sizes[spill_reg];
    unsigned int spill_offset = fs->last_scratch;
-   assert(ALIGN(spill_offset, 16) == spill_offset); /* oword read/write req. */
+   assert(align(spill_offset, 16) == spill_offset); /* oword read/write req. */
 
    fs->spilled_any_registers = true;
 
@@ -1269,6 +1178,10 @@ brw_reg_alloc::spill_reg(unsigned spill_reg)
              * scratch space and the scratch read message, which operates on
              * 32 bit channels.  It shouldn't hurt in any case because the
              * unspill destination is a block-local temporary.
+             *
+             * FINIHSME: However, this will prevent brw_opt_fill_and_spill
+             * from making progress if the lsc_fill is NoMask and the
+             * lsc_spill is not.
              */
             emit_unspill(ibld.exec_all().group(width, 0), &fs->shader_stats,
                          unspill_dst, subset_spill_offset, count, ip);

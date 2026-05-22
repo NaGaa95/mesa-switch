@@ -558,7 +558,14 @@ zink_create_rasterizer_state(struct pipe_context *pctx,
       state->hw_state.polygon_mode = VK_POLYGON_MODE_FILL;
       state->cull_mode = VK_CULL_MODE_NONE;
    } else {
-      state->hw_state.polygon_mode = rs_state->fill_front; // same values
+      if (rs_state->fill_front != PIPE_POLYGON_MODE_FILL &&
+          !screen->info.feats.features.fillModeNonSolid) {
+         static bool warned = false;
+         warn_missing_feature(warned, "fillModeNonSolid");
+         state->hw_state.polygon_mode = VK_POLYGON_MODE_FILL;
+      } else {
+         state->hw_state.polygon_mode = rs_state->fill_front; // same values
+      }
       state->cull_mode = rs_state->cull_face; // same bits
    }
 
@@ -639,8 +646,10 @@ zink_bind_rasterizer_state(struct pipe_context *pctx, void *cso)
       ctx->rast_state_changed = true;
 
       if (clip_halfz != ctx->rast_state->base.clip_halfz) {
-         if (screen->info.have_EXT_depth_clip_control)
-            ctx->gfx_pipeline_state.dirty = ctx->gfx_pipeline_state.mesh_dirty = true;
+         if (screen->info.have_EXT_depth_clip_control) {
+            ctx->gfx_pipeline_state.dirty |= !screen->have_full_ds3;
+            ctx->gfx_pipeline_state.mesh_dirty |= !screen->have_full_ds3;
+         }
          else
             zink_set_last_vertex_key(ctx)->clip_halfz = ctx->rast_state->base.clip_halfz;
          ctx->vp_state_changed = true;

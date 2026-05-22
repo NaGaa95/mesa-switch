@@ -96,9 +96,9 @@ collect_reaching_defs(nir_alu_instr *fsat, nir_instr_worklist *sources)
     * brw_opt_saturate_propagation will already have enough information to
     * do its job. Adding another fsat will not help.
     */
-   if (def->parent_instr->type == nir_instr_type_alu &&
+   if (nir_def_is_alu(def) &&
        nir_def_block(def) != fsat->instr.block) {
-      nir_instr_worklist_push_tail(sources, def->parent_instr);
+      nir_instr_worklist_push_tail(sources, nir_def_instr(def));
    }
 }
 
@@ -235,6 +235,7 @@ brw_nir_opt_fsat(nir_shader *shader)
                 * the move.
                 */
                alu->op = nir_op_mov;
+               alu->fp_math_ctrl = nir_op_valid_fp_math_ctrl(alu->op, alu->fp_math_ctrl);
                progress_impl = true;
             }
          }

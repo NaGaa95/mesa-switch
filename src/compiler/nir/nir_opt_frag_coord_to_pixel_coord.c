@@ -75,6 +75,7 @@ opt_frag_pos(nir_builder *b, nir_intrinsic_instr *intr, UNUSED void *data)
       bool needs_float = use_instr->op == nir_op_ffloor || use_instr->op == nir_op_ftrunc;
       nir_alu_type dst_type = (needs_float ? nir_type_float : nir_type_uint) | use_instr->def.bit_size;
       use_instr->op = nir_type_conversion_op(nir_type_uint16, dst_type, nir_rounding_mode_undef);
+      use_instr->fp_math_ctrl = nir_op_valid_fp_math_ctrl(use_instr->op, use_instr->fp_math_ctrl);
    }
 
    return true;

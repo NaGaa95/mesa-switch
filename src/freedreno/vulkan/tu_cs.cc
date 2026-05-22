@@ -378,6 +378,7 @@ tu_cs_alloc(struct tu_cs *cs,
        */
       memory->map = NULL;
       memory->iova = 0xdead0000;
+      memory->writeable = false;
       return VK_SUCCESS;
    }
 
@@ -627,4 +628,10 @@ tu_cs_trace_end(struct u_trace_context *utctx, void *cs, const char *fmt, ...)
    va_start(args, fmt);
    tu_cs_emit_debug_magic_strv((struct tu_cs *) cs, CP_NOP_END, fmt, args);
    va_end(args);
+}
+
+tu_crb
+tu_cs::crb(uint32_t nregs)
+{
+   return tu_crb(this, nregs);
 }

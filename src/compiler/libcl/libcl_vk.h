@@ -181,3 +181,9 @@ typedef struct VkTraceRaysIndirectCommand2KHR {
     uint32_t           height;
     uint32_t           depth;
 } VkTraceRaysIndirectCommand2KHR __attribute__((aligned(4)));
+
+typedef struct VkCopyMemoryIndirectCommandKHR {
+    VkDeviceAddress    srcAddress;
+    VkDeviceAddress    dstAddress;
+    VkDeviceSize       size;
+} VkCopyMemoryIndirectCommandKHR;

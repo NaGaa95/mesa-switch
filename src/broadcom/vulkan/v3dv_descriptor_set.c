@@ -24,7 +24,13 @@
 #include "vk_descriptors.h"
 #include "vk_util.h"
 
-#include "v3dv_private.h"
+#include "v3dv_device.h"
+#include "v3dv_cmd_buffer.h"
+#include "v3dv_image.h"
+#include "v3dv_entrypoints.h"
+#include "v3dv_version_dispatch.h"
+#include "vk_ycbcr_conversion.h"
+#include "vk_descriptor_update_template.h"
 
 /*
  * For a given descriptor defined by the descriptor_set it belongs, its
@@ -276,33 +282,33 @@ v3dv_descriptor_map_get_texture_shader_state(struct v3dv_device *device,
    return reloc;
 }
 
-#define SHA1_UPDATE_VALUE(ctx, x) _mesa_sha1_update(ctx, &(x), sizeof(x));
+#define BLAKE3_UPDATE_VALUE(ctx, x) _mesa_blake3_update(ctx, &(x), sizeof(x));
 
 static void
-sha1_update_ycbcr_conversion(struct mesa_sha1 *ctx,
+blake3_update_ycbcr_conversion(blake3_hasher *ctx,
                              const struct vk_ycbcr_conversion_state *conversion)
 {
-   SHA1_UPDATE_VALUE(ctx, conversion->format);
-   SHA1_UPDATE_VALUE(ctx, conversion->ycbcr_model);
-   SHA1_UPDATE_VALUE(ctx, conversion->ycbcr_range);
-   SHA1_UPDATE_VALUE(ctx, conversion->mapping);
-   SHA1_UPDATE_VALUE(ctx, conversion->chroma_offsets);
-   SHA1_UPDATE_VALUE(ctx, conversion->chroma_reconstruction);
+   BLAKE3_UPDATE_VALUE(ctx, conversion->format);
+   BLAKE3_UPDATE_VALUE(ctx, conversion->ycbcr_model);
+   BLAKE3_UPDATE_VALUE(ctx, conversion->ycbcr_range);
+   BLAKE3_UPDATE_VALUE(ctx, conversion->mapping);
+   BLAKE3_UPDATE_VALUE(ctx, conversion->chroma_offsets);
+   BLAKE3_UPDATE_VALUE(ctx, conversion->chroma_reconstruction);
 }
 
 static void
-sha1_update_descriptor_set_binding_layout(struct mesa_sha1 *ctx,
+blake3_update_descriptor_set_binding_layout(blake3_hasher *ctx,
                                           const struct v3dv_descriptor_set_binding_layout *layout,
                                           const struct v3dv_descriptor_set_layout *set_layout)
 {
-   SHA1_UPDATE_VALUE(ctx, layout->type);
-   SHA1_UPDATE_VALUE(ctx, layout->array_size);
-   SHA1_UPDATE_VALUE(ctx, layout->descriptor_index);
-   SHA1_UPDATE_VALUE(ctx, layout->dynamic_offset_count);
-   SHA1_UPDATE_VALUE(ctx, layout->dynamic_offset_index);
-   SHA1_UPDATE_VALUE(ctx, layout->descriptor_offset);
-   SHA1_UPDATE_VALUE(ctx, layout->immutable_samplers_offset);
-   SHA1_UPDATE_VALUE(ctx, layout->plane_stride);
+   BLAKE3_UPDATE_VALUE(ctx, layout->type);
+   BLAKE3_UPDATE_VALUE(ctx, layout->array_size);
+   BLAKE3_UPDATE_VALUE(ctx, layout->descriptor_index);
+   BLAKE3_UPDATE_VALUE(ctx, layout->dynamic_offset_count);
+   BLAKE3_UPDATE_VALUE(ctx, layout->dynamic_offset_index);
+   BLAKE3_UPDATE_VALUE(ctx, layout->descriptor_offset);
+   BLAKE3_UPDATE_VALUE(ctx, layout->immutable_samplers_offset);
+   BLAKE3_UPDATE_VALUE(ctx, layout->plane_stride);
 
    if (layout->immutable_samplers_offset) {
       const struct v3dv_sampler *immutable_samplers =
@@ -311,23 +317,23 @@ sha1_update_descriptor_set_binding_layout(struct mesa_sha1 *ctx,
       for (unsigned i = 0; i < layout->array_size; i++) {
          const struct v3dv_sampler *sampler = &immutable_samplers[i];
          if (sampler->conversion)
-            sha1_update_ycbcr_conversion(ctx, &sampler->conversion->state);
+            blake3_update_ycbcr_conversion(ctx, &sampler->conversion->state);
       }
    }
 }
 
 static void
-sha1_update_descriptor_set_layout(struct mesa_sha1 *ctx,
+blake3_update_descriptor_set_layout(blake3_hasher *ctx,
                                   const struct v3dv_descriptor_set_layout *layout)
 {
-   SHA1_UPDATE_VALUE(ctx, layout->flags);
-   SHA1_UPDATE_VALUE(ctx, layout->binding_count);
-   SHA1_UPDATE_VALUE(ctx, layout->shader_stages);
-   SHA1_UPDATE_VALUE(ctx, layout->descriptor_count);
-   SHA1_UPDATE_VALUE(ctx, layout->dynamic_offset_count);
+   BLAKE3_UPDATE_VALUE(ctx, layout->flags);
+   BLAKE3_UPDATE_VALUE(ctx, layout->binding_count);
+   BLAKE3_UPDATE_VALUE(ctx, layout->shader_stages);
+   BLAKE3_UPDATE_VALUE(ctx, layout->descriptor_count);
+   BLAKE3_UPDATE_VALUE(ctx, layout->dynamic_offset_count);
 
    for (uint16_t i = 0; i < layout->binding_count; i++)
-      sha1_update_descriptor_set_binding_layout(ctx, &layout->binding[i], layout);
+      blake3_update_descriptor_set_binding_layout(ctx, &layout->binding[i], layout);
 }
 
 
@@ -384,15 +390,15 @@ v3dv_CreatePipelineLayout(VkDevice _device,
 
    layout->dynamic_offset_count = dynamic_offset_count;
 
-   struct mesa_sha1 ctx;
-   _mesa_sha1_init(&ctx);
+   blake3_hasher ctx;
+   _mesa_blake3_init(&ctx);
    for (unsigned s = 0; s < layout->num_sets; s++) {
-      sha1_update_descriptor_set_layout(&ctx, layout->set[s].layout);
-      _mesa_sha1_update(&ctx, &layout->set[s].dynamic_offset_start,
+      blake3_update_descriptor_set_layout(&ctx, layout->set[s].layout);
+      _mesa_blake3_update(&ctx, &layout->set[s].dynamic_offset_start,
                         sizeof(layout->set[s].dynamic_offset_start));
    }
-   _mesa_sha1_update(&ctx, &layout->num_sets, sizeof(layout->num_sets));
-   _mesa_sha1_final(&ctx, layout->sha1);
+   _mesa_blake3_update(&ctx, &layout->num_sets, sizeof(layout->num_sets));
+   _mesa_blake3_final(&ctx, layout->blake3);
 
    *pPipelineLayout = v3dv_pipeline_layout_to_handle(layout);
 
@@ -714,7 +720,8 @@ v3dv_CreateDescriptorSetLayout(VkDevice _device,
 
    VkDescriptorSetLayoutBinding *bindings = NULL;
    VkResult result = vk_create_sorted_bindings(pCreateInfo->pBindings,
-                                               pCreateInfo->bindingCount, &bindings);
+                                               pCreateInfo->bindingCount, &bindings,
+                                               NULL, NULL);
    if (result != VK_SUCCESS) {
       v3dv_descriptor_set_layout_destroy(device, set_layout);
       return vk_error(device, result);
@@ -1338,7 +1345,7 @@ v3dv_GetDescriptorSetLayoutSupport(
    V3DV_FROM_HANDLE(v3dv_device, device, _device);
    VkDescriptorSetLayoutBinding *bindings = NULL;
    VkResult result = vk_create_sorted_bindings(
-      pCreateInfo->pBindings, pCreateInfo->bindingCount, &bindings);
+      pCreateInfo->pBindings, pCreateInfo->bindingCount, &bindings, NULL, NULL);
    if (result != VK_SUCCESS) {
       pSupport->supported = false;
       return;

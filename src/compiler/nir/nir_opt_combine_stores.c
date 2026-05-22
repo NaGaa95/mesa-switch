@@ -279,7 +279,8 @@ static void
 combine_stores_block(struct combine_stores_state *state, nir_block *block)
 {
    nir_foreach_instr_safe(instr, block) {
-      if (instr->type == nir_instr_type_call) {
+      if (instr->type == nir_instr_type_call ||
+          instr->type == nir_instr_type_cmat_call) {
          combine_stores_with_modes(state, nir_var_shader_out |
                                              nir_var_shader_temp |
                                              nir_var_function_temp |

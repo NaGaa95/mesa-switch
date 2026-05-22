@@ -123,8 +123,6 @@ void st_init_limits(struct pipe_screen *screen,
 
    c->MaxTextureSize = screen->caps.max_texture_2d_size;
    c->MaxTextureSize = MIN2(c->MaxTextureSize, 1 << (MAX_TEXTURE_LEVELS - 1));
-   c->MaxTextureMbytes = MAX2(c->MaxTextureMbytes,
-                              screen->caps.max_texture_mb);
 
    c->Max3DTextureLevels
       = _min(screen->caps.max_texture_3d_levels,
@@ -641,7 +639,8 @@ void st_init_limits(struct pipe_screen *screen,
    c->ShaderSubgroupSupportedStages =
       mesa_to_gl_stages(screen->caps.shader_subgroup_supported_stages);
    c->ShaderSubgroupSupportedFeatures =
-      screen->caps.shader_subgroup_supported_features;
+      screen->caps.shader_subgroup_supported_features &
+         BITFIELD_MASK(PIPE_SHADER_SUBGROUP_NUM_FEATURES);
    c->ShaderSubgroupQuadAllStages =
       screen->caps.shader_subgroup_quad_all_stages;
 }
@@ -1117,6 +1116,7 @@ void st_init_extensions(struct pipe_screen *screen,
 #else
    EXT_CAP(EXT_semaphore_win32,              fence_signal);
 #endif
+   EXT_CAP(EXT_shader_pixel_local_storage,   shader_pixel_local_storage_size);
    EXT_CAP(EXT_shader_realtime_clock,        shader_realtime_clock);
    EXT_CAP(EXT_shader_samples_identical,     shader_samples_identical);
    EXT_CAP(EXT_texture_array,                max_texture_array_layers);
@@ -1229,7 +1229,7 @@ void st_init_extensions(struct pipe_screen *screen,
 
    consts->AllowGLSLBuiltinVariableRedeclaration = options->allow_glsl_builtin_variable_redeclaration;
 
-   consts->dri_config_options_sha1 = options->config_options_sha1;
+   consts->dri_config_options_blake3 = options->config_options_blake3;
 
    consts->AllowGLSLCrossStageInterpolationMismatch = options->allow_glsl_cross_stage_interpolation_mismatch;
 
@@ -1347,6 +1347,7 @@ void st_init_extensions(struct pipe_screen *screen,
 
    consts->ForceIntegerTexNearest = options->force_integer_tex_nearest;
 
+   consts->ForceExplicitUniformLocZero = options->force_explicit_uniform_loc_zero;
    consts->VendorOverride = options->force_gl_vendor;
    consts->RendererOverride = options->force_gl_renderer;
 
@@ -1557,6 +1558,9 @@ void st_init_extensions(struct pipe_screen *screen,
    if (options->allow_glsl_120_subset_in_110)
       consts->AllowGLSL120SubsetIn110 = GL_TRUE;
 
+   if (options->allow_glsl_embedded_structure_declarations)
+      consts->AllowGLSLEmbeddedStructureDeclarations = GL_TRUE;
+
    if (options->allow_glsl_builtin_const_expression)
       consts->AllowGLSLBuiltinConstantExpression = GL_TRUE;
 
@@ -1571,7 +1575,7 @@ void st_init_extensions(struct pipe_screen *screen,
        screen->caps.buffer_sampler_view_rgba_only)
       extensions->ARB_texture_buffer_object = GL_FALSE;
 
-   if (extensions->ARB_texture_buffer_object) {
+   if (screen->caps.texture_buffer_objects) {
       consts->MaxTextureBufferSize =
          screen->caps.max_texel_buffer_elements;
       consts->TextureBufferOffsetAlignment =
@@ -1587,7 +1591,7 @@ void st_init_extensions(struct pipe_screen *screen,
 
    extensions->OES_texture_buffer =
       consts->Program[MESA_SHADER_COMPUTE].MaxImageUniforms &&
-      extensions->ARB_texture_buffer_object &&
+      screen->caps.texture_buffer_objects &&
       extensions->ARB_texture_buffer_range &&
       extensions->ARB_texture_buffer_object_rgb32;
 
@@ -1728,7 +1732,7 @@ void st_init_extensions(struct pipe_screen *screen,
             max_variable_threads_per_block;
 
          extensions->ARB_compute_variable_group_size =
-            max_variable_threads_per_block > 0;
+            max_variable_threads_per_block >= 512;
       }
    }
 

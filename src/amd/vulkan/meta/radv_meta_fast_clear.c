@@ -8,6 +8,7 @@
 #include <stdbool.h>
 
 #include "nir/radv_meta_nir.h"
+#include "radv_cs.h"
 #include "radv_meta.h"
 
 enum radv_color_op {
@@ -55,7 +56,7 @@ get_dcc_decompress_compute_pipeline(struct radv_device *device, VkPipeline *pipe
       return VK_SUCCESS;
    }
 
-   nir_shader *cs = radv_meta_nir_build_dcc_decompress_compute_shader(device);
+   nir_shader *cs = radv_meta_nir_build_dcc_decompress_compute_shader();
 
    const VkPipelineShaderStageCreateInfo stage_info = {
       .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
@@ -108,8 +109,8 @@ get_pipeline(struct radv_device *device, enum radv_color_op op, VkPipeline *pipe
       return VK_SUCCESS;
    }
 
-   nir_shader *vs_module = radv_meta_nir_build_vs_generate_vertices(device);
-   nir_shader *fs_module = radv_meta_nir_build_fs_noop(device);
+   nir_shader *vs_module = radv_meta_nir_build_vs_generate_vertices();
+   nir_shader *fs_module = radv_meta_nir_build_fs_noop();
 
    VkGraphicsPipelineCreateInfoRADV radv_info = {
       .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO_RADV,
@@ -241,6 +242,7 @@ radv_process_color_image_layer(struct radv_cmd_buffer *cmd_buffer, struct radv_i
                                const VkImageSubresourceRange *range, int level, int layer, enum radv_color_op op)
 {
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
+   const struct radv_physical_device *pdev = radv_device_physical(device);
    struct radv_image_view iview;
    uint32_t width, height;
 
@@ -252,10 +254,16 @@ radv_process_color_image_layer(struct radv_cmd_buffer *cmd_buffer, struct radv_i
     */
    const bool disable_tc_compat_cmask_mrt = op == FMASK_DECOMPRESS || op == DCC_DECOMPRESS;
 
+   const VkImageViewUsageCreateInfo iview_usage_info = {
+      .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO,
+      .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+   };
+
    radv_image_view_init(
       &iview, device,
       &(VkImageViewCreateInfo){
          .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+         .pNext = &iview_usage_info,
          .flags = VK_IMAGE_VIEW_CREATE_DRIVER_INTERNAL_BIT_MESA,
          .image = radv_image_to_handle(image),
          .viewType = radv_meta_get_view_type(image),
@@ -281,7 +289,7 @@ radv_process_color_image_layer(struct radv_cmd_buffer *cmd_buffer, struct radv_i
 
    const VkRenderingInfo rendering_info = {
       .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
-      .flags = VK_RENDERING_INPUT_ATTACHMENT_NO_CONCURRENT_WRITES_BIT_MESA,
+      .flags = VK_RENDERING_LOCAL_READ_CONCURRENT_ACCESS_CONTROL_BIT_KHR,
       .renderArea = {.offset = {0, 0}, .extent = {width, height}},
       .layerCount = 1,
       .colorAttachmentCount = 1,
@@ -297,11 +305,29 @@ radv_process_color_image_layer(struct radv_cmd_buffer *cmd_buffer, struct radv_i
 
    radv_CmdDraw(radv_cmd_buffer_to_handle(cmd_buffer), 3, 1, 0, 0);
 
-   if (op == FMASK_DECOMPRESS || op == DCC_DECOMPRESS)
+   if (op == FMASK_DECOMPRESS || op == DCC_DECOMPRESS) {
+      /* On GFX6-8, the CB FMASK cache writes corrupted data if cache lines are flushed after their
+       * context has been retired. To avoid this, we must flush the CB metadata caches immediately
+       * after every FMASK decompress.
+       *
+       * PAL only applies this workaround on GFX6 but GFX7-8 are also affected and that matches
+       * RadeonSI.
+       */
+      if (pdev->info.gfx_level <= GFX8 && op == FMASK_DECOMPRESS) {
+         radeon_begin(cmd_buffer->cs);
+         radeon_event_write(V_028A90_FLUSH_AND_INV_CB_META);
+         radeon_end();
+      }
+
       cmd_buffer->state.flush_bits |= radv_src_access_flush(cmd_buffer, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
                                                             VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, 0, image, range);
+   }
 
-   radv_CmdEndRendering(radv_cmd_buffer_to_handle(cmd_buffer));
+   const VkRenderingEndInfoKHR end_info = {
+      .sType = VK_STRUCTURE_TYPE_RENDERING_END_INFO_KHR,
+   };
+
+   radv_CmdEndRendering2KHR(radv_cmd_buffer_to_handle(cmd_buffer), &end_info);
 
    radv_image_view_finish(&iview);
 }
@@ -312,7 +338,6 @@ radv_process_color_image(struct radv_cmd_buffer *cmd_buffer, struct radv_image *
 {
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
    const struct radv_physical_device *pdev = radv_device_physical(device);
-   struct radv_meta_saved_state saved_state;
    bool old_predicating = false;
    uint64_t pred_offset;
    VkPipelineLayout layout;
@@ -349,8 +374,6 @@ radv_process_color_image(struct radv_cmd_buffer *cmd_buffer, struct radv_image *
       pred_offset = 0;
    }
 
-   radv_meta_save(&saved_state, cmd_buffer, RADV_META_SAVE_GRAPHICS_PIPELINE | RADV_META_SAVE_RENDER);
-
    if (pred_offset) {
       pred_offset += 8 * subresourceRange->baseMipLevel;
 
@@ -360,7 +383,7 @@ radv_process_color_image(struct radv_cmd_buffer *cmd_buffer, struct radv_image *
       cmd_buffer->state.predicating = true;
    }
 
-   radv_CmdBindPipeline(radv_cmd_buffer_to_handle(cmd_buffer), VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+   radv_meta_bind_graphics_pipeline(cmd_buffer, pipeline);
 
    for (uint32_t l = 0; l < vk_image_subresource_level_count(&image->vk, subresourceRange); ++l) {
       uint32_t width, height;
@@ -372,15 +395,7 @@ radv_process_color_image(struct radv_cmd_buffer *cmd_buffer, struct radv_image *
       width = u_minify(image->vk.extent.width, subresourceRange->baseMipLevel + l);
       height = u_minify(image->vk.extent.height, subresourceRange->baseMipLevel + l);
 
-      radv_CmdSetViewport(
-         radv_cmd_buffer_to_handle(cmd_buffer), 0, 1,
-         &(VkViewport){.x = 0, .y = 0, .width = width, .height = height, .minDepth = 0.0f, .maxDepth = 1.0f});
-
-      radv_CmdSetScissor(radv_cmd_buffer_to_handle(cmd_buffer), 0, 1,
-                         &(VkRect2D){
-                            .offset = {0, 0},
-                            .extent = {width, height},
-                         });
+      radv_meta_set_viewport_and_scissor(cmd_buffer, 0, 0, width, height);
 
       for (uint32_t s = 0; s < vk_image_subresource_layer_count(&image->vk, subresourceRange); s++) {
          radv_process_color_image_layer(cmd_buffer, image, subresourceRange, l, s, op);
@@ -405,8 +420,6 @@ radv_process_color_image(struct radv_cmd_buffer *cmd_buffer, struct radv_image *
                                          cmd_buffer->state.predication_op, pred_va);
       }
    }
-
-   radv_meta_restore(&saved_state, cmd_buffer);
 
    /* Clear the image's fast-clear eliminate predicate because FMASK_DECOMPRESS and DCC_DECOMPRESS
     * also perform a fast-clear eliminate.
@@ -453,7 +466,6 @@ radv_decompress_dcc_compute(struct radv_cmd_buffer *cmd_buffer, struct radv_imag
                             const VkImageSubresourceRange *subresourceRange)
 {
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
-   struct radv_meta_saved_state saved_state;
    struct radv_image_view load_iview = {0};
    struct radv_image_view store_iview = {0};
    VkPipelineLayout layout;
@@ -469,9 +481,7 @@ radv_decompress_dcc_compute(struct radv_cmd_buffer *cmd_buffer, struct radv_imag
    cmd_buffer->state.flush_bits |= radv_dst_access_flush(cmd_buffer, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                                                          VK_ACCESS_2_SHADER_READ_BIT, 0, image, subresourceRange);
 
-   radv_meta_save(&saved_state, cmd_buffer, RADV_META_SAVE_DESCRIPTORS | RADV_META_SAVE_COMPUTE_PIPELINE);
-
-   radv_CmdBindPipeline(radv_cmd_buffer_to_handle(cmd_buffer), VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+   radv_meta_bind_compute_pipeline(cmd_buffer, pipeline);
 
    for (uint32_t l = 0; l < vk_image_subresource_level_count(&image->vk, subresourceRange); l++) {
       uint32_t width, height;
@@ -484,9 +494,16 @@ radv_decompress_dcc_compute(struct radv_cmd_buffer *cmd_buffer, struct radv_imag
       height = u_minify(image->vk.extent.height, subresourceRange->baseMipLevel + l);
 
       for (uint32_t s = 0; s < vk_image_subresource_layer_count(&image->vk, subresourceRange); s++) {
+
+         const VkImageViewUsageCreateInfo load_iview_usage_info = {
+            .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO,
+            .usage = VK_IMAGE_USAGE_STORAGE_BIT,
+         };
+
          radv_image_view_init(&load_iview, device,
                               &(VkImageViewCreateInfo){
                                  .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+                                 .pNext = &load_iview_usage_info,
                                  .flags = VK_IMAGE_VIEW_CREATE_DRIVER_INTERNAL_BIT_MESA,
                                  .image = radv_image_to_handle(image),
                                  .viewType = VK_IMAGE_VIEW_TYPE_2D,
@@ -498,9 +515,16 @@ radv_decompress_dcc_compute(struct radv_cmd_buffer *cmd_buffer, struct radv_imag
                                                       .layerCount = 1},
                               },
                               &(struct radv_image_view_extra_create_info){.enable_compression = true});
+
+         const VkImageViewUsageCreateInfo store_iview_usage_info = {
+            .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO,
+            .usage = VK_IMAGE_USAGE_STORAGE_BIT,
+         };
+
          radv_image_view_init(&store_iview, device,
                               &(VkImageViewCreateInfo){
                                  .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+                                 .pNext = &store_iview_usage_info,
                                  .flags = VK_IMAGE_VIEW_CREATE_DRIVER_INTERNAL_BIT_MESA,
                                  .image = radv_image_to_handle(image),
                                  .viewType = VK_IMAGE_VIEW_TYPE_2D,
@@ -545,14 +569,12 @@ radv_decompress_dcc_compute(struct radv_cmd_buffer *cmd_buffer, struct radv_imag
    /* Mark this image as actually being decompressed. */
    radv_update_dcc_metadata(cmd_buffer, image, subresourceRange, false);
 
-   radv_meta_restore(&saved_state, cmd_buffer);
-
    cmd_buffer->state.flush_bits |= RADV_CMD_FLAG_CS_PARTIAL_FLUSH | RADV_CMD_FLAG_INV_VCACHE |
                                    radv_src_access_flush(cmd_buffer, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                                                          VK_ACCESS_2_SHADER_WRITE_BIT, 0, image, subresourceRange);
 
    /* Initialize the DCC metadata as "fully expanded". */
-   cmd_buffer->state.flush_bits |= radv_init_dcc(cmd_buffer, image, subresourceRange, 0xffffffff);
+   cmd_buffer->state.flush_bits |= radv_init_dcc(cmd_buffer, image, subresourceRange, DCC_UNCOMPRESSED);
 }
 
 void

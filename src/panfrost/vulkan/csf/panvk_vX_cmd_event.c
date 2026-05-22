@@ -69,8 +69,8 @@ panvk_per_arch(CmdSetEvent2)(VkCommandBuffer commandBuffer, VkEvent _event,
 
    panvk_per_arch(add_cs_deps)(cmdbuf, PANVK_BARRIER_STAGE_FIRST, pDependencyInfo, &deps, true);
 
-   if (deps.needs_draw_flush)
-      panvk_per_arch(cmd_flush_draws)(cmdbuf);
+   /* vkCmdSetEvents() is not allowed to be called mid-render-pass */
+   assert(!deps.needs_fb_barrier);
 
    for (uint32_t i = 0; i < PANVK_SUBQUEUE_COUNT; i++) {
       struct cs_builder *b = panvk_get_cs_builder(cmdbuf, i);
@@ -165,7 +165,7 @@ panvk_per_arch(CmdWaitEvents2)(VkCommandBuffer commandBuffer,
    }
 
    if (needs_trans_barrier) {
-      assert(!trans_deps.needs_draw_flush);
+      assert(!trans_deps.needs_fb_barrier);
 
       panvk_per_arch(emit_barrier)(cmdbuf, trans_deps);
    }

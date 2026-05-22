@@ -202,7 +202,7 @@ set_combiner_source(struct gl_context *ctx,
       return false;
    }
 
-   if ((term == 3) && (ctx->API != API_OPENGL_COMPAT
+   if ((term == 3) && (!_mesa_is_desktop_gl_compat(ctx)
                        || !ctx->Extensions.NV_texture_env_combine4)) {
       TE_ERROR(GL_INVALID_ENUM, "glTexEnv(pname=%s)", pname);
       return false;
@@ -290,7 +290,7 @@ set_combiner_operand(struct gl_context *ctx,
       return false;
    }
 
-   if ((term == 3) && (ctx->API != API_OPENGL_COMPAT
+   if ((term == 3) && (!_mesa_is_desktop_gl_compat(ctx)
                        || !ctx->Extensions.NV_texture_env_combine4)) {
       TE_ERROR(GL_INVALID_ENUM, "glTexEnv(pname=%s)", pname);
       return false;

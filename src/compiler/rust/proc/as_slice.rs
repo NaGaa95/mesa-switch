@@ -66,15 +66,12 @@ pub fn derive_as_slice(
         Data::Struct(s) => {
             let mut has_repr_c = false;
             for attr in attrs {
-                match attr.meta {
-                    Meta::List(ml) => {
-                        if ml.path.is_ident("repr")
-                            && format!("{}", ml.tokens) == "C"
-                        {
-                            has_repr_c = true;
-                        }
+                if let Meta::List(ml) = attr.meta {
+                    if ml.path.is_ident("repr")
+                        && format!("{}", ml.tokens) == "C"
+                    {
+                        has_repr_c = true;
                     }
-                    _ => (),
                 }
             }
             assert!(has_repr_c, "Struct must be declared #[repr(C)]");
@@ -87,7 +84,7 @@ pub fn derive_as_slice(
             if let Fields::Named(named) = s.fields {
                 for f in named.named {
                     let f_count = count_type(&f.ty, slice_type);
-                    let f_attr = get_attr(&f, &attr_name);
+                    let f_attr = get_attr(&f, attr_name);
 
                     if f_count > 0 {
                         assert!(
@@ -114,7 +111,7 @@ pub fn derive_as_slice(
                             f_attr.is_none(),
                             "{attr_name} attribute is only allowed on {slice_type}"
                         );
-                        if !first.is_none() {
+                        if first.is_some() {
                             found_last = true;
                         }
                     }

@@ -3,11 +3,7 @@
  * Copyright (C) 2014 Broadcom
  * Copyright (C) 2018-2019 Alyssa Rosenzweig
  * Copyright (C) 2019-2020 Collabora, Ltd.
- *
  * SPDX-License-Identifier: MIT
- *
- * Authors:
- *   Alyssa Rosenzweig <alyssa.rosenzweig@collabora.com>
  */
 
 #ifndef __PAN_AFBC_H
@@ -79,6 +75,12 @@ enum pan_afbc_mode {
    PAN_AFBC_MODE_R8G8B8A8,
    PAN_AFBC_MODE_R10G10B10A2,
    PAN_AFBC_MODE_R11G11B10,
+
+   /* 16 bit modes, available on v10+ */
+   PAN_AFBC_MODE_R16,
+   PAN_AFBC_MODE_R16G16,
+   PAN_AFBC_MODE_R16G16B16,
+   PAN_AFBC_MODE_R16G16B16A16,
 
    /* YUV special modes */
    PAN_AFBC_MODE_YUV420_6C8,
@@ -387,12 +389,16 @@ pan_afbc_body_offset(unsigned arch, uint64_t modifier, uint32_t header_size)
 
 /*
  * Determine the tile size used by AFBC. This tiles superblocks themselves.
- * Current GPUs support either 8x8 tiling or no tiling (1x1)
+ * Current GPUs support either 8x8 tiling or no tiling (1x1) for most
+ * formats; but note that formats with more than 32bpp use 4x4 tiling
  */
 static inline unsigned
-pan_afbc_tile_size(uint64_t modifier)
+pan_afbc_tile_size(enum pipe_format format, uint64_t modifier)
 {
-   return (modifier & AFBC_FORMAT_MOD_TILED) ? 8 : 1;
+   if ( !(modifier & AFBC_FORMAT_MOD_TILED) ) {
+      return 1;
+   }
+   return util_format_get_blocksizebits(format) <= 32 ? 8 : 4;
 }
 
 /*
@@ -403,11 +409,11 @@ pan_afbc_tile_size(uint64_t modifier)
  * header blocks are in a tile together.
  */
 static inline uint32_t
-pan_afbc_row_stride(uint64_t modifier, uint32_t width)
+pan_afbc_row_stride(enum pipe_format format, uint64_t modifier, uint32_t width)
 {
    unsigned block_width = pan_afbc_superblock_width(modifier);
 
-   return (width / block_width) * pan_afbc_tile_size(modifier) *
+   return (width / block_width) * pan_afbc_tile_size(format, modifier) *
           AFBC_HEADER_BYTES_PER_TILE;
 }
 
@@ -418,21 +424,21 @@ pan_afbc_row_stride(uint64_t modifier, uint32_t width)
  * blocks, rather than a real row stride. This is required by Bifrost.
  */
 static inline uint32_t
-pan_afbc_stride_blocks(uint64_t modifier, uint32_t row_stride_bytes)
+pan_afbc_stride_blocks(enum pipe_format format, uint64_t modifier, uint32_t row_stride_bytes)
 {
    return row_stride_bytes /
-          (AFBC_HEADER_BYTES_PER_TILE * pan_afbc_tile_size(modifier));
+      (AFBC_HEADER_BYTES_PER_TILE * pan_afbc_tile_size(format, modifier));
 }
 
 /* Returns a height in superblocks taking into account the tile alignment
  * requirement coming from the modifier.
  */
 static inline uint32_t
-pan_afbc_height_blocks(uint64_t modifier, uint32_t height_px)
+pan_afbc_height_blocks(enum pipe_format format, uint64_t modifier, uint32_t height_px)
 {
    return ALIGN_POT(
       DIV_ROUND_UP(height_px, pan_afbc_superblock_height(modifier)),
-      pan_afbc_tile_size(modifier));
+      pan_afbc_tile_size(format, modifier));
 }
 
 static inline enum pipe_format
@@ -514,6 +520,11 @@ pan_afbc_format(unsigned arch, enum pipe_format format, unsigned plane_idx)
       return PAN_AFBC_MODE_YUV420_6C8;
    case PIPE_FORMAT_R10G10B10_420_UNORM_PACKED:
       return PAN_AFBC_MODE_YUV420_6C10;
+   case PIPE_FORMAT_R8G8_R8B8_UNORM:
+   case PIPE_FORMAT_R8B8_R8G8_UNORM:
+      return PAN_AFBC_MODE_YUV422_4C8;
+   case PIPE_FORMAT_X6R10X6G10_X6R10X6B10_422_UNORM:
+      return PAN_AFBC_MODE_YUV422_4C10;
    default:
       break;
    }
@@ -525,21 +536,34 @@ pan_afbc_format(unsigned arch, enum pipe_format format, unsigned plane_idx)
     */
    format = util_format_linear(format);
 
-   /* AFBC is type agnostic on v9+ (it just doesn't support float types except
-    * for D32 which is mapped to RGBA8 internally), but most of the following
-    * tests are done on UNORM for simplicity, so make sure we convert to _UNORM
-    * first in that case.
+   /* AFBC is type agnostic on v9+, so the following logic is done on UNORM
+    * for simplicity, so make sure we convert to _UNORM first.
     */
-   if (arch >= 9 && !util_format_is_float(format))
+   if (arch >= 9)
       format = util_format_any_to_unorm(format);
 
    /* Luminance-alpha not supported for AFBC on v7+ */
+   /* 16 bit modes only available for AFBC on v10 and later */
    switch (format) {
    case PIPE_FORMAT_A8_UNORM:
    case PIPE_FORMAT_L8_UNORM:
    case PIPE_FORMAT_I8_UNORM:
    case PIPE_FORMAT_L8A8_UNORM:
       if (arch >= 7)
+         return PAN_AFBC_MODE_INVALID;
+      else
+         break;
+   case PIPE_FORMAT_R16_UNORM:
+   case PIPE_FORMAT_R16G16_UNORM:
+   case PIPE_FORMAT_R16G16B16_UNORM:
+   case PIPE_FORMAT_R16G16B16A16_UNORM:
+      if (arch < 10)
+         return PAN_AFBC_MODE_INVALID;
+      else
+         break;
+   case PIPE_FORMAT_S8_UINT:
+   case PIPE_FORMAT_R11G11B10_FLOAT:
+      if (arch < 9)
          return PAN_AFBC_MODE_INVALID;
       else
          break;
@@ -568,9 +592,14 @@ pan_afbc_format(unsigned arch, enum pipe_format format, unsigned plane_idx)
    case PIPE_FORMAT_X24S8_UINT:        return PAN_AFBC_MODE_R8G8B8A8;
    case PIPE_FORMAT_Z24_UNORM_PACKED:  return PAN_AFBC_MODE_R8G8B8;
 
-   /* AFBC(S8) only supported on v9+ */
-   case PIPE_FORMAT_S8_UINT:
-      return arch >= 9 ? PAN_AFBC_MODE_R8 : PAN_AFBC_MODE_INVALID;
+   case PIPE_FORMAT_S8_UINT:           return PAN_AFBC_MODE_R8;
+   case PIPE_FORMAT_R11G11B10_FLOAT:   return PAN_AFBC_MODE_R11G11B10;
+
+   case PIPE_FORMAT_R16_UNORM:         return PAN_AFBC_MODE_R16;
+   case PIPE_FORMAT_R16G16_UNORM:      return PAN_AFBC_MODE_R16G16;
+   case PIPE_FORMAT_R16G16B16_UNORM:   return PAN_AFBC_MODE_R16G16B16;
+   case PIPE_FORMAT_R16G16B16A16_UNORM:
+                                       return PAN_AFBC_MODE_R16G16B16A16;
 
    default:                            return PAN_AFBC_MODE_INVALID;
    }
@@ -672,6 +701,16 @@ pan_afbc_compression_mode(enum pan_afbc_mode mode)
       return MALI_AFBC_COMPRESSION_MODE_R10G10B10A2;
    case PAN_AFBC_MODE_R11G11B10:
       return MALI_AFBC_COMPRESSION_MODE_R11G11B10;
+#if PAN_ARCH >= 10
+   case PAN_AFBC_MODE_R16:
+      return MALI_AFBC_COMPRESSION_MODE_R16;
+   case PAN_AFBC_MODE_R16G16:
+      return MALI_AFBC_COMPRESSION_MODE_R16G16;
+   case PAN_AFBC_MODE_R16G16B16:
+      return MALI_AFBC_COMPRESSION_MODE_R16G16B16;
+   case PAN_AFBC_MODE_R16G16B16A16:
+      return MALI_AFBC_COMPRESSION_MODE_R16G16B16A16;
+#endif
    case PAN_AFBC_MODE_YUV420_6C8:
       return MALI_AFBC_COMPRESSION_MODE_YUV420_6C8;
    case PAN_AFBC_MODE_YUV420_2C8:
@@ -696,6 +735,12 @@ pan_afbc_compression_mode(enum pan_afbc_mode mode)
       return MALI_AFBC_COMPRESSION_MODE_YUV422_2C10;
    case PAN_AFBC_MODE_YUV422_1C10:
       return MALI_AFBC_COMPRESSION_MODE_YUV422_1C10;
+#if PAN_ARCH == 9
+   case PAN_AFBC_MODE_R16:
+   case PAN_AFBC_MODE_R16G16:
+   case PAN_AFBC_MODE_R16G16B16:
+   case PAN_AFBC_MODE_R16G16B16A16:
+#endif
    case PAN_AFBC_MODE_INVALID:
       UNREACHABLE("Invalid AFBC format");
    }
@@ -717,6 +762,18 @@ pan_afbc_decompression_mode(enum pipe_format view_format,
    return pan_afbc_compression_mode(img_mode);
 }
 #endif
+
+static inline bool
+format_requires_afbc(enum pipe_format format) {
+   switch (format) {
+   case PIPE_FORMAT_R8G8B8_420_UNORM_PACKED:
+   case PIPE_FORMAT_R10G10B10_420_UNORM_PACKED:
+   case PIPE_FORMAT_X6R10X6G10_X6R10X6B10_422_UNORM:
+      return true;
+   default:
+      return false;
+   }
+}
 
 #ifdef __cplusplus
 } /* extern C */

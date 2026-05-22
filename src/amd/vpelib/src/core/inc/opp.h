@@ -97,25 +97,36 @@ struct bit_depth_reduction_params {
     //   enum vpe_pixel_encoding pixel_encoding;  // not used and not initialized yet
 };
 
+struct opp_pipe_control_params {
+    /**< pipe alpha */
+    uint16_t alpha;
+    /**< Digital bypass enable */
+    bool bypass_enable;
+    /**< Enable bypass mode for the pipe */
+};
+
+struct fmt_control_params {
+    uint8_t fmt_spatial_dither_frame_counter_max;
+    uint8_t fmt_spatial_dither_frame_counter_bit_swap;
+
+};
+
 struct opp_funcs {
 
     void (*set_clamping)(struct opp *opp, const struct clamping_and_pixel_encoding_params *params);
 
     void (*set_dyn_expansion)(struct opp *opp, bool enable, enum color_depth color_dpth);
 
-    void (*set_truncation)(struct opp *opp, const struct bit_depth_reduction_params *params);
-
-    void (*set_spatial_dither)(struct opp *opp, const struct bit_depth_reduction_params *params);
-
     void (*program_bit_depth_reduction)(
         struct opp *opp, const struct bit_depth_reduction_params *params);
 
     void (*program_fmt)(struct opp *opp, struct bit_depth_reduction_params *fmt_bit_depth,
-        struct clamping_and_pixel_encoding_params *clamping);
+        struct fmt_control_params *fmt_ctrl, struct clamping_and_pixel_encoding_params *clamping);
 
-    void (*program_pipe_alpha)(struct opp *opp, uint16_t alpha);
+    void (*program_fmt_control)(struct opp *opp, struct fmt_control_params *fmt_ctrl);
 
-    void (*program_pipe_bypass)(struct opp *opp, bool enable);
+    void (*program_pipe_control)(struct opp *opp, const struct opp_pipe_control_params *params);
+
     void (*program_pipe_crc)(struct opp *opp, bool enable);
 };
 

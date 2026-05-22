@@ -106,6 +106,8 @@ struct dpp_funcs {
     /** scaler */
     void (*set_segment_scaler)(struct dpp *dpp, const struct scaler_data *scl_data);
 
+    void (*dscl_set_scaler_position)(struct dpp *dpp, const struct scaler_data *scl_data);
+
     void (*set_frame_scaler)(struct dpp *dpp, const struct scaler_data *scl_data);
 
     uint32_t (*get_line_buffer_size)(void);

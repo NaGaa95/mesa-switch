@@ -246,7 +246,7 @@ private:
       auto intr = nir_instr_as_intrinsic(instr);
       assert(intr->intrinsic == nir_intrinsic_load_ubo_vec4);
 
-      auto parent = intr->src[0].ssa->parent_instr;
+      auto parent = nir_def_instr(intr->src[0].ssa);
 
       if (parent->type != nir_instr_type_alu)
          return nullptr;
@@ -619,7 +619,7 @@ optimize_once(nir_shader *shader)
    bool progress = false;
    NIR_PASS(progress, shader, nir_lower_alu_to_scalar, r600_lower_to_scalar_instr_filter, NULL);
    NIR_PASS(progress, shader, nir_lower_vars_to_ssa);
-   NIR_PASS(progress, shader, nir_copy_prop);
+   NIR_PASS(progress, shader, nir_opt_copy_prop);
    NIR_PASS(progress, shader, nir_opt_dce);
    NIR_PASS(progress, shader, nir_opt_algebraic);
    if (shader->options->has_bitfield_select)
@@ -630,7 +630,7 @@ optimize_once(nir_shader *shader)
 
    if (nir_opt_loop(shader)) {
       progress = true;
-      NIR_PASS(progress, shader, nir_copy_prop);
+      NIR_PASS(progress, shader, nir_opt_copy_prop);
       NIR_PASS(progress, shader, nir_opt_dce);
    }
 
@@ -792,10 +792,11 @@ r600_lower_and_optimize_nir(nir_shader *sh,
 
    /**/
    if (lower_64bit)
-      NIR_PASS(_, sh, nir_lower_indirect_derefs, nir_var_function_temp, 10);
+      NIR_PASS(_, sh, nir_lower_indirect_derefs_to_if_else_trees,
+               nir_var_function_temp, 10);
 
+   /* Fold constant offset srcs for IO. */
    NIR_PASS(_, sh, nir_opt_constant_folding);
-   NIR_PASS(_, sh, nir_io_add_const_offset_to_base, io_modes);
 
    NIR_PASS(_, sh, nir_lower_alu_to_scalar, r600_lower_to_scalar_instr_filter, NULL);
    NIR_PASS(_, sh, nir_lower_phis_to_scalar, NULL, NULL);
@@ -804,7 +805,7 @@ r600_lower_and_optimize_nir(nir_shader *sh,
    NIR_PASS(_, sh, nir_lower_alu_to_scalar, r600_lower_to_scalar_instr_filter, NULL);
    NIR_PASS(_, sh, nir_lower_phis_to_scalar, NULL, NULL);
    NIR_PASS(_, sh, nir_lower_alu_to_scalar, r600_lower_to_scalar_instr_filter, NULL);
-   NIR_PASS(_, sh, nir_copy_prop);
+   NIR_PASS(_, sh, nir_opt_copy_prop);
    NIR_PASS(_, sh, nir_opt_dce);
 
    if (r600_is_last_vertex_stage(sh, *key))
@@ -846,11 +847,14 @@ r600_lower_and_optimize_nir(nir_shader *sh,
    NIR_PASS(_, sh, nir_lower_ubo_vec4);
    NIR_PASS(_, sh, r600_opt_indirect_fbo_loads);
 
-   if (lower_64bit)
-      NIR_PASS(_, sh, r600::r600_nir_64_to_vec2);
-
-   if (lower_64bit_io_to_vec2)
+   if (lower_64bit_io_to_vec2) {
       NIR_PASS(_, sh, r600::r600_split_64bit_uniforms_and_ubo);
+      NIR_PASS(_, sh, nir_lower_alu_to_scalar, r600_lower_to_scalar_instr_filter, NULL);
+      NIR_PASS(_, sh, nir_lower_phis_to_scalar, NULL, NULL);
+      while (optimize_once(sh))
+         ;
+      NIR_PASS(_, sh, r600::r600_nir_64_to_vec2, gfx_level >= CAYMAN);
+   }
 
    /* Lower to scalar to let some optimization work out better */
    while (optimize_once(sh))
@@ -865,7 +869,6 @@ r600_lower_and_optimize_nir(nir_shader *sh,
    NIR_PASS(_,
             sh,
             nir_lower_vars_to_scratch,
-            nir_var_function_temp,
             64,
             r600_get_scratch_size_align,
             r600_get_scratch_size_align);
@@ -882,7 +885,7 @@ r600_lower_and_optimize_nir(nir_shader *sh,
       NIR_PASS(late_algebraic_progress, sh, r600_sfn_lower_alu);
       NIR_PASS(late_algebraic_progress, sh, nir_opt_algebraic_late);
       NIR_PASS(late_algebraic_progress, sh, nir_opt_constant_folding);
-      NIR_PASS(late_algebraic_progress, sh, nir_copy_prop);
+      NIR_PASS(late_algebraic_progress, sh, nir_opt_copy_prop);
       NIR_PASS(late_algebraic_progress, sh, nir_opt_dce);
       NIR_PASS(late_algebraic_progress, sh, nir_opt_cse);
    } while (late_algebraic_progress);

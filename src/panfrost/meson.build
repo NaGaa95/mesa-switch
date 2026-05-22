@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MIT
 
 inc_panfrost = include_directories([
-   '.', 'shared', 'midgard', 'compiler', 'lib', 'libpan', 'model',
+   '.', 'shared', 'compiler', 'lib', 'libpan', 'model',
 ])
 
 compile_args_panfrost = [
@@ -11,8 +11,6 @@ compile_args_panfrost = [
 ]
 
 subdir('shared')
-subdir('util')
-subdir('midgard')
 subdir('model')
 subdir('compiler')
 
@@ -28,7 +26,7 @@ if with_gallium_panfrost or with_panfrost_vk
 endif
 
 files_bifrost = files(
-  'compiler/cmdline.c',
+  'compiler/bifrost/cmdline.c',
 )
 
 bifrost_compiler = executable(
@@ -46,7 +44,7 @@ bifrost_compiler = executable(
     dep_libdrm,
   ],
   link_with : [
-    libpanfrost_bifrost,
+    libpanfrost_compiler,
   ],
   build_by_default : with_tools.contains('panfrost')
 )

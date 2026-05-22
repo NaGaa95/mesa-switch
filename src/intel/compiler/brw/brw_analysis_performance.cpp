@@ -1,24 +1,6 @@
 /*
  * Copyright © 2020 Intel Corporation
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
- * IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  */
 
 #include "brw_eu.h"
@@ -137,7 +119,7 @@ namespace {
          td(inst->dst.type), sd(DIV_ROUND_UP(inst->size_written, REG_SIZE)),
          tx(get_exec_type(inst)), sx(0), ss(0),
          sc(has_bank_conflict(isa, inst) ? sd : 0),
-         desc(0), sfid(0)
+         desc(0), sfid(0), fused_send_disable(false)
       {
          const brw_send_inst *send = inst->as_send();
          if (send) {
@@ -157,6 +139,7 @@ namespace {
                      ss += DIV_ROUND_UP(inst->size_read(devinfo, i), REG_SIZE);
                }
             }
+            fused_send_disable = send->fused_eu_disable;
          } else {
             for (unsigned i = 0; i < inst->sources; i++)
                ss = MAX2(ss, DIV_ROUND_UP(inst->size_read(devinfo, i), REG_SIZE));
@@ -201,6 +184,8 @@ namespace {
       uint8_t sfid;
       /** Repeat count for DPAS instructions. */
       uint8_t rcount;
+      /** Whether SEND message fusion is disabled (Gfx12.x only) */
+      bool fused_send_disable;
    };
 
    /**
@@ -274,6 +259,9 @@ namespace {
                   int ls_1, int ld_1, int la_1, int lf_1,
                   int l_ss, int l_sd)
    {
+      /* We fused SEND are disabled double those parameters */
+      ls_1 *= info.fused_send_disable ? 2 : 1;
+      l_ss *= info.fused_send_disable ? 2 : 1;
       return perf_desc(u, df_1 + df_sd * int(info.sd) + df_sc * int(info.sc),
                           db_1 + db_sx * int(info.sx),
                           ls_1 + l_ss * int(info.ss),
@@ -584,11 +572,6 @@ namespace {
             return calculate_desc(info, EU_UNIT_FPU, 0, 2 /* XXX */, 0,
                                   0, 2 /* XXX */,
                                   0, 0, 0, 8 /* XXX */, 0, 0);
-
-      case SHADER_OPCODE_GET_BUFFER_SIZE:
-         return calculate_desc(info, EU_UNIT_SAMPLER, 2, 0, 0, 0, 16 /* XXX */,
-                               8 /* XXX */, 750 /* XXX */, 0, 0,
-                               2 /* XXX */, 0);
 
       case FS_OPCODE_UNIFORM_PULL_CONSTANT_LOAD:
          return calculate_desc(info, EU_UNIT_DP_CC, 2, 0, 0, 0, 16 /* XXX */,

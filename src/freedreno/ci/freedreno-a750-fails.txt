@@ -1,12 +1,6 @@
-KHR-GL46.shader_draw_parameters_tests.MultiDrawElementIndirectCountParameters,Fail
-KHR-GL46.shader_draw_parameters_tests.ShaderMultiDrawElementsIndirectParameters,Fail
-KHR-GL46.shader_image_load_store.basic-allTargets-loadStoreTES,Fail
-KHR-GL46.shader_image_load_store.basic-allTargets-store,Fail
-KHR-GL46.shader_image_load_store.multiple-uniforms,Fail
 KHR-GL46.shader_image_size.basic-nonMS-tes-int,Fail
 KHR-GL46.tessellation_shader.tessellation_control_to_tessellation_evaluation.gl_tessLevel,Fail
 KHR-GL46.tessellation_shader.tessellation_shader_tessellation.TES,Fail
-KHR-GL46.texture_lod_basic.lod_selection,Fail
 KHR-GL46.texture_lod_bias.texture_lod_bias_all,Fail
 KHR-GL46.texture_stencil8.multisample,Fail
 KHR-GL46.vertex_attrib_binding.advanced-iterations,Fail
@@ -15,8 +9,11 @@ KHR-GLES3.framebuffer_blit.framebuffer_blit_functionality_multisampled_to_single
 KHR-GLES3.framebuffer_blit.multisampled_to_singlesampled_blit_depth_config_test,Fail
 KHR-GLES31.core.texture_stencil8.multisample,Fail
 KHR-GLES31.core.vertex_attrib_binding.advanced-iterations,Fail
-dEQP-GLES2.functional.texture.mipmap.cube.projected.nearest_linear,Fail
-dEQP-GLES3.functional.polygon_offset.fixed16_render_with_units,Fail
+
+# New failures with GL CTS 4.6.7.0 & ES CTS 3.2.13.0
+dEQP-GLES31.functional.copy_image.non_compressed.viewclass_32_bits.rgba8_rgba8ui.renderbuffer_to_renderbuffer,Fail
+dEQP-GLES31.functional.copy_image.non_compressed.viewclass_32_bits.srgb8_alpha8_rgba8ui.renderbuffer_to_renderbuffer,Fail
+
 
 gmem-dEQP-VK.clipping.user_defined.clip_cull_distance_dynamic_index.vert_geom.6_2,Fail
 gmem-dEQP-VK.clipping.user_defined.clip_cull_distance_dynamic_index.vert_geom.6_2_fragmentshader_read,Fail
@@ -30,34 +27,19 @@ dynamic-dEQP-VK.renderpass2.depth_stencil_resolve.image_2d_32_32.samples_2.d24_u
 dynamic-dEQP-VK.renderpass2.depth_stencil_resolve.image_2d_32_32.samples_2.d32_sfloat_s8_uint.compatibility_depth_zero_stencil_zero_testing_stencil,Fail
 dynamic-dEQP-VK.renderpass2.depth_stencil_resolve.image_2d_32_32.samples_2.d32_sfloat_s8_uint_separate_layouts.compatibility_depth_zero_stencil_zero_testing_stencil,Fail
 
+# New failures with VKCTS 1.4.4.0
+dEQP-VK.pipeline.monolithic.misc.identically_defined_layout,Fail
+
+# New failures when updating kernel from msm-next at 6.16 to 6.19.5
+# https://gitlab.freedesktop.org/drm/msm/-/issues/93
+dEQP-VK.pipeline.monolithic.timestamp.calibrated.calibration_test,Fail
+dEQP-VK.pipeline.monolithic.timestamp.calibrated.dev_domain_test,Fail
+
+
 # Bad assumptions in piglit about layout of multiplanar formats,
 # it should use separate buffers per plane:
 spec@ext_image_dma_buf_import@ext_image_dma_buf_import-sample_yvu420,Fail
 
-# New fails in 1.4.3.3
-dEQP-VK.transform_feedback.primitive_restart.dynamic_primitive_restart_dynamic_primitive_topology,Fail
-dEQP-VK.transform_feedback.primitive_restart.dynamic_primitive_restart_static_primitive_topology,Fail
-dEQP-VK.transform_feedback.primitive_restart.static_primitive_restart_dynamic_primitive_topology,Fail
-dEQP-VK.transform_feedback.primitive_restart.static_primitive_restart_static_primitive_topology,Fail
-dEQP-VK.transform_feedback.simple.draw_indirect_counter_offset_16,Fail
-dEQP-VK.transform_feedback.simple.draw_indirect_counter_offset_244,Fail
-dEQP-VK.transform_feedback.simple.draw_indirect_counter_offset_508,Fail
-dEQP-VK.transform_feedback.simple.draw_indirect_multiview_counter_offset_16,Fail
-dEQP-VK.transform_feedback.simple.draw_indirect_multiview_counter_offset_244,Fail
-dEQP-VK.transform_feedback.simple.draw_indirect_multiview_counter_offset_508,Fail
-dEQP-VK.transform_feedback.simple_fast_gpl.draw_indirect_counter_offset_16,Fail
-dEQP-VK.transform_feedback.simple_fast_gpl.draw_indirect_counter_offset_244,Fail
-dEQP-VK.transform_feedback.simple_fast_gpl.draw_indirect_counter_offset_508,Fail
-dEQP-VK.transform_feedback.simple_fast_gpl.draw_indirect_multiview_counter_offset_16,Fail
-dEQP-VK.transform_feedback.simple_fast_gpl.draw_indirect_multiview_counter_offset_244,Fail
-dEQP-VK.transform_feedback.simple_fast_gpl.draw_indirect_multiview_counter_offset_508,Fail
-dEQP-VK.transform_feedback.simple_optimized_gpl.draw_indirect_counter_offset_16,Fail
-dEQP-VK.transform_feedback.simple_optimized_gpl.draw_indirect_counter_offset_244,Fail
-dEQP-VK.transform_feedback.simple_optimized_gpl.draw_indirect_counter_offset_508,Fail
-dEQP-VK.transform_feedback.simple_optimized_gpl.draw_indirect_multiview_counter_offset_16,Fail
-dEQP-VK.transform_feedback.simple_optimized_gpl.draw_indirect_multiview_counter_offset_244,Fail
-dEQP-VK.transform_feedback.simple_optimized_gpl.draw_indirect_multiview_counter_offset_508,Fail
-gmem-dEQP-VK.transform_feedback.simple.draw_indirect_multiview_counter_offset_244,Fail
 
 # OpenCL tests below
 #
@@ -126,4 +108,31 @@ program@execute@builtin@builtin-float-nextafter-1.0.generated@nextafter float8,F
 
 # Initial ANGLE failures
 angle-dEQP-GLES2.functional.shaders.algorithm.rgb_to_hsl_vertex,Fail
-angle-dEQP-GLES2.functional.texture.mipmap.cube.projected.nearest_linear,Fail
+
+KHR-GL46.shader_atomic_counters.basic-usage-tes,Fail
+
+# test_shader_instructions:3479:124:f32tof16: Test failed: Got {0x00000000, 0x00000000, 0x00000000, 0x00000000}, expected {0x00000001, 0x00000002, 0x00000003, 0x00000004} at (0, 0).
+# test_shader_instructions:3479:125:f32tof16: Test failed: Got {0x00008000, 0x00008000, 0x00008000, 0x00008000}, expected {0x00008001, 0x00008002, 0x00008003, 0x00008004} at (0, 0).
+# test_shader_instructions:3479:130:f32tof16: Todo succeeded: Got {0x00006400, 0x00006401, 0x00006402, 0x00006403}, expected {0x00006400, 0x00006401, 0x00006402, 0x00006403} at (32, 32).
+# test_shader_instructions:3479:131:f32tof16: Todo succeeded: Got {0x00006800, 0x00006801, 0x00006802, 0x00006803}, expected {0x00006800, 0x00006801, 0x00006802, 0x00006803} at (32, 32).
+# test_shader_instructions:3479:132:f32tof16: Todo succeeded: Got {0x0000e400, 0x0000e401, 0x0000e402, 0x0000e403}, expected {0x0000e400, 0x0000e401, 0x0000e402, 0x0000e403} at (32, 32).
+# test_shader_instructions:3479:133:f32tof16: Todo succeeded: Got {0x0000e800, 0x0000e801, 0x0000e802, 0x0000e803}, expected {0x0000e800, 0x0000e801, 0x0000e802, 0x0000e803} at (32, 32).
+# test_shader_instructions:3479:134:f32tof16: Todo: Got {0x00000000, 0x00008000, 0x00000000, 0x00008000}, expected {0x00000000, 0x00008000, 0x00000001, 0x00008001} at (0, 0).
+vkd3d-test_shader_instructions,Fail
+
+# This one runs until OOM in the heap, it seems.  Even single-threaded under
+# deqp-runner, we see failures with:
+#   4128:err:vkd3d_allocate_device_memory: Failed to allocate device memory (size 16842752, type_flags 0x1, type_mask 0x7).
+#   test_stress_fallback_render_target_allocation_device:3309: Test failed: Failed to create heap, hr #8007000e.
+vkd3d-test_stress_fallback_render_target_allocation_device,Fail
+
+vkd3d-test_sparse_depth_stencil_rendering,Fail
+vkd3d-test_clear_render_target_view_extreme_values,Fail
+
+# Autotune regression
+vkd3d-test_multisample_resolve_formats,Fail
+
+# test_sampler_feedback_implicit_lod_aniso:3429:Test 19: Test failed: Mip 1, expected 0, got 1.
+# Enabled by EXT_shader_image_atomic_int64:
+# https://github.com/HansKristian-Work/vkd3d-proton/blob/master/docs/sampler_feedback.md
+vkd3d-test_sampler_feedback_implicit_lod_aniso,Fail

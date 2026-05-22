@@ -317,6 +317,7 @@ anv_i915_device_setup_context(struct anv_device *device,
 
    /* Check if client specified queue priority. */
    const VkDeviceQueueGlobalPriorityCreateInfoKHR *queue_priority =
+      num_queues == 0 ? NULL :
       vk_find_struct_const(pCreateInfo->pQueueCreateInfos[0].pNext,
                            DEVICE_QUEUE_GLOBAL_PRIORITY_CREATE_INFO_KHR);
 
@@ -365,25 +366,28 @@ anv_i915_device_check_status(struct vk_device *vk_device)
          result = anv_gem_context_get_reset_stats(device,
                                                   device->queues[i].context_id);
          if (result != VK_SUCCESS)
-            return result;
+            goto done;
 
          if (device->queues[i].companion_rcs_id != 0) {
             uint32_t context_id = device->queues[i].companion_rcs_id;
             result = anv_gem_context_get_reset_stats(device, context_id);
-            if (result != VK_SUCCESS) {
-               return result;
-            }
+            if (result != VK_SUCCESS)
+               goto done;
          }
       }
    } else {
       result = anv_gem_context_get_reset_stats(device, device->context_id);
    }
 
-   if (result != VK_SUCCESS)
-      return result;
-
-   if (INTEL_DEBUG(DEBUG_SHADER_PRINT))
-      result = vk_check_printf_status(vk_device, &device->printf);
+ done:
+   if (INTEL_DEBUG(DEBUG_SHADER_PRINT)) {
+      VkResult print_result =
+         vk_check_printf_status(vk_device, &device->printf);
+      /* Report the device error if there is one, only report the printf error
+       * if no device error.
+       */
+      result = result != VK_SUCCESS ? result : print_result;
+   }
 
    return result;
 }

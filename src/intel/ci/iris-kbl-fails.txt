@@ -105,5 +105,6 @@ glx@glx-multithread-buffer-busy-tracking-bug,Fail
 glx@glx-visuals-depth -pixmap,Fail
 glx@glx-visuals-stencil -pixmap,Fail
 
-# New failures with GL CTS 4.6.6.0
-KHR-GL46.direct_state_access.vertex_arrays_vertex_buffers_errors,Fail
+# uprev Piglit in Mesa
+spec@khr_shader_subgroup@execution@bitonic_sort,Fail
+

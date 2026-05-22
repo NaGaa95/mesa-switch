@@ -41,20 +41,12 @@ cmd_desc_state_bind_sets(struct panvk_descriptor_state *desc_state,
 
       desc_state->sets[set_idx] = set;
 
-      if (!set || !set->layout->dyn_buf_count)
-         continue;
-
-      for (unsigned b = 0; b < set->layout->binding_count; b++) {
-         VkDescriptorType type = set->layout->bindings[b].type;
-
-         if (!vk_descriptor_type_is_dynamic(type))
-            continue;
-
-         unsigned dyn_buf_idx = set->layout->bindings[b].desc_idx;
-         for (unsigned e = 0; e < set->layout->bindings[b].desc_count; e++) {
-            desc_state->dyn_buf_offsets[set_idx][dyn_buf_idx++] =
+      if (set) {
+         for (unsigned b = 0; b < set->layout->dyn_buf_count; b++) {
+            desc_state->dyn_buf_offsets[set_idx][b] =
                info->pDynamicOffsets[dynoffset_idx++];
          }
+         desc_state->dyn_ssbos[set_idx] = set->layout->dyn_ssbos;
       }
    }
 
@@ -258,12 +250,14 @@ panvk_per_arch(cmd_fill_dyn_bufs)(
       const struct panvk_descriptor_set *set = desc_state->sets[set_idx];
       const uint32_t dyn_buf_offset =
          desc_state->dyn_buf_offsets[set_idx][dyn_buf_idx];
+      const bool is_ssbo =
+         desc_state->dyn_ssbos[set_idx] & BITFIELD_BIT(dyn_buf_idx);
 
       assert(set_idx < MAX_SETS);
       assert(set);
 
       pan_pack(&buffers[i], BUFFER, cfg) {
-         cfg.size = set->dyn_bufs[dyn_buf_idx].size;
+         cfg.size = align(set->dyn_bufs[dyn_buf_idx].size, is_ssbo ? 4 : 16);
          cfg.address = set->dyn_bufs[dyn_buf_idx].dev_addr + dyn_buf_offset;
       }
    }

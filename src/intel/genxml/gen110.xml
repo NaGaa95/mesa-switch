@@ -4,6 +4,7 @@
     <exclude name="ACTHD_UDW" />
     <exclude name="BCS_ACTHD_UDW" />
     <exclude name="BCS_RING_BUFFER_CTL" />
+    <exclude name="COMMON_SLICE_CHICKEN2" />
     <exclude name="FAULT_REG" />
     <exclude name="GFX_ARB_ERROR_RPT" />
     <exclude name="GPGPU_CSR_BASE_ADDRESS" />
@@ -3206,7 +3207,9 @@
   </register>
   <register name="COMMON_SLICE_CHICKEN3" length="1" num="0x7304">
     <field name="PS Thread Panic Dispatch" dword="0" bits="7:6" type="uint" />
+    <field name="State Cache Perf Fix Disabled" dword="0" bits="13:13" type="bool"/>
     <field name="PS Thread Panic Dispatch Mask" dword="0" bits="23:22" type="uint" />
+    <field name="State Cache Perf Fix Disabled Mask" dword="0" bits="29:29" type="bool"/>
   </register>
   <register name="COMMON_SLICE_CHICKEN4" length="1" num="0x7300">
     <field name="Enable Hardware Filtering in WM" dword="0" bits="5:5" type="bool" />

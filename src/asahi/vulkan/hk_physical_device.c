@@ -10,7 +10,7 @@
 #include "asahi/lib/agx_device.h"
 #include "asahi/lib/agx_nir_lower_vbo.h"
 #include "util/disk_cache.h"
-#include "util/mesa-sha1.h"
+#include "util/mesa-blake3.h"
 #include "git_sha1.h"
 #include "hk_buffer.h"
 #include "hk_entrypoints.h"
@@ -92,10 +92,18 @@ hk_get_device_extensions(const struct hk_instance *instance,
       .KHR_maintenance9 = true,
       .KHR_map_memory2 = true,
       .KHR_multiview = true,
+      .KHR_pipeline_binary = true,
       .KHR_pipeline_executable_properties = true,
       .KHR_pipeline_library = true,
+#ifdef HK_USE_WSI_PLATFORM
+      .KHR_present_id = true,
+      .KHR_present_id2 = true,
+      .KHR_present_wait = true,
+      .KHR_present_wait2 = true,
+#endif
       .KHR_push_descriptor = true,
       .KHR_relaxed_block_layout = true,
+      .KHR_robustness2 = true,
       .KHR_sampler_mirror_clamp_to_edge = true,
       .KHR_sampler_ycbcr_conversion = true,
       .KHR_separate_depth_stencil_layouts = true,
@@ -120,6 +128,7 @@ hk_get_device_extensions(const struct hk_instance *instance,
       .KHR_timeline_semaphore = true,
 #ifdef HK_USE_WSI_PLATFORM
       .KHR_swapchain = true,
+      .KHR_swapchain_maintenance1 = true,
       .KHR_swapchain_mutable_format = true,
 #endif
       .KHR_synchronization2 = true,
@@ -131,6 +140,7 @@ hk_get_device_extensions(const struct hk_instance *instance,
       .KHR_zero_initialize_workgroup_memory = true,
       .EXT_4444_formats = true,
       .EXT_attachment_feedback_loop_layout = true,
+      .EXT_blend_operation_advanced = true,
       .EXT_border_color_swizzle = true,
       .EXT_buffer_device_address = true,
       .EXT_calibrated_timestamps = true,
@@ -174,6 +184,9 @@ hk_get_device_extensions(const struct hk_instance *instance,
       .EXT_pipeline_protected_access = true,
       .EXT_pipeline_robustness = true,
       .EXT_physical_device_drm = true,
+#ifdef HK_USE_WSI_PLATFORM
+      .EXT_present_timing = true,
+#endif
       .EXT_primitive_topology_list_restart = true,
       .EXT_private_data = true,
       .EXT_primitives_generated_query = false,
@@ -192,6 +205,7 @@ hk_get_device_extensions(const struct hk_instance *instance,
       .EXT_shader_stencil_export = true,
       .EXT_shader_subgroup_ballot = true,
       .EXT_shader_subgroup_vote = true,
+      .EXT_shader_uniform_buffer_unsized_array = true,
       .EXT_shader_viewport_index_layer = true,
       .EXT_subgroup_size_control = true,
 #ifdef HK_USE_WSI_PLATFORM
@@ -244,7 +258,7 @@ hk_get_device_features(
       .textureCompressionASTC_LDR = true,
       .occlusionQueryPrecise = true,
       .pipelineStatisticsQuery = true,
-      .vertexPipelineStoresAndAtomics = true,
+      .vertexPipelineStoresAndAtomics = instance->vertex_stores,
       .fragmentStoresAndAtomics = true,
       .shaderTessellationAndGeometryPointSize = true,
       .shaderImageGatherExtended = true,
@@ -397,14 +411,23 @@ hk_get_device_features(
       /* VK_KHR_maintenance9 */
       .maintenance9 = true,
 
+      /* VK_KHR_pipeline_binary */
+      .pipelineBinaries = true,
+
       /* VK_KHR_pipeline_executable_properties */
       .pipelineExecutableInfo = true,
 
       /* VK_KHR_present_id */
-      .presentId = false,
+      .presentId = true,
+
+      /* VK_KHR_present_id2 */
+      .presentId2 = true,
 
       /* VK_KHR_present_wait */
-      .presentWait = false,
+      .presentWait = true,
+
+      /* VK_KHR_present_wait2 */
+      .presentWait2 = true,
 
       /* VK_KHR_shader_clock */
       .shaderSubgroupClock = false,
@@ -531,7 +554,7 @@ hk_get_device_features(
       .imageSlicedViewOf3D = false,
 
 #ifdef HK_USE_WSI_PLATFORM
-      /* VK_EXT_swapchain_maintenance1 */
+      /* VK_KHR_swapchain_maintenance1 */
       .swapchainMaintenance1 = true,
 #endif
 
@@ -571,7 +594,7 @@ hk_get_device_features(
       .provokingVertexLast = true,
       .transformFeedbackPreservesProvokingVertex = true,
 
-      /* VK_EXT_robustness2 */
+      /* VK_KHR_robustness2 */
       .robustBufferAccess2 = true,
       .robustImageAccess2 = true,
       .nullDescriptor = true,
@@ -592,6 +615,9 @@ hk_get_device_features(
       /* VK_KHR_shader_subgroup_uniform_control_flow */
       .shaderSubgroupUniformControlFlow = true,
 
+      /* VK_EXT_shader_uniform_buffer_unsized_array */
+      .shaderUniformBufferUnsizedArray = true,
+
       /* VK_EXT_texel_buffer_alignment */
       .texelBufferAlignment = true,
 
@@ -610,6 +636,16 @@ hk_get_device_features(
 
       /* VK_KHR_shader_relaxed_extended_instruction */
       .shaderRelaxedExtendedInstruction = true,
+
+      /* VK_EXT_blend_operation_advanced */
+      .advancedBlendCoherentOperations = true,
+
+#ifdef HK_USE_WSI_PLATFORM
+      /* VK_EXT_present_timing */
+      .presentTiming = true,
+      .presentAtRelativeTime = true,
+      .presentAtAbsoluteTime = true,
+#endif
    };
 }
 
@@ -618,6 +654,7 @@ hk_get_device_properties(const struct agx_device *dev,
                          const struct hk_instance *instance,
                          struct vk_properties *properties)
 {
+   /* Note: update nir_shader_compiler_options.max_samples when changing this. */
    const VkSampleCountFlagBits sample_counts =
       VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_2_BIT | VK_SAMPLE_COUNT_4_BIT;
 
@@ -702,7 +739,7 @@ hk_get_device_properties(const struct agx_device *dev,
       .maxFragmentInputComponents = max_vgt_output_components,
       .maxFragmentOutputAttachments = HK_MAX_RTS,
       .maxFragmentDualSrcAttachments = 1,
-      .maxFragmentCombinedOutputResources = 16,
+      .maxFragmentCombinedOutputResources = HK_MAX_RTS + HK_MAX_DESCRIPTORS,
       .maxComputeSharedMemorySize = HK_MAX_SHARED_SIZE,
       .maxComputeWorkGroupCount = {0x7fffffff, 65535, 65535},
       .maxComputeWorkGroupInvocations = 1024,
@@ -924,13 +961,21 @@ hk_get_device_properties(const struct agx_device *dev,
 
       /* VK_KHR_maintenance9 */
       .image2DViewOf3DSparse = false,
-      .defaultVertexAttributeValue = VK_DEFAULT_VERTEX_ATTRIBUTE_VALUE_ZERO_ZERO_ZERO_ONE_KHR,
+      .defaultVertexAttributeValue =
+         VK_DEFAULT_VERTEX_ATTRIBUTE_VALUE_ZERO_ZERO_ZERO_ONE_KHR,
 
       /* VK_EXT_map_memory_placed */
       .minPlacedMemoryMapAlignment = os_page_size,
 
       /* VK_EXT_multi_draw */
       .maxMultiDrawCount = UINT16_MAX,
+
+      /* VK_KHR_pipeline_binary
+       *
+       * InternalCache properties are set by
+       * hk_physical_device_init_pipeline_cache()
+       */
+      .pipelineBinaryCompressedData = false,
 
       /* VK_EXT_pipeline_robustness */
       .defaultRobustnessStorageBuffers =
@@ -948,7 +993,7 @@ hk_get_device_properties(const struct agx_device *dev,
       .provokingVertexModePerPipeline = true,
       .transformFeedbackPreservesTriangleFanProvokingVertex = true,
 
-      /* VK_EXT_robustness2 */
+      /* VK_KHR_robustness2 */
       .robustStorageBufferAccessSizeAlignment = HK_SSBO_BOUNDS_CHECK_ALIGNMENT,
       .robustUniformBufferAccessSizeAlignment = HK_MIN_UBO_ALIGNMENT,
 
@@ -981,6 +1026,14 @@ hk_get_device_properties(const struct agx_device *dev,
 
       /* VK_KHR_fragment_shader_barycentric */
       .triStripVertexOrderIndependentOfProvokingVertex = false,
+
+      /* VK_EXT_blend_operation_advanced */
+      .advancedBlendMaxColorAttachments = HK_MAX_RTS,
+      .advancedBlendIndependentBlend = true,
+      .advancedBlendNonPremultipliedSrcColor = true,
+      .advancedBlendNonPremultipliedDstColor = true,
+      .advancedBlendCorrelatedOverlap = true,
+      .advancedBlendAllOperations = true,
    };
 
    strncpy(properties->deviceName, dev->name, sizeof(properties->deviceName));
@@ -1036,16 +1089,16 @@ hk_get_device_properties(const struct agx_device *dev,
    properties->identicalMemoryTypeRequirements = true;
 
    {
-      struct mesa_sha1 sha1_ctx;
-      uint8_t sha1[20];
+      blake3_hasher blake3_ctx;
+      uint8_t blake3[BLAKE3_KEY_LEN];
 
-      _mesa_sha1_init(&sha1_ctx);
+      _mesa_blake3_init(&blake3_ctx);
       /* Make sure we don't match with other vendors */
       const char *driver = "honeykrisp-v1";
-      _mesa_sha1_update(&sha1_ctx, driver, strlen(driver));
-      _mesa_sha1_final(&sha1_ctx, sha1);
+      _mesa_blake3_update(&blake3_ctx, driver, strlen(driver));
+      _mesa_blake3_final(&blake3_ctx, blake3);
 
-      memcpy(properties->optimalTilingLayoutUUID, sha1, VK_UUID_SIZE);
+      memcpy(properties->optimalTilingLayoutUUID, blake3, VK_UUID_SIZE);
    }
 }
 
@@ -1054,21 +1107,21 @@ hk_physical_device_init_pipeline_cache(struct hk_physical_device *pdev)
 {
    struct hk_instance *instance = hk_physical_device_instance(pdev);
 
-   struct mesa_sha1 sha_ctx;
-   _mesa_sha1_init(&sha_ctx);
+   blake3_hasher blake3_ctx;
+   _mesa_blake3_init(&blake3_ctx);
 
-   _mesa_sha1_update(&sha_ctx, instance->driver_build_sha,
+   _mesa_blake3_update(&blake3_ctx, instance->driver_build_sha,
                      sizeof(instance->driver_build_sha));
 
    const uint64_t compiler_flags = hk_physical_device_compiler_flags(pdev);
-   _mesa_sha1_update(&sha_ctx, &compiler_flags, sizeof(compiler_flags));
+   _mesa_blake3_update(&blake3_ctx, &compiler_flags, sizeof(compiler_flags));
 
-   unsigned char sha[SHA1_DIGEST_LENGTH];
-   _mesa_sha1_final(&sha_ctx, sha);
+   unsigned char blake3[BLAKE3_KEY_LEN];
+   _mesa_blake3_final(&blake3_ctx, blake3);
 
-   static_assert(SHA1_DIGEST_LENGTH >= VK_UUID_SIZE);
-   memcpy(pdev->vk.properties.pipelineCacheUUID, sha, VK_UUID_SIZE);
-   memcpy(pdev->vk.properties.shaderBinaryUUID, sha, VK_UUID_SIZE);
+   static_assert(BLAKE3_KEY_LEN >= VK_UUID_SIZE);
+   memcpy(pdev->vk.properties.pipelineCacheUUID, blake3, VK_UUID_SIZE);
+   memcpy(pdev->vk.properties.shaderBinaryUUID, blake3, VK_UUID_SIZE);
 
 #ifdef ENABLE_SHADER_CACHE
    char renderer[10];
@@ -1078,11 +1131,17 @@ hk_physical_device_init_pipeline_cache(struct hk_physical_device *pdev)
 
    assert(len == sizeof(renderer) - 2);
 
-   char timestamp[41];
-   _mesa_sha1_format(timestamp, instance->driver_build_sha);
+   char timestamp[BLAKE3_HEX_LEN];
+   _mesa_blake3_format(timestamp, instance->driver_build_sha);
 
    const uint64_t driver_flags = hk_physical_device_compiler_flags(pdev);
    pdev->vk.disk_cache = disk_cache_create(renderer, timestamp, driver_flags);
+   if (pdev->vk.disk_cache != NULL) {
+      pdev->vk.properties.pipelineBinaryInternalCache = true;
+      pdev->vk.properties.pipelineBinaryInternalCacheControl = true;
+      pdev->vk.properties.pipelineBinaryPrefersInternalCache = true;
+      pdev->vk.properties.pipelineBinaryPrecompiledInternalCache = true;
+   }
 #endif
 }
 
@@ -1231,7 +1290,7 @@ hk_create_drm_physical_device(struct vk_instance *_instance,
 
    hk_physical_device_init_pipeline_cache(pdev);
 
-   const char *hk_sysmem = getenv("HK_SYSMEM");
+   const char *hk_sysmem = os_get_option("HK_SYSMEM");
    if (hk_sysmem) {
       uint64_t sysmem = strtoll(hk_sysmem, NULL, 10);
       if (sysmem != LLONG_MIN && sysmem != LLONG_MAX) {

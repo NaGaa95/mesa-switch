@@ -69,8 +69,6 @@ files_mesa_util = files(
   'macros.h',
   'memstream.c',
   'memstream.h',
-  'mesa-sha1.c',
-  'mesa-sha1.h',
   'mesa-blake3.c',
   'mesa-blake3.h',
   'os_drm.h',
@@ -95,8 +93,6 @@ files_mesa_util = files(
   'u_qsort.h',
   'rwlock.c',
   'rwlock.h',
-  'sha1/sha1.c',
-  'sha1/sha1.h',
   'ralloc.c',
   'ralloc.h',
   'rand_xor.c',
@@ -131,6 +127,8 @@ files_mesa_util = files(
   'texcompress_astc_luts.h',
   'texcompress_astc_luts_wrap.cpp',
   'texcompress_astc_luts_wrap.h',
+  'texcompress_astc.cpp',
+  'texcompress_astc.h',
   'timespec.h',
   'u_atomic.c',
   'u_atomic.h',
@@ -350,9 +348,15 @@ _libmesa_util = static_library(
   install : host_machine.system() == 'horizon',
 )
 
+# Mesa leaves strict aliasing on in the compiler, and xxhash code likes to
+# dereference the passed in data as u32*, which means that the compiler is
+# free to move the u32 read before the write of the struct members being
+# hashed, and in practice it did in Freedreno and Intel drivers.
+# Forcing 2 flags below prevents it.
 idep_mesautil = declare_dependency(
   sources : [shader_stats_h],
   link_with : _libmesa_util,
+  compile_args : [ '-DXXH_FORCE_ALIGN_CHECK=0', '-DXXH_FORCE_MEMORY_ACCESS=0' ],
   include_directories : [inc_util],
   dependencies : deps_for_libmesa_util,
 )
@@ -443,7 +447,7 @@ if with_tests
     'tests/linear_test.cpp',
     'tests/list_test.cpp',
     'tests/lut_test.cpp',
-    'tests/mesa-sha1_test.cpp',
+    'tests/mesa-blake3_test.cpp',
     'tests/os_mman_test.cpp',
     'tests/perf/u_trace_test.cpp',
     'tests/range_minimum_query_test.cpp',
@@ -451,6 +455,7 @@ if with_tests
     'tests/register_allocate_test.cpp',
     'tests/roundeven_test.cpp',
     'tests/set_test.cpp',
+    'tests/sparse_bitset_test.cpp',
     'tests/string_buffer_test.cpp',
     'tests/timespec_test.cpp',
     'tests/u_atomic_test.cpp',
@@ -461,6 +466,7 @@ if with_tests
     'tests/u_memstream_test.cpp',
     'tests/u_printf_test.cpp',
     'tests/u_qsort_test.cpp',
+    'tests/u_ycbcr_test.cpp',
     'tests/vector_test.cpp',
   )
 

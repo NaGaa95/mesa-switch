@@ -8,6 +8,7 @@
 #define BVH_BUILD_HELPERS_H
 
 #include "bvh.h"
+#include "spirv_internal_exts.h"
 #include "vk_build_helpers.h"
 
 TYPE(radv_accel_struct_serialization_header, 8);
@@ -21,6 +22,7 @@ TYPE(radv_gfx12_box_node, 4);
 TYPE(radv_gfx12_instance_node, 8);
 TYPE(radv_gfx12_instance_node_user_data, 4);
 TYPE(radv_gfx12_primitive_node, 4);
+TYPE(radv_triangle_encode_task, 4);
 
 uint32_t
 id_to_offset(uint32_t id)
@@ -108,5 +110,8 @@ radv_encode_blas_pointer_flags(uint32_t flags, uint32_t geometry_type)
 
    return ptr_flags;
 }
+
+spirv_instruction(set = "MesaInternal", id = SpvOpFConvertRUMesa) float16_t radv_f32_to_f16_pos_inf(float f);
+spirv_instruction(set = "MesaInternal", id = SpvOpFConvertRDMesa) float16_t radv_f32_to_f16_neg_inf(float f);
 
 #endif /* BUILD_HELPERS_H */

@@ -163,6 +163,9 @@ struct vk_queue {
     */
    VkSemaphore anb_semaphore;
 #endif
+
+   /* VK_KHR_internally_synchronized_queues */
+   simple_mtx_t lock;
 };
 
 VK_DEFINE_HANDLE_CASTS(vk_queue, base, VkQueue, VK_OBJECT_TYPE_QUEUE)
@@ -179,6 +182,20 @@ static inline bool
 vk_queue_is_empty(struct vk_queue *queue)
 {
    return list_is_empty(&queue->submit.submits);
+}
+
+static inline void
+vk_queue_lock(struct vk_queue *queue)
+{
+   if (queue->flags & VK_DEVICE_QUEUE_CREATE_INTERNALLY_SYNCHRONIZED_BIT_KHR)
+      simple_mtx_lock(&queue->lock);
+}
+
+static inline void
+vk_queue_unlock(struct vk_queue *queue)
+{
+   if (queue->flags & VK_DEVICE_QUEUE_CREATE_INTERNALLY_SYNCHRONIZED_BIT_KHR)
+      simple_mtx_unlock(&queue->lock);
 }
 
 /** Enables threaded submit on this queue
@@ -243,6 +260,7 @@ struct vk_queue_submit {
    struct vk_sync **_wait_temps;
    struct vk_sync_timeline_point **_wait_points;
    struct vk_sync_timeline_point **_signal_points;
+   bool is_protected;
 };
 
 static inline bool

@@ -1140,12 +1140,8 @@ is_direct_uniform_load(nir_def *def, nir_scalar *s)
     */
    *s = nir_scalar_resolved(def, 0);
 
-   nir_def *ssa = s->def;
-   if (ssa->parent_instr->type != nir_instr_type_intrinsic)
-      return false;
-
-   nir_intrinsic_instr *intr = nir_def_as_intrinsic(ssa);
-   if (intr->intrinsic != nir_intrinsic_load_deref)
+   nir_intrinsic_instr *intr = nir_scalar_as_intrinsic(*s);
+   if (!intr || intr->intrinsic != nir_intrinsic_load_deref)
       return false;
 
    nir_deref_instr *deref = nir_src_as_deref(intr->src[0]);
@@ -1406,7 +1402,7 @@ nir_link_opt_varyings(nir_shader *producer, nir_shader *consumer)
          continue;
 
       nir_def *ssa = intr->src[1].ssa;
-      if (ssa->parent_instr->type == nir_instr_type_load_const) {
+      if (nir_def_is_const(ssa)) {
          progress |= replace_varying_input_by_constant_load(consumer, intr);
          continue;
       }
@@ -1433,6 +1429,15 @@ nir_link_opt_varyings(nir_shader *producer, nir_shader *consumer)
    }
 
    _mesa_hash_table_destroy(varying_values, NULL);
+
+   if (should_print_nir(producer)) {
+      printf("nir_link_opt_varyings\n");
+      nir_print_shader(producer, stdout);
+   }
+   if (should_print_nir(consumer)) {
+      printf("nir_link_opt_varyings\n");
+      nir_print_shader(consumer, stdout);
+   }
 
    return progress;
 }
@@ -1484,8 +1489,7 @@ nir_sort_variables_by_location(nir_shader *shader, nir_variable_mode mode)
 }
 
 void
-nir_assign_io_var_locations(nir_shader *shader, nir_variable_mode mode,
-                            unsigned *size, mesa_shader_stage stage)
+nir_assign_io_var_locations(nir_shader *shader, nir_variable_mode mode)
 {
    unsigned location = 0;
    unsigned assigned_locations[VARYING_SLOT_TESS_MAX][2];
@@ -1499,16 +1503,17 @@ nir_assign_io_var_locations(nir_shader *shader, nir_variable_mode mode,
    bool last_partial = false;
    nir_foreach_variable_in_list(var, &io_vars) {
       const struct glsl_type *type = var->type;
-      if (nir_is_arrayed_io(var, stage)) {
+      if (nir_is_arrayed_io(var, shader->info.stage)) {
          assert(glsl_type_is_array(type));
          type = glsl_get_array_element(type);
       }
 
       int base;
-      if (var->data.mode == nir_var_shader_in && stage == MESA_SHADER_VERTEX)
+      if (var->data.mode == nir_var_shader_in &&
+          shader->info.stage == MESA_SHADER_VERTEX)
          base = VERT_ATTRIB_GENERIC0;
       else if (var->data.mode == nir_var_shader_out &&
-               stage == MESA_SHADER_FRAGMENT)
+               shader->info.stage == MESA_SHADER_FRAGMENT)
          base = FRAG_RESULT_DATA0;
       else
          base = VARYING_SLOT_VAR0;
@@ -1619,5 +1624,10 @@ nir_assign_io_var_locations(nir_shader *shader, nir_variable_mode mode,
       location++;
 
    exec_list_append(&shader->variables, &io_vars);
-   *size = location;
+   if (mode == nir_var_shader_in)
+      shader->num_inputs = location;
+   else if (mode == nir_var_shader_out)
+      shader->num_outputs = location;
+   else
+      UNREACHABLE("Unknown I/O variable mode");
 }

@@ -1,23 +1,6 @@
 /*
  * Copyright © 2017 Intel Corporation
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included
- * in all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
- * OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  */
 
 #include <stdio.h>
@@ -229,9 +212,6 @@ iris_destroy_context(struct pipe_context *ctx)
 
    screen->vtbl.destroy_state(ice);
 
-   util_framebuffer_init(ctx, NULL, ice->state.fb_cbufs, &ice->state.fb_zsbuf);
-   util_unreference_framebuffer_state(&ice->state.framebuffer);
-
    for (unsigned i = 0; i < ARRAY_SIZE(ice->shaders.scratch_surfs); i++)
       pipe_resource_reference(&ice->shaders.scratch_surfs[i].res, NULL);
 
@@ -263,6 +243,9 @@ iris_destroy_context(struct pipe_context *ctx)
 
 #define genX_call(devinfo, func, ...)             \
    switch ((devinfo)->verx10) {                   \
+   case 350:                                      \
+      gfx35_##func(__VA_ARGS__);                  \
+      break;                                      \
    case 300:                                      \
       gfx30_##func(__VA_ARGS__);                  \
       break;                                      \

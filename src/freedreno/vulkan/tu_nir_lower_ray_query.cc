@@ -3,14 +3,13 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include "tu_shader.h"
+#include "compiler/spirv/spirv.h"
+#include "nir/nir_builder.h"
+#include "nir/nir_control_flow.h"
+#include "nir/nir_deref.h"
 
 #include "bvh/tu_build_interface.h"
-
-#include "compiler/spirv/spirv.h"
-
-#include "nir_builder.h"
-#include "nir_deref.h"
+#include "tu_shader.h"
 
 enum rq_intersection_var_index {
    rq_intersection_primitive_id,
@@ -169,7 +168,7 @@ get_rq_deref(nir_builder *b, struct hash_table *ht, nir_def *def,
 static nir_def *
 get_rq_initialize_uav_index(nir_intrinsic_instr *intr, struct rq_var *var)
 {
-   if (intr->src[1].ssa->parent_instr->type == nir_instr_type_intrinsic &&
+   if (nir_src_is_intrinsic(intr->src[1]) &&
        nir_def_as_intrinsic(intr->src[1].ssa)->intrinsic ==
        nir_intrinsic_load_vulkan_descriptor) {
       return intr->src[1].ssa;
@@ -545,8 +544,9 @@ fetch_parent_node(nir_builder *b, nir_def *bvh, nir_def *node)
 {
    nir_def *offset = nir_iadd_imm(b, nir_imul_imm(b, node, 4), 4);
 
-   return nir_build_load_global(b, 1, 32, nir_isub(b, nir_pack_64_2x32(b, bvh),
-                                                   nir_u2u64(b, offset)), .align_mul = 4);
+   return nir_load_global(
+      b, 1, 32, nir_isub(b, nir_pack_64_2x32(b, bvh), nir_u2u64(b, offset)),
+      .align_mul = 4);
 }
 
 static nir_def *
@@ -559,8 +559,10 @@ build_ray_traversal(nir_builder *b, nir_deref_instr *rq,
    nir_variable *incomplete = nir_local_variable_create(b->impl, glsl_bool_type(), "incomplete");
    nir_store_var(b, incomplete, nir_imm_true(b), 0x1);
 
-   nir_push_loop(b);
+   nir_loop *loop = nir_push_loop(b);
    {
+      nir_loop_add_continue_construct(loop);
+
       /* Go up the stack if current_node == VK_BVH_INVALID_NODE */
       nir_push_if(b, nir_ieq_imm(b, rq_load(b, rq, current_node), VK_BVH_INVALID_NODE));
       {
@@ -789,12 +791,10 @@ build_ray_traversal(nir_builder *b, nir_deref_instr *rq,
                            offsetof(struct tu_leaf_node, geometry_id));
             nir_def *geometry_id_ptr = nir_iadd(b, nir_pack_64_2x32(b, bvh_base),
                                                 offset);
-            nir_def *geometry_id =
-               nir_build_load_global(b, 1, 32, geometry_id_ptr,
-                                     .access = ACCESS_NON_WRITEABLE,
-                                     .align_mul = sizeof(struct tu_leaf_node),
-                                     .align_offset = offsetof(struct tu_leaf_node,
-                                                              geometry_id));
+            nir_def *geometry_id = nir_load_global(
+               b, 1, 32, geometry_id_ptr, .access = ACCESS_NON_WRITEABLE,
+               .align_mul = sizeof(struct tu_leaf_node),
+               .align_offset = offsetof(struct tu_leaf_node, geometry_id));
             rqi_store(b, candidate, geometry_id, geometry_id, 1);
 
             nir_push_if(b, nir_test_mask(b, intersection_flags,
@@ -929,7 +929,7 @@ build_ray_traversal(nir_builder *b, nir_deref_instr *rq,
       }
       nir_pop_if(b, NULL);
    }
-   nir_pop_loop(b, NULL);
+   nir_pop_loop(b, loop);
 
    return nir_load_var(b, incomplete);
 }
@@ -1035,6 +1035,9 @@ tu_nir_lower_ray_queries(nir_shader *shader)
    }
 
    ralloc_free(query_ht);
+
+   if (progress)
+      nir_lower_continue_constructs(shader);
 
    return progress;
 }

@@ -25,18 +25,15 @@
 
 extern struct ethosu_block ARCH_OFM_BLOCK_MAX;
 extern struct ethosu_block SUB_KERNEL_MAX;
-extern struct ethosu_block IFM_UBLOCK;
-extern struct ethosu_block OFM_UBLOCK;
+
+/* Maximum register index for state tracking arrays.
+ * All CMD0 offsets are ≤ 0x18F and CMD1 offsets are ≤ 0x1A0,
+ * so 512 entries covers the full range. */
+#define ETHOSU_MAX_REG_INDEX 512
 
 #define COEFS_REGION   0
 #define IO_REGION      1
 #define SCRATCH_REGION 2
-
-struct ethosu_block {
-   unsigned width;
-   unsigned height;
-   unsigned depth;
-};
 
 enum ethosu_operation_type {
    ETHOSU_OPERATION_TYPE_CONVOLUTION,
@@ -62,13 +59,22 @@ enum ethosu_rounding_mode {
    ETHOSU_ROUNDING_TRUNCATE,
    ETHOSU_ROUNDING_NATURAL,
 };
+
+enum ethosu_upscale_mode {
+   ETHOSU_UPSCALE_NONE = 0,
+   ETHOSU_UPSCALE_NEAREST = 1,
+   ETHOSU_UPSCALE_ZEROS = 2,
+};
+
 struct ethosu_feature_map {
    unsigned tensor_idx;
    struct ethosu_block shape;
    bool is_signed;
+   uint8_t precision;
    struct ethosu_tile_box tiles;
    unsigned zero_point;
    float scale;
+   uint16_t scalar;
 };
 
 struct ethosu_kernel {
@@ -82,6 +88,9 @@ struct ethosu_kernel {
    bool is_signed;
    unsigned zero_point;
    float scale;
+   /* Per-channel quantization (NULL for per-tensor) */
+   float *scales;
+   int *zero_points;
 };
 
 struct ethosu_padding {
@@ -114,10 +123,22 @@ enum ethosu_acc_type {
 struct ethosu_block_config {
    struct ethosu_block ifm_block;
    struct ethosu_block ofm_block;
+   struct ethosu_block ofm_ublock;
    struct ethosu_shram_layout shram_layout;
    unsigned bank_size;
    enum ethosu_acc_type acc_type;
    bool is_partkernel;
+};
+
+enum ethosu_pooling_type {
+   ETHOSU_POOLING_TYPE_MAX = 0,
+   ETHOSU_POOLING_TYPE_AVG,
+   ETHOSU_POOLING_TYPE_REDUCE_SUM,
+   ETHOSU_POOLING_TYPE_SUM,
+   ETHOSU_POOLING_TYPE_NONE,
+   ETHOSU_POOLING_TYPE_MIN,
+   ETHOSU_POOLING_TYPE_ARGMAX_X,
+   ETHOSU_POOLING_TYPE_ARGMAX_Y,
 };
 
 #define MAX_MEMORY_ACCESSES 5 /* IFM, IFM2, Scales, Weights, LUT*/
@@ -131,16 +152,19 @@ struct ethosu_operation {
       struct {
          struct ethosu_address_range weights;
          struct ethosu_address_range scales;
-         bool part_kernel_first;
          bool depthwise;
+         unsigned scale;
+         unsigned shift;
       } conv;
 
       struct {
-         bool avg; /* true for avg, false for max */
+         enum ethosu_pooling_type type;
       } pooling;
 
       struct {
+         uint16_t activation_min;
          unsigned lut_bytes;
+         bool ifm_reversed;
       } eltwise;
 
       struct {
@@ -155,7 +179,7 @@ struct ethosu_operation {
 
    struct ethosu_kernel kernel;
    struct ethosu_padding pad;
-   bool upscale;
+   enum ethosu_upscale_mode upscale;
    enum ethosu_rounding_mode round_mode;
 
    struct ethosu_address_range read_accesses[MAX_MEMORY_ACCESSES];
@@ -166,15 +190,21 @@ struct ethosu_tensor {
    unsigned index;
    unsigned offset;
    unsigned size;
+   uint8_t type_size;
    struct ethosu_block shape;
    enum ethosu_layout layout;
 };
 
+#define NUM_HEADER_FIELDS  4
+#define NUM_TENSOR_FIELDS  3
+
 struct ethosu_subgraph {
    struct pipe_ml_subgraph base;
 
+   struct ethosu_screen *screen; /* Set during prepare_for_submission */
+
    struct util_dynarray operations; /* ethosu_operation */
-   struct util_dynarray tensors;    /* ethosu_tensor* */
+   struct util_dynarray tensors;    /* ethosu_tensor */
 
    unsigned cmdstream_used;
    uint32_t *cmdstream;
@@ -187,15 +217,32 @@ struct ethosu_subgraph {
    uint8_t *coefs;
    struct pipe_resource *coefs_rsrc;
    unsigned coefs_used;
+
+   /* Register state tracking to avoid emitting unchanged values */
+   uint16_t *cmd0_state; /* Array of last values for CMD0 registers (16-bit) */
+   uint64_t *cmd1_state; /* Array of last values for CMD1 registers */
+   bool *cmd0_valid;     /* Track which CMD0 registers have been set */
+   bool *cmd1_valid;     /* Track which CMD1 registers have been set */
 };
 
 bool
-ethosu_ml_operation_supported(struct pipe_context *pcontext, const struct pipe_ml_operation *operation);
+ethosu_ml_operation_supported(struct pipe_ml_device *pdevice,
+                              const struct pipe_ml_operation *operation);
 
 struct pipe_ml_subgraph *
-ethosu_ml_subgraph_create(struct pipe_context *pcontext,
+ethosu_ml_subgraph_create(struct pipe_ml_device *pdevice,
                           const struct pipe_ml_operation *poperations,
                           unsigned count);
+
+uint8_t *
+ethosu_ml_subgraph_serialize(struct pipe_ml_device *pdevice,
+                             struct pipe_ml_subgraph *psubgraph,
+                             size_t *size);
+
+struct pipe_ml_subgraph *
+ethosu_ml_subgraph_deserialize(struct pipe_context *pcontext,
+                               const uint8_t *data,
+                               size_t size);
 
 void ethosu_ml_subgraph_invoke(struct pipe_context *pcontext,
                                struct pipe_ml_subgraph *psubgraph,
@@ -208,10 +255,8 @@ void ethosu_ml_subgraph_read_outputs(struct pipe_context *pcontext,
                                      unsigned output_idxs[], void *outputs[],
                                      bool is_signed[]);
 
-void ethosu_ml_subgraph_destroy(struct pipe_context *context,
+void ethosu_ml_subgraph_destroy(struct pipe_ml_device *pdevice,
                                 struct pipe_ml_subgraph *psubgraph);
-
-void ethosu_allocate_feature_map(struct ethosu_subgraph *subgraph, struct ethosu_feature_map *feature_map);
 
 void ethosu_register_tensor(struct ethosu_subgraph *subgraph, const struct pipe_tensor *ptensor);
 

@@ -32,7 +32,7 @@ ANDROID_CTS_MODULES=(
     "CtsSkQPTestCases"
 )
 
-ANDROID_CTS_VERSION="${ANDROID_VERSION}_r1"
+ANDROID_CTS_VERSION="${ANDROID_VERSION}_r3"
 ANDROID_CTS_DEVICE_ARCH="x86"
 
 # Download the stripped CTS from S3, because the CTS download from Google can take 20 minutes

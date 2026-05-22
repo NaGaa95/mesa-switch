@@ -68,7 +68,7 @@ intel_print_batch(struct intel_batch_decode_ctx *ctx,
                   const uint32_t *batch, uint32_t batch_size,
                   uint64_t batch_addr, bool from_ring)
 {
-   mesa_logw("Batch logging not supported on Android.");
+   mesa_logw("Batch logging not supported on Release drivers");
 }
 
 void
@@ -86,5 +86,5 @@ intel_batch_stats(struct intel_batch_decode_ctx *ctx,
 void
 intel_batch_print_stats(struct intel_batch_decode_ctx *ctx)
 {
-   mesa_logw("Batch logging not supported on Android.");
+   mesa_logw("Batch logging not supported on Release drivers");
 }

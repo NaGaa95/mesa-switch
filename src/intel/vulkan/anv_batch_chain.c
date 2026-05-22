@@ -270,6 +270,9 @@ anv_batch_bo_create(struct anv_cmd_buffer *cmd_buffer,
    if (result != VK_SUCCESS)
       goto fail_bo_alloc;
 
+   ANV_ADDR_BINDING_REPORT_BO_BIND(cmd_buffer->device, &cmd_buffer->vk.base,
+                                   bbo->bo);
+
    *bbo_out = bbo;
 
    return VK_SUCCESS;
@@ -379,6 +382,8 @@ anv_batch_bo_destroy(struct anv_batch_bo *bbo,
                      struct anv_cmd_buffer *cmd_buffer)
 {
    anv_reloc_list_finish(&bbo->relocs);
+   ANV_ADDR_BINDING_REPORT_BO_UNBIND(cmd_buffer->device, &cmd_buffer->vk.base,
+                                     bbo->bo);
    ANV_DMR_BO_FREE(&cmd_buffer->vk.base, bbo->bo);
    anv_bo_pool_free(&cmd_buffer->device->batch_bo_pool, bbo->bo);
    vk_free(&cmd_buffer->vk.pool->alloc, bbo);
@@ -457,7 +462,10 @@ anv_cmd_buffer_surface_base_address(struct anv_cmd_buffer *cmd_buffer)
    struct anv_state *bt_block = u_vector_head(&cmd_buffer->bt_block_states);
    return (struct anv_address) {
       .bo = pool->block_pool.bo,
-      .offset = bt_block->offset - pool->start_offset,
+      .offset = cmd_buffer->device->info->verx10 >= 125 ?
+                ROUND_DOWN_TO(bt_block->offset - pool->start_offset,
+                              BINDING_TABLE_VIEW_SIZE) :
+                (bt_block->offset - pool->start_offset),
    };
 }
 
@@ -721,15 +729,15 @@ anv_cmd_buffer_alloc_binding_table(struct anv_cmd_buffer *cmd_buffer,
    cmd_buffer->bt_next.map += bt_size;
    cmd_buffer->bt_next.alloc_size -= bt_size;
 
+   struct anv_state *bt_block = u_vector_head(&cmd_buffer->bt_block_states);
    if (cmd_buffer->device->info->verx10 >= 125) {
+      state.offset += bt_block->offset % BINDING_TABLE_VIEW_SIZE;
       /* We're using 3DSTATE_BINDING_TABLE_POOL_ALLOC to change the binding
        * table address independently from surface state base address.  We no
        * longer need any sort of offsetting.
        */
       *state_offset = 0;
    } else {
-      struct anv_state *bt_block = u_vector_head(&cmd_buffer->bt_block_states);
-
       assert(bt_block->offset < 0);
       *state_offset = -bt_block->offset;
    }
@@ -1424,22 +1432,22 @@ anv_queue_submit_sparse_bind(struct anv_queue *queue,
     */
    if (device->physical->sparse_type == ANV_SPARSE_TYPE_NOT_SUPPORTED) {
       if (INTEL_DEBUG(DEBUG_SPARSE))
-         fprintf(stderr, "=== application submitting sparse operations: "
-               "buffer_bind:%d image_opaque_bind:%d image_bind:%d\n",
-               submit->buffer_bind_count, submit->image_opaque_bind_count,
-               submit->image_bind_count);
+         mesa_logi("=== application submitting sparse operations: "
+                   "buffer_bind:%d image_opaque_bind:%d image_bind:%d\n",
+                   submit->buffer_bind_count, submit->image_opaque_bind_count,
+                   submit->image_bind_count);
       return vk_queue_set_lost(&queue->vk, "Sparse binding not supported");
    }
 
    assert(submit->command_buffer_count == 0);
 
    if (INTEL_DEBUG(DEBUG_SPARSE)) {
-      fprintf(stderr, "[sparse submission, buffers:%u opaque_images:%u "
-              "images:%u waits:%u signals:%u]\n",
-              submit->buffer_bind_count,
-              submit->image_opaque_bind_count,
-              submit->image_bind_count,
-              submit->wait_count, submit->signal_count);
+      mesa_logi("[sparse submission, buffers:%u opaque_images:%u "
+                "images:%u waits:%u signals:%u]\n",
+                submit->buffer_bind_count,
+                submit->image_opaque_bind_count,
+                submit->image_bind_count,
+                submit->wait_count, submit->signal_count);
    }
 
    struct anv_sparse_submission sparse_submit = {
@@ -1691,7 +1699,7 @@ anv_async_submit_extend_batch(struct anv_batch *batch, uint32_t size,
    if (result != VK_SUCCESS)
       return result;
 
-   util_dynarray_append(&submit->batch_bos, struct anv_bo *, bo);
+   util_dynarray_append(&submit->batch_bos, bo);
 
    batch->end += 4 * GFX9_MI_BATCH_BUFFER_START_length;
 
@@ -1742,7 +1750,7 @@ anv_async_submit_init(struct anv_async_submit *submit,
                       queue->family->engine_class,
    };
 
-   util_dynarray_init(&submit->batch_bos, NULL);
+   submit->batch_bos = UTIL_DYNARRAY_INIT;
 
    if (create_signal_sync) {
       result = vk_sync_create(&device->vk,

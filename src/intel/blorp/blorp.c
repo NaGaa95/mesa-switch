@@ -37,13 +37,19 @@ blorp_op_to_intel_measure_snapshot(enum blorp_op op)
       MAP(CCS_COLOR_CLEAR),
       MAP(CCS_PARTIAL_RESOLVE),
       MAP(CCS_RESOLVE),
+      MAP(FAST_STENCIL_CLEAR),
       MAP(HIZ_AMBIGUATE),
       MAP(HIZ_CLEAR),
+      MAP(HIZ_STENCIL_CLEAR),
       MAP(HIZ_RESOLVE),
+      MAP(HIZ_PARTIAL_RESOLVE),
       MAP(MCS_AMBIGUATE),
       MAP(MCS_COLOR_CLEAR),
       MAP(MCS_PARTIAL_RESOLVE),
+      MAP(LINEAR_SURFACE_CLEAR),
       MAP(SLOW_COLOR_CLEAR),
+      MAP(SLOW_STENCIL_CLEAR),
+      MAP(SLOW_DEPTH_STENCIL_CLEAR),
       MAP(SLOW_DEPTH_CLEAR),
 #undef MAP
    };
@@ -62,13 +68,19 @@ const char *blorp_op_to_name(enum blorp_op op)
       MAP(CCS_COLOR_CLEAR),
       MAP(CCS_PARTIAL_RESOLVE),
       MAP(CCS_RESOLVE),
+      MAP(FAST_STENCIL_CLEAR),
       MAP(HIZ_AMBIGUATE),
       MAP(HIZ_CLEAR),
+      MAP(HIZ_STENCIL_CLEAR),
       MAP(HIZ_RESOLVE),
+      MAP(HIZ_PARTIAL_RESOLVE),
       MAP(MCS_AMBIGUATE),
       MAP(MCS_COLOR_CLEAR),
       MAP(MCS_PARTIAL_RESOLVE),
+      MAP(LINEAR_SURFACE_CLEAR),
       MAP(SLOW_COLOR_CLEAR),
+      MAP(SLOW_STENCIL_CLEAR),
+      MAP(SLOW_DEPTH_STENCIL_CLEAR),
       MAP(SLOW_DEPTH_CLEAR),
 #undef MAP
    };
@@ -144,10 +156,10 @@ blorp_batch_finish(struct blorp_batch *batch)
 
 void
 blorp_surface_info_init(struct blorp_batch *batch,
-                            struct blorp_surface_info *info,
-                            const struct blorp_surf *surf,
-                            unsigned int level, float layer,
-                            enum isl_format format, bool is_dest)
+                        struct blorp_surface_info *info,
+                        const struct blorp_surf *surf,
+                        unsigned int level, float layer,
+                        enum isl_format format, bool is_dest)
 {
    struct blorp_context *blorp = batch->blorp;
    memset(info, 0, sizeof(*info));
@@ -164,6 +176,7 @@ blorp_surface_info_init(struct blorp_batch *batch,
    info->addr = surf->addr;
 
    info->aux_usage = surf->aux_usage;
+   info->aux_format = surf->surf->format;
    if (!blorp_address_is_null(surf->aux_addr)) {
       info->aux_surf = *surf->aux_surf;
       info->aux_addr = surf->aux_addr;
@@ -171,6 +184,7 @@ blorp_surface_info_init(struct blorp_batch *batch,
 
    info->clear_color = surf->clear_color;
    info->clear_color_addr = surf->clear_color_addr;
+   info->has_replicated_pixel = surf->has_replicated_pixel;
 
    isl_surf_usage_flags_t view_usage;
    if (is_dest) {
@@ -267,13 +281,15 @@ blorp_hiz_op(struct blorp_batch *batch, struct blorp_surf *surf,
    case ISL_AUX_OP_FULL_RESOLVE:
       params.op = BLORP_OP_HIZ_RESOLVE;
       break;
+   case ISL_AUX_OP_PARTIAL_RESOLVE:
+      params.op = BLORP_OP_HIZ_PARTIAL_RESOLVE;
+      break;
    case ISL_AUX_OP_AMBIGUATE:
       params.op = BLORP_OP_HIZ_AMBIGUATE;
       break;
    case ISL_AUX_OP_FAST_CLEAR:
       params.op = BLORP_OP_HIZ_CLEAR;
       break;
-   case ISL_AUX_OP_PARTIAL_RESOLVE:
    case ISL_AUX_OP_NONE:
       UNREACHABLE("Invalid HiZ op");
    }
@@ -282,7 +298,7 @@ blorp_hiz_op(struct blorp_batch *batch, struct blorp_surf *surf,
       const uint32_t layer = start_layer + a;
 
       blorp_surface_info_init(batch, &params.depth, surf, level,
-                                  layer, surf->surf->format, true);
+                              layer, surf->surf->format, true);
 
       /* Align the rectangle primitive to 8x4 pixels.
        *
@@ -314,8 +330,8 @@ blorp_hiz_op(struct blorp_batch *batch, struct blorp_surf *surf,
                            params.depth.view.base_level);
       params.y1 = u_minify(params.depth.surf.logical_level0_px.height,
                            params.depth.view.base_level);
-      params.x1 = ALIGN(params.x1, 8);
-      params.y1 = ALIGN(params.y1, 4);
+      params.x1 = align(params.x1, 8);
+      params.y1 = align(params.y1, 4);
 
       if (params.depth.view.base_level == 0) {
          /* TODO: What about MSAA? */

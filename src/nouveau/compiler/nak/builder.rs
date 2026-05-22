@@ -241,6 +241,42 @@ pub trait SSABuilder: Builder {
         dst
     }
 
+    fn urol(&mut self, x: Src, shift: Src) -> SSAValue {
+        let dst = self.alloc_ssa(RegFile::GPR);
+        assert!(self.sm() >= 32);
+
+        self.push_op(OpShf {
+            dst: dst.into(),
+            low: x.clone(),
+            high: x,
+            shift: shift,
+            right: false,
+            wrap: true,
+            data_type: IntType::U32,
+            dst_high: true,
+        });
+
+        dst
+    }
+
+    fn uror(&mut self, x: Src, shift: Src) -> SSAValue {
+        let dst = self.alloc_ssa(RegFile::GPR);
+        assert!(self.sm() >= 32);
+
+        self.push_op(OpShf {
+            dst: dst.into(),
+            low: x.clone(),
+            high: x,
+            shift: shift,
+            right: true,
+            wrap: true,
+            data_type: IntType::U32,
+            dst_high: false,
+        });
+
+        dst
+    }
+
     fn fadd(&mut self, x: Src, y: Src) -> SSAValue {
         let dst = self.alloc_ssa(RegFile::GPR);
         self.push_op(OpFAdd {
@@ -249,19 +285,6 @@ pub trait SSABuilder: Builder {
             saturate: false,
             rnd_mode: FRndMode::NearestEven,
             ftz: false,
-        });
-        dst
-    }
-
-    fn fmul(&mut self, x: Src, y: Src) -> SSAValue {
-        let dst = self.alloc_ssa(RegFile::GPR);
-        self.push_op(OpFMul {
-            dst: dst.into(),
-            srcs: [x, y],
-            saturate: false,
-            rnd_mode: FRndMode::NearestEven,
-            ftz: false,
-            dnz: false,
         });
         dst
     }
@@ -707,46 +730,37 @@ pub trait SSABuilder: Builder {
         dst
     }
 
-    fn mufu(&mut self, op: MuFuOp, src: Src) -> SSAValue {
+    fn mufu(&mut self, op: MuFuOp, src: Src, op_type: FloatType) -> SSAValue {
         let dst = self.alloc_ssa(RegFile::GPR);
         self.push_op(OpMuFu {
             dst: dst.into(),
             op: op,
             src: src,
+            op_type: op_type,
         });
         dst
     }
 
     fn fsin(&mut self, src: Src) -> SSAValue {
-        let tmp = if self.sm() >= 70 {
-            let frac_1_2pi = 1.0 / (2.0 * std::f32::consts::PI);
-            self.fmul(src, frac_1_2pi.into())
-        } else {
-            let tmp = self.alloc_ssa(RegFile::GPR);
-            self.push_op(OpRro {
-                dst: tmp.into(),
-                op: RroOp::SinCos,
-                src,
-            });
-            tmp.into()
-        };
-        self.mufu(MuFuOp::Sin, tmp.into())
+        assert!(self.sm() < 70);
+        let tmp = self.alloc_ssa(RegFile::GPR);
+        self.push_op(OpRro {
+            dst: tmp.into(),
+            op: RroOp::SinCos,
+            src,
+        });
+        self.mufu(MuFuOp::Sin, tmp.into(), FloatType::F32)
     }
 
     fn fcos(&mut self, src: Src) -> SSAValue {
-        let tmp = if self.sm() >= 70 {
-            let frac_1_2pi = 1.0 / (2.0 * std::f32::consts::PI);
-            self.fmul(src, frac_1_2pi.into())
-        } else {
-            let tmp = self.alloc_ssa(RegFile::GPR);
-            self.push_op(OpRro {
-                dst: tmp.into(),
-                op: RroOp::SinCos,
-                src,
-            });
-            tmp.into()
-        };
-        self.mufu(MuFuOp::Cos, tmp.into())
+        assert!(self.sm() < 70);
+        let tmp = self.alloc_ssa(RegFile::GPR);
+        self.push_op(OpRro {
+            dst: tmp.into(),
+            op: RroOp::SinCos,
+            src,
+        });
+        self.mufu(MuFuOp::Cos, tmp.into(), FloatType::F32)
     }
 
     fn fexp2(&mut self, src: Src) -> SSAValue {
@@ -761,7 +775,7 @@ pub trait SSABuilder: Builder {
             });
             tmp.into()
         };
-        self.mufu(MuFuOp::Exp2, tmp)
+        self.mufu(MuFuOp::Exp2, tmp, FloatType::F32)
     }
 
     fn prmt(&mut self, x: Src, y: Src, sel: [u8; 4]) -> SSAValue {
@@ -861,7 +875,7 @@ pub trait SSABuilder: Builder {
             self.alloc_ssa(RegFile::GPR)
         };
         self.copy_to(dst.into(), src);
-        dst.into()
+        dst
     }
 
     fn bmov_to_bar(&mut self, src: Src) -> SSAValue {
@@ -889,11 +903,11 @@ pub trait SSABuilder: Builder {
 
 pub struct InstrBuilder<'a> {
     instrs: MappedInstrs,
-    sm: &'a dyn ShaderModel,
+    sm: &'a ShaderModelInfo,
 }
 
 impl<'a> InstrBuilder<'a> {
-    pub fn new(sm: &'a dyn ShaderModel) -> Self {
+    pub fn new(sm: &'a ShaderModelInfo) -> Self {
         Self {
             instrs: MappedInstrs::None,
             sm,
@@ -933,7 +947,7 @@ pub struct SSAInstrBuilder<'a> {
 
 impl<'a> SSAInstrBuilder<'a> {
     pub fn new(
-        sm: &'a dyn ShaderModel,
+        sm: &'a ShaderModelInfo,
         alloc: &'a mut SSAValueAllocator,
     ) -> Self {
         Self {
@@ -948,7 +962,6 @@ impl SSAInstrBuilder<'_> {
         self.b.into_vec()
     }
 
-    #[allow(dead_code)]
     pub fn into_mapped_instrs(self) -> MappedInstrs {
         self.b.into_mapped_instrs()
     }

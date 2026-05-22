@@ -464,10 +464,9 @@ set_bitset_range(BITSET_WORD* words, unsigned start, unsigned size)
 bool
 test_bitset_range(BITSET_WORD* words, unsigned start, unsigned size)
 {
-   unsigned end = start + size - 1;
    unsigned start_mod = start % BITSET_WORDBITS;
    if (start_mod + size <= BITSET_WORDBITS) {
-      return BITSET_TEST_RANGE(words, start, end);
+      return BITSET_TEST_COUNT(words, start, size);
    } else {
       unsigned first_size = BITSET_WORDBITS - start_mod;
       return test_bitset_range(words, start, BITSET_WORDBITS - start_mod) ||
@@ -1499,7 +1498,7 @@ handle_instruction_gfx11(State& state, NOP_ctx_gfx11& ctx, aco_ptr<Instruction>&
             for (unsigned i = 0; i < op.size(); i++) {
                unsigned reg = op.physReg() + i;
 
-               /* s_waitcnt_depctr on sa_sdst */
+               /* s_waitcnt_depctr on sa_sdst, implicit wait.sa_sdst=0 is not enough. */
                if (ctx.sgpr_read_by_valu_as_lanemask_then_wr_by_salu[reg]) {
                   imm &= 0xfffe;
                   wait.sa_sdst = 0;
@@ -1508,11 +1507,13 @@ handle_instruction_gfx11(State& state, NOP_ctx_gfx11& ctx, aco_ptr<Instruction>&
                /* s_waitcnt_depctr on va_sdst (if non-VCC SGPR) or va_vcc (if VCC SGPR) */
                if (ctx.sgpr_read_by_valu_as_lanemask_then_wr_by_valu[reg]) {
                   bool is_vcc = reg == vcc || reg == vcc_hi;
-                  imm &= is_vcc ? 0xfffd : 0xf1ff;
-                  if (is_vcc)
+                  if (is_vcc && wait.va_vcc > 0) {
+                     imm &= 0xfffd;
                      wait.va_vcc = 0;
-                  else
+                  } else if (!is_vcc && wait.va_sdst > 0) {
+                     imm &= 0xf1ff;
                      wait.va_sdst = 0;
+                  }
                }
             }
          }
@@ -1618,6 +1619,7 @@ handle_instruction_gfx11(State& state, NOP_ctx_gfx11& ctx, aco_ptr<Instruction>&
 
             for (unsigned i = 0; i < op.size(); i++) {
                PhysReg reg = op.physReg().advance(i * 4);
+               /* Implicit wait.sa_sdst=0 is not enough. */
                if (ctx.sgpr_read_by_valu_then_wr_by_salu.get(reg) < expiry_count) {
                   imm &= 0xfffe;
                   wait.sa_sdst = 0;
@@ -1628,11 +1630,13 @@ handle_instruction_gfx11(State& state, NOP_ctx_gfx11& ctx, aco_ptr<Instruction>&
                   /* s_wait_alu on va_sdst (if non-VCC SGPR) or va_vcc (if VCC SGPR) */
                   if (ctx.sgpr_read_by_valu_then_wr_by_valu[reg]) {
                      bool is_vcc = reg == vcc || reg == vcc_hi;
-                     imm &= is_vcc ? 0xfffd : 0xf1ff;
-                     if (is_vcc)
+                     if (is_vcc && wait.va_vcc > 0) {
+                        imm &= 0xfffd;
                         wait.va_vcc = 0;
-                     else
+                     } else if (!is_vcc && wait.va_sdst > 0) {
+                        imm &= 0xf1ff;
                         wait.va_sdst = 0;
+                     }
                   }
                }
             }
@@ -1671,6 +1675,10 @@ handle_instruction_gfx11(State& state, NOP_ctx_gfx11& ctx, aco_ptr<Instruction>&
                ctx.sgpr_read_by_valu_then_wr_by_salu.set(reg.advance(i * 4));
          }
       }
+
+      /* resolve_all_gfx11() can't fix this */
+      if (instr->opcode == aco_opcode::s_call_b64 || instr->opcode == aco_opcode::s_swappc_b64)
+         ctx.sgpr_read_by_valu.set();
    }
 
    /* LdsDirectVMEMHazard
@@ -1683,7 +1691,7 @@ handle_instruction_gfx11(State& state, NOP_ctx_gfx11& ctx, aco_ptr<Instruction>&
       } else {
          uint8_t vmem_type =
             state.program->gfx_level >= GFX12
-               ? get_vmem_type(state.program->gfx_level, state.program->family, instr.get())
+               ? get_vmem_type(instr.get(), state.program->dev.has_point_sample_accel)
                : vmem_nosampler;
          std::bitset<256>* vgprs = &ctx.vgpr_used_by_vmem_load;
          if (vmem_type == vmem_sampler)
@@ -1863,6 +1871,8 @@ resolve_all_gfx11(State& state, NOP_ctx_gfx11& ctx,
        ctx.vgpr_used_by_vmem_bvh.any()) {
       waitcnt_depctr &= 0xffe3;
       ctx.vgpr_used_by_vmem_load.reset();
+      ctx.vgpr_used_by_vmem_sample.reset();
+      ctx.vgpr_used_by_vmem_bvh.reset();
       ctx.vgpr_used_by_vmem_store.reset();
       ctx.vgpr_used_by_ds.reset();
    }
@@ -1908,7 +1918,9 @@ handle_block(Program* program, Ctx& ctx, Block& block)
       Handle(state, ctx, instr, block.instructions);
 
       /* Resolve all possible hazards (we don't know what s_setpc_b64 jumps to). */
-      if (instr->opcode == aco_opcode::s_setpc_b64) {
+      if (instr->opcode == aco_opcode::s_setpc_b64 || instr->opcode == aco_opcode::s_swappc_b64 ||
+          instr->opcode == aco_opcode::s_call_b64) {
+         found_end |= instr->opcode == aco_opcode::s_setpc_b64;
          block.instructions.emplace_back(std::move(instr));
 
          std::vector<aco_ptr<Instruction>> resolve_instrs;
@@ -1916,8 +1928,6 @@ handle_block(Program* program, Ctx& ctx, Block& block)
          block.instructions.insert(std::prev(block.instructions.end()),
                                    std::move_iterator(resolve_instrs.begin()),
                                    std::move_iterator(resolve_instrs.end()));
-
-         found_end = true;
          continue;
       }
 

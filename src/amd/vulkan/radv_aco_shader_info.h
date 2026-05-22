@@ -30,7 +30,7 @@ radv_calculate_lds_size(const struct radv_shader_info *radv, const enum amd_gfx_
    if (radv->is_ngg)
       lds_size = radv->nir_shared_size;
    else if (gfx_level >= GFX9 && radv->stage == MESA_SHADER_GEOMETRY)
-      lds_size = radv->gs_ring_info.lds_size;
+      lds_size = radv->legacy_gs_info.lds_size;
    else if (radv->stage == MESA_SHADER_TESS_CTRL)
       lds_size = radv->tcs.lds_size; /* only used by stats */
    else
@@ -44,6 +44,11 @@ radv_aco_convert_shader_info(struct aco_shader_info *aco_info, const struct radv
                              const struct radv_shader_args *radv_args, const struct radv_device_cache_key *radv_key,
                              const enum amd_gfx_level gfx_level)
 {
+   bool ngg_wave_id_en = radv->ngg_wave_id_en;
+   /* Separately compiled shader, where the next stage might use NGG streamout. */
+   ngg_wave_id_en |= radv->is_ngg && radv->merged_shader_compiled_separately &&
+                     radv->next_stage == MESA_SHADER_GEOMETRY && gfx_level >= GFX11;
+
    ASSIGN_FIELD(wave_size);
    ASSIGN_FIELD(workgroup_size);
    ASSIGN_FIELD(ps.has_epilog);
@@ -52,7 +57,10 @@ radv_aco_convert_shader_info(struct aco_shader_info *aco_info, const struct radv
    ASSIGN_FIELD(vs.has_prolog);
    ASSIGN_FIELD(ps.num_inputs);
    ASSIGN_FIELD(cs.uses_full_subgroups);
+   ASSIGN_FIELD(descriptor_heap);
    aco_info->vs.any_tcs_inputs_via_lds = radv->vs.tcs_inputs_via_lds != 0;
+   /* S2 must not be modified for correct hang recovery when NGG_WAVE_ID_EN=1. */
+   aco_info->vs.preserve_s2 = ngg_wave_id_en && gfx_level < GFX12;
    aco_info->ps.spi_ps_input_ena = radv->ps.spi_ps_input_ena;
    aco_info->ps.spi_ps_input_addr = radv->ps.spi_ps_input_addr;
    aco_info->ps.has_prolog = false;
@@ -115,15 +123,12 @@ radv_aco_convert_opts(struct aco_compiler_options *aco_info, const struct radv_n
    ASSIGN_FIELD(record_stats);
    ASSIGN_FIELD(enable_mrt_output_nan_fixup);
    ASSIGN_FIELD(wgp_mode);
-   ASSIGN_FIELD(debug.func);
-   ASSIGN_FIELD(debug.private_data);
+   aco_info->compiler_info = radv->compiler_info;
    aco_info->is_opengl = false;
-   aco_info->load_grid_size_from_user_sgpr = radv_args->load_grid_size_from_user_sgpr;
    aco_info->optimisations_disabled = stage_key->optimisations_disabled;
-   aco_info->gfx_level = radv->info->gfx_level;
-   aco_info->family = radv->info->family;
-   aco_info->address32_hi = radv->info->address32_hi;
-   aco_info->has_ls_vgpr_init_bug = radv->info->has_ls_vgpr_init_bug;
+   aco_info->gfx_level = radv->gfx_level;
+   aco_info->family = radv->family;
+   aco_info->address32_hi = radv->address32_hi;
 }
 #undef ASSIGN_VS_STATE_FIELD
 #undef ASSIGN_VS_STATE_FIELD_CP

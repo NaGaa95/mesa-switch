@@ -73,9 +73,27 @@ bool IntelDriver::init_perfcnt()
     */
    this->clock_id = intel_pps_clock_id(drm_device.gpu_num);
 
-   assert(!perf && "Intel perf should not be initialized at this point");
+   if (perf)
+      return true;
 
    perf = std::make_unique<IntelPerf>(drm_device.fd);
+
+   if (perf->cfg->features_supported & INTEL_PERF_FEATURE_OA_BLOCKED_BY_POLICY) {
+      PPS_LOG_ERROR("OA metrics access blocked by system policy "
+                    "(gpu=%d, driver=%s): "
+                    "Check kernel paranoid settings or run as root.",
+                    drm_device.gpu_num,
+                    drm_device.name.c_str());
+      return false;
+   }
+
+   if (perf->cfg->n_queries == 0) {
+      PPS_LOG_ERROR("No OA queries available for this device "
+                    "(gpu=%d, driver=%s)",
+                    drm_device.gpu_num,
+                    drm_device.name.c_str());
+      return false;
+   }
 
    const char *metric_set_name = os_get_option("INTEL_PERFETTO_METRIC_SET");
 
@@ -115,6 +133,7 @@ bool IntelDriver::init_perfcnt()
       Counter counter_desc = {};
       counter_desc.id = counters.size();
       counter_desc.name = counter.symbol_name;
+      counter_desc.description = counter.desc;
       counter_desc.group = group.id;
       counter_desc.getter = [counter, this](
          const Counter &c, const Driver &dri) -> Counter::Value {
@@ -180,7 +199,13 @@ void IntelDriver::disable_perfcnt()
 /// @return True if the duration is at least close to the sampling period
 static bool close_enough(uint64_t duration, uint64_t sampling_period)
 {
-   return duration > sampling_period - 100000;
+   /* If the duration isn't greater than 67% of the request, we will use
+    * the next hw sampling period, which will be double the current duration.
+    * That value will fall somewhere between 100%-133%, guaranteeing a duration
+    * that falls closer to the requested sampling period overall, while scaling
+    * to accomodate relatively larger requested sample periods.
+    */
+   return duration > sampling_period * 0.67;
 }
 
 /// @brief Transforms the raw data received in from the driver into records

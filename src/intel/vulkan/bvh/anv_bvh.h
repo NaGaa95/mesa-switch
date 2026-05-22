@@ -74,7 +74,9 @@ struct anv_accel_struct_header {
     */
    uint32_t enable_64b_rt;
 
-   uint32_t padding[41];
+   uint32_t instance_leaves_offset;
+
+   uint32_t padding[40];
 };
 
 /* Mixed internal node with type per child */
@@ -319,17 +321,20 @@ struct anv_instance_leaf {
 
 /*******************************| 0
 | anv_accel_struct_header       |
+|-------------------------------| bvh_layout.bvh_offset
+| start with root node,         |
+| followed by interleaving      |
+| internal nodes and leaves     |
 |-------------------------------|
+| padding to align to           |
+| 64 bytes boundary             |
+|-------------------------------| bvh_layout.instance_leaves_offset
 | For a TLAS, the pointers      |
 | to all anv_instance_leaves    |
 | For a BLAS, nothing here      |
 |-------------------------------|
 | padding to align to           |
-| 64 bytes boundary             |
-|-------------------------------| bvh_layout.bvh_offset
-| start with root node,         |
-| followed by interleaving      |
-| internal nodes and leaves     | bvh_layout.size
+| 64 bytes boundary             | bvh_layout.size
 |*******************************/
 struct bvh_layout {
    /* This should be same as anv_accel_struct_header.rootNodeOffset.
@@ -343,6 +348,9 @@ struct bvh_layout {
     * internal node collpased)
     */
    uint64_t size;
+
+   /* This tracks pointers to all anv_instance_leaves for BLAS. */
+   uint64_t instance_leaves_offset;
 };
 
 #endif

@@ -54,12 +54,14 @@ enum intel_debug_flag {
    DEBUG_URB,
    DEBUG_CLIP,
    DEBUG_STALL,
+   DEBUG_NO_RESOURCE_BARRIER,
    DEBUG_BLORP,
    DEBUG_NO_DUAL_OBJECT_GS,
    DEBUG_OPTIMIZER,
    DEBUG_MDA,
    DEBUG_ANNOTATION,
    DEBUG_NO_OACONFIG,
+   DEBUG_NO_FILL_OPT,
    DEBUG_SPILL_FS,
    DEBUG_SPILL_VEC4,
    DEBUG_HEX,
@@ -67,6 +69,7 @@ enum intel_debug_flag {
    DEBUG_L3,
    DEBUG_NO_CCS,
    DEBUG_NO_HIZ,
+   DEBUG_NO_CCS_MODIFIER,
    DEBUG_COLOR,
    DEBUG_REEMIT,
    DEBUG_SOFT64,
@@ -96,7 +99,6 @@ enum intel_debug_flag {
    DEBUG_NO_VRT,
    DEBUG_RT_NO_TRACE,
    DEBUG_SHADERS_LINENO,
-   DEBUG_SHOW_SHADER_STAGE,
    /* Keep the stages grouped */
    DEBUG_VS,
    DEBUG_TCS,
@@ -193,6 +195,12 @@ extern uint32_t intel_shader_dump_filter;
 
 extern uint64_t intel_debug_flag_for_shader_stage(mesa_shader_stage stage);
 
+struct intel_device_info;
+struct nir_shader;
+
+extern bool intel_use_jay(const struct intel_device_info *devinfo,
+                          mesa_shader_stage stage);
+extern bool intel_use_jay_any_stage(const struct intel_device_info *devinfo);
 extern void process_intel_debug_variable(void);
 
 #ifdef __cplusplus

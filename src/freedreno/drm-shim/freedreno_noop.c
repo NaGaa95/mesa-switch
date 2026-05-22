@@ -10,6 +10,7 @@
 #include "drm-uapi/msm_drm.h"
 #include <sys/ioctl.h>
 
+#include "util/os_misc.h"
 #include "util/u_math.h"
 
 bool drm_shim_driver_prefers_first_render_node = true;
@@ -275,12 +276,22 @@ static const struct msm_device_info device_infos[] = {
       .chip_id = 0x43051401,
       .gmem_size = 3 * 1024 * 1024,
    },
+   {
+      .gpu_id = 810,
+      .chip_id = 0x44010000,
+      .gmem_size = 576 * 1024,
+   },
+   {
+      .gpu_id = 830,
+      .chip_id = 0x44050000,
+      .gmem_size = 12 * 1024 * 1024,
+   },
 };
 
 static void
 msm_driver_get_device_info(void)
 {
-   const char *env = getenv("FD_GPU_ID");
+   const char *env = os_get_option("FD_GPU_ID");
 
    if (!env) {
       device_info = &device_infos[0];

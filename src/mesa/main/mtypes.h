@@ -292,7 +292,7 @@ struct gl_colorbuffer_attrib
     * draw buffer, and NVX_blend_equation_advanced_multi_draw_buffer still
     * requires all draw buffers to match, so we only need a single value.
     */
-   enum gl_advanced_blend_mode _AdvancedBlendMode;
+   enum pipe_advanced_blend_mode _AdvancedBlendMode;
 
    /** Coherency requested via glEnable(GL_BLEND_ADVANCED_COHERENT_KHR)? */
    bool BlendCoherent;
@@ -3582,8 +3582,6 @@ struct gl_context
     */
    GLboolean HasConfig;
 
-   GLboolean TextureFormatSupported[MESA_FORMAT_COUNT];
-
    GLboolean RasterDiscard;  /**< GL_RASTERIZER_DISCARD */
    GLboolean IntelConservativeRasterization; /**< GL_CONSERVATIVE_RASTERIZATION_INTEL */
    GLboolean ConservativeRasterization; /**< GL_CONSERVATIVE_RASTERIZATION_NV */
@@ -3593,6 +3591,7 @@ struct gl_context
    GLboolean RepresentativeFragmentTest; /**< GL_REPRESENTATIVE_FRAGMENT_TEST_NV */
 
    GLboolean IntelBlackholeRender; /**< GL_INTEL_blackhole_render */
+   GLboolean PixelLocalStorage;    /**< GL_EXT_shader_pixel_local_storage */
 
    /** Does glVertexAttrib(0) alias glVertex()? */
    bool _AttribZeroAliasesVertex;

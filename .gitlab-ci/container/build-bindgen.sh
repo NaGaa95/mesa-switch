@@ -6,7 +6,7 @@
 # DEBIAN_BUILD_TAG
 # FEDORA_X86_64_BUILD_TAG
 
-uncollapsed_section_start bindgen "Building bindgen"
+section_start bindgen "Building bindgen"
 
 BINDGEN_VER=0.71.1
 CBINDGEN_VER=0.26.0

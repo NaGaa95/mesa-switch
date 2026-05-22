@@ -7,32 +7,22 @@ use mesa3d_protocols::protocols::kumquat_gpu_protocol::VulkanInfo;
 
 pub const VIRTGPU_KUMQUAT_PARAM_3D_FEATURES: u64 = 1;
 pub const VIRTGPU_KUMQUAT_PARAM_CAPSET_QUERY_FIX: u64 = 2;
-#[allow(unused)]
 pub const VIRTGPU_KUMQUAT_PARAM_RESOURCE_BLOB: u64 = 3;
-#[allow(unused)]
 pub const VIRTGPU_KUMQUAT_PARAM_HOST_VISIBLE: u64 = 4;
-#[allow(unused)]
 pub const VIRTGPU_KUMQUAT_PARAM_CROSS_DEVICE: u64 = 5;
 pub const VIRTGPU_KUMQUAT_PARAM_CONTEXT_INIT: u64 = 6;
 pub const VIRTGPU_KUMQUAT_PARAM_SUPPORTED_CAPSET_IDS: u64 = 7;
 pub const VIRTGPU_KUMQUAT_PARAM_EXPLICIT_DEBUG_NAME: u64 = 8;
 pub const VIRTGPU_KUMQUAT_PARAM_FENCE_PASSING: u64 = 9;
 
-#[allow(unused)]
 pub const VIRTGPU_KUMQUAT_EXECBUF_FENCE_FD_IN: u32 = 0x01;
-#[allow(unused)]
 pub const VIRTGPU_KUMQUAT_EXECBUF_FENCE_FD_OUT: u32 = 0x02;
-#[allow(unused)]
 pub const VIRTGPU_KUMQUAT_EXECBUF_RING_IDX: u32 = 0x04;
-#[allow(unused)]
 pub const VIRTGPU_KUMQUAT_EXECBUF_SHAREABLE_IN: u32 = 0x08;
 pub const VIRTGPU_KUMQUAT_EXECBUF_SHAREABLE_OUT: u32 = 0x10;
 
-#[allow(unused)]
 pub const VIRTGPU_KUMQUAT_CONTEXT_PARAM_CAPSET_ID: u64 = 0x01;
-#[allow(unused)]
 pub const VIRTGPU_KUMQUAT_CONTEXT_PARAM_NUM_RINGS: u64 = 0x02;
-#[allow(unused)]
 pub const VIRTGPU_KUMQUAT_CONTEXT_PARAM_POLL_RING_MASK: u64 = 0x03;
 
 pub const VIRTGPU_KUMQUAT_EMULATED_EXPORT: u32 = 0x01;

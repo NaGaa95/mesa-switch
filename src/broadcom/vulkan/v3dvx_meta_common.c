@@ -21,13 +21,17 @@
  * IN THE SOFTWARE.
  */
 
-#include "v3dv_private.h"
+#include "v3dv_device.h"
+#include "v3dv_cmd_buffer.h"
+#include "v3dv_image.h"
+#include "v3dv_version_dispatch.h"
+#include "vk_format.h"
+#include "v3dv_format_table.h"
+#include "v3dvx_format_table.h"
 #include "v3dv_meta_common.h"
 
-#include "broadcom/common/v3d_macros.h"
 #include "broadcom/common/v3d_tfu.h"
 #include "broadcom/common/v3d_util.h"
-#include "broadcom/cle/v3dx_pack.h"
 #include "broadcom/compiler/v3d_compiler.h"
 
 struct rcl_clear_info {
@@ -65,12 +69,6 @@ emit_rcl_prologue(struct v3dv_job *job,
 #if V3D_VERSION >= 71
       config.log2_tile_width = log2_tile_size(tiling->tile_width);
       config.log2_tile_height = log2_tile_size(tiling->tile_height);
-      /* FIXME: ideallly we would like next assert on the packet header (as is
-       * general, so also applies to GL). We would need to expand
-       * gen_pack_header for that.
-       */
-      assert(config.log2_tile_width == config.log2_tile_height ||
-             config.log2_tile_width == config.log2_tile_height + 1);
 #endif
       config.internal_depth_type = fb->internal_depth_type;
    }
@@ -180,7 +178,7 @@ emit_rcl_prologue(struct v3dv_job *job,
    cl_emit(rcl, TILE_LIST_INITIAL_BLOCK_SIZE, init) {
       init.use_auto_chained_tile_lists = true;
       init.size_of_first_block_in_chained_tile_lists =
-         TILE_ALLOCATION_BLOCK_SIZE_64B;
+         V3D_TILE_ALLOC_INITIAL_BLOCK_SIZE_ENUM;
    }
 
    return rcl;
@@ -198,7 +196,8 @@ emit_frame_setup(struct v3dv_job *job,
    struct v3dv_cl *rcl = &job->rcl;
 
    const uint32_t tile_alloc_offset =
-      64 * min_layer * tiling->draw_tiles_x * tiling->draw_tiles_y;
+      V3D_TILE_ALLOC_INITIAL_BLOCK_SIZE *
+      min_layer * tiling->draw_tiles_x * tiling->draw_tiles_y;
    cl_emit(rcl, MULTICORE_RENDERING_TILE_LIST_SET_BASE, list) {
       list.address = v3dv_cl_address(job->tile_alloc, tile_alloc_offset);
    }
@@ -276,7 +275,7 @@ emit_linear_load(struct v3dv_cl *cl,
                  struct v3dv_bo *bo,
                  uint32_t offset,
                  uint32_t stride,
-                 uint32_t format)
+                 enum V3DX(Output_Image_Format) format)
 {
    cl_emit(cl, LOAD_TILE_BUFFER_GENERAL, load) {
       load.buffer_to_load = buffer;
@@ -295,7 +294,7 @@ emit_linear_store(struct v3dv_cl *cl,
                   uint32_t offset,
                   uint32_t stride,
                   bool msaa,
-                  uint32_t format)
+                  enum V3DX(Output_Image_Format) format)
 {
    cl_emit(cl, STORE_TILE_BUFFER_GENERAL, store) {
       store.buffer_to_store = RENDER_TARGET_0;
@@ -315,7 +314,7 @@ emit_linear_store(struct v3dv_cl *cl,
  * we need to load and store to/from a tile color buffer using a compatible
  * color format.
  */
-static uint32_t
+static enum V3DX(Output_Image_Format)
 choose_tlb_format(struct v3dv_meta_framebuffer *framebuffer,
                   VkImageAspectFlags aspect,
                   bool for_store,
@@ -627,7 +626,7 @@ emit_copy_layer_to_buffer_per_tile_list(struct v3dv_job *job,
    uint32_t buffer_offset = buffer->mem_offset + region->bufferOffset +
                             height * buffer_stride * layer_offset;
 
-   uint32_t format = choose_tlb_format(framebuffer,
+   enum V3DX(Output_Image_Format) format = choose_tlb_format(framebuffer,
                                        region->imageSubresource.aspectMask,
                                        true, true, false);
    bool msaa = image->vk.samples > VK_SAMPLE_COUNT_1_BIT;
@@ -771,7 +770,7 @@ emit_copy_buffer_per_tile_list(struct v3dv_job *job,
                                uint32_t dst_offset,
                                uint32_t src_offset,
                                uint32_t stride,
-                               uint32_t format)
+                               enum V3DX(Output_Image_Format) format)
 {
    struct v3dv_cl *cl = &job->indirect;
    v3dv_cl_ensure_space(cl, 200, 1);
@@ -807,7 +806,7 @@ v3dX(meta_emit_copy_buffer)(struct v3dv_job *job,
                             uint32_t dst_offset,
                             uint32_t src_offset,
                             struct v3dv_meta_framebuffer *framebuffer,
-                            uint32_t format,
+                            enum V3DX(Output_Image_Format) format,
                             uint32_t item_size)
 {
    const uint32_t stride = job->frame_tiling.width * item_size;
@@ -824,7 +823,7 @@ v3dX(meta_emit_copy_buffer_rcl)(struct v3dv_job *job,
                                 uint32_t dst_offset,
                                 uint32_t src_offset,
                                 struct v3dv_meta_framebuffer *framebuffer,
-                                uint32_t format,
+                                enum V3DX(Output_Image_Format) format,
                                 uint32_t item_size)
 {
    struct v3dv_cl *rcl = emit_rcl_prologue(job, framebuffer, NULL);
@@ -980,10 +979,13 @@ v3dX(meta_emit_tfu_job)(struct v3dv_cmd_buffer *cmd_buffer,
 #endif
 
 #if V3D_VERSION >= 71
-   tfu.v71.ioc = (V3D71_TFU_IOC_FORMAT_LINEARTILE +
-                  (dst_tiling - V3D_TILING_LINEARTILE)) <<
-                   V3D71_TFU_IOC_FORMAT_SHIFT;
-
+   if (dst_tiling == V3D_TILING_RASTER) {
+      tfu.v71.ioc = V3D71_TFU_IOC_FORMAT_RASTER << V3D71_TFU_IOC_FORMAT_SHIFT;
+   } else {
+      tfu.v71.ioc = (V3D71_TFU_IOC_FORMAT_LINEARTILE +
+                     (dst_tiling - V3D_TILING_LINEARTILE)) <<
+                      V3D71_TFU_IOC_FORMAT_SHIFT;
+   }
    switch (dst_tiling) {
    case V3D_TILING_UIF_NO_XOR:
    case V3D_TILING_UIF_XOR:
@@ -1012,10 +1014,10 @@ v3dX(meta_emit_tfu_job)(struct v3dv_cmd_buffer *cmd_buffer,
       break;
    }
 
+#if V3D_VERSION <= 42
    /* The TFU can handle raster sources but always produces UIF results */
    assert(dst_tiling != V3D_TILING_RASTER);
 
-#if V3D_VERSION <= 42
    /* If we're writing level 0 (!IOA_DIMTW), then we need to supply the
     * OPAD field for the destination (how many extra UIF blocks beyond
     * those necessary to cover the height).
@@ -1219,7 +1221,7 @@ emit_copy_buffer_to_layer_per_tile_list(struct v3dv_job *job,
    uint32_t buffer_offset =
       buffer->mem_offset + region->bufferOffset + height * buffer_stride * layer;
 
-   uint32_t format = choose_tlb_format(framebuffer, imgrsc->aspectMask,
+   enum V3DX(Output_Image_Format) format = choose_tlb_format(framebuffer, imgrsc->aspectMask,
                                        false, false, true);
 
    uint32_t image_layer = layer + (image->vk.image_type != VK_IMAGE_TYPE_3D ?
@@ -1408,15 +1410,16 @@ v3dX(meta_copy_buffer)(struct v3dv_cmd_buffer *cmd_buffer,
       uint32_t width, height;
       framebuffer_size_for_pixel_count(num_items, &width, &height);
 
-      v3dv_job_start_frame(job, width, height, 1, true, true, 1,
-                           internal_bpp, 4 * v3d_internal_bpp_words(internal_bpp),
-                           false);
+      v3dv_job_start_frame(job, width, height, 1, true, 1, internal_bpp,
+                           4 * v3d_internal_bpp_words(internal_bpp), false);
 
       struct v3dv_meta_framebuffer framebuffer;
       v3dX(meta_framebuffer_init)(&framebuffer, vk_format, internal_type,
                                   &job->frame_tiling);
 
       v3dX(job_emit_binning_flush)(job);
+      if (!v3dv_job_allocate_tile_state(job))
+         return NULL;
 
       v3dX(meta_emit_copy_buffer_rcl)(job, dst, src, dst_offset, src_offset,
                                       &framebuffer, format, item_size);
@@ -1456,15 +1459,16 @@ v3dX(meta_fill_buffer)(struct v3dv_cmd_buffer *cmd_buffer,
       uint32_t width, height;
       framebuffer_size_for_pixel_count(num_items, &width, &height);
 
-      v3dv_job_start_frame(job, width, height, 1, true, true, 1,
-                           internal_bpp, 4 * v3d_internal_bpp_words(internal_bpp),
-                           false);
+      v3dv_job_start_frame(job, width, height, 1, true, 1, internal_bpp,
+                           4 * v3d_internal_bpp_words(internal_bpp), false);
 
       struct v3dv_meta_framebuffer framebuffer;
       v3dX(meta_framebuffer_init)(&framebuffer, VK_FORMAT_R8G8B8A8_UINT,
                                   internal_type, &job->frame_tiling);
 
       v3dX(job_emit_binning_flush)(job);
+      if (!v3dv_job_allocate_tile_state(job))
+         return;
 
       v3dX(meta_emit_fill_buffer_rcl)(job, bo, offset, &framebuffer, data);
 

@@ -58,6 +58,12 @@ struct nak_fs_key {
    bool force_sample_shading;
    bool uses_underestimate;
 
+   uint8_t pad;
+};
+PRAGMA_DIAGNOSTIC_POP
+static_assert(sizeof(struct nak_fs_key) == 4, "This struct has no holes");
+
+struct nak_constant_offset_info {
    /**
     * The constant buffer index and offset at which the sample locations and
     * pass sample masks tables lives.
@@ -79,10 +85,27 @@ struct nak_fs_key {
     * sample in a multi-pass fragment shader invocaiton.
     */
    uint32_t sample_masks_offset;
-};
-PRAGMA_DIAGNOSTIC_POP
-static_assert(sizeof(struct nak_fs_key) == 12, "This struct has no holes");
 
+   /**
+    * The constant buffer index at which the printf buffer pointer lives.
+    */
+   uint8_t printf_cb;
+
+   /**
+    * The offset into printf_cb for the printf buffer pointer.
+    */
+   uint32_t printf_buffer_offset;
+};
+const extern struct nak_constant_offset_info nak_const_offsets_base;
+const extern struct nak_constant_offset_info nak_const_offsets_turing_graphics;
+
+#define NAK_PRINTF_BUFFER_SIZE 0x40000
+
+#ifdef NDEBUG
+#define NAK_CAN_PRINTF false
+#else
+#define NAK_CAN_PRINTF true
+#endif
 
 void nak_postprocess_nir(nir_shader *nir, const struct nak_compiler *nak,
                          nir_variable_mode robust2_modes,
@@ -98,13 +121,6 @@ enum ENUM_PACKED nak_ts_spacing {
    NAK_TS_SPACING_INTEGER = 0,
    NAK_TS_SPACING_FRACT_ODD = 1,
    NAK_TS_SPACING_FRACT_EVEN = 2,
-};
-
-enum ENUM_PACKED nak_ts_prims {
-   NAK_TS_PRIMS_POINTS = 0,
-   NAK_TS_PRIMS_LINES = 1,
-   NAK_TS_PRIMS_TRIANGLES_CW = 2,
-   NAK_TS_PRIMS_TRIANGLES_CCW = 3,
 };
 
 struct nak_xfb_info {
@@ -190,9 +206,10 @@ struct nak_shader_info {
       struct {
          enum nak_ts_domain domain;
          enum nak_ts_spacing spacing;
-         enum nak_ts_prims prims;
+         bool ccw;
+         bool point_mode;
 
-         uint8_t _pad[9];
+         uint8_t _pad[8];
       } ts;
 
       /* Used to initialize the union for other stages */
@@ -267,6 +284,10 @@ struct nak_qmd_dispatch_size_layout {
    uint16_t x_start, x_end;
    uint16_t y_start, y_end;
    uint16_t z_start, z_end;
+
+   uint16_t local_x_start, local_x_end;
+   uint16_t local_y_start, local_y_end;
+   uint16_t local_z_start, local_z_end;
 };
 
 struct nak_qmd_dispatch_size_layout

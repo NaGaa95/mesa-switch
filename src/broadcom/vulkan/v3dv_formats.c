@@ -21,17 +21,24 @@
  * IN THE SOFTWARE.
  */
 
-#include "v3dv_private.h"
+#include "v3dv_device.h"
+#include "v3dv_image.h"
+#include "v3dv_entrypoints.h"
+#include "v3dv_version_dispatch.h"
+#include "vk_format.h"
+#include "vk_log.h"
+#include "vk_util.h"
 
 #include "vk_android.h"
 #include "vk_enum_defines.h"
-#include "vk_util.h"
 
 #include "drm-uapi/drm_fourcc.h"
 #include "util/format/u_format.h"
-#include "vulkan/wsi/wsi_common.h"
 
 #include <vulkan/vulkan_android.h>
+
+#define V3D_VERSION 42
+#include "v3dv_format_table.h"
 
 const uint8_t *
 v3dv_get_format_swizzle(struct v3dv_device *device, VkFormat f, uint8_t plane)
@@ -175,6 +182,7 @@ image_format_plane_features(struct v3dv_physical_device *pdevice,
       } else if (vk_format == VK_FORMAT_A2B10G10R10_UNORM_PACK32 ||
                  vk_format == VK_FORMAT_A2R10G10B10_UNORM_PACK32 ||
                  vk_format == VK_FORMAT_A2B10G10R10_UINT_PACK32 ||
+                 vk_format == VK_FORMAT_A2R10G10B10_UINT_PACK32 ||
                  vk_format == VK_FORMAT_B10G11R11_UFLOAT_PACK32) {
          /* To comply with shaderStorageImageExtendedFormats */
          flags |= VK_FORMAT_FEATURE_2_STORAGE_IMAGE_BIT |
@@ -302,6 +310,7 @@ buffer_format_features(VkFormat vk_format, const struct v3dv_format *v3dv_format
                VK_FORMAT_FEATURE_2_UNIFORM_TEXEL_BUFFER_BIT |
                VK_FORMAT_FEATURE_2_STORAGE_TEXEL_BUFFER_BIT;
    } else if (vk_format == VK_FORMAT_A2B10G10R10_UINT_PACK32 ||
+              vk_format == VK_FORMAT_A2R10G10B10_UINT_PACK32 ||
               vk_format == VK_FORMAT_B10G11R11_UFLOAT_PACK32) {
       flags |= VK_FORMAT_FEATURE_2_UNIFORM_TEXEL_BUFFER_BIT |
                VK_FORMAT_FEATURE_2_STORAGE_TEXEL_BUFFER_BIT;
@@ -676,7 +685,7 @@ v3dv_GetPhysicalDeviceImageFormatProperties2(VkPhysicalDevice physicalDevice,
 
    /* Extract input structs */
    vk_foreach_struct_const(s, base_info->pNext) {
-      switch (s->sType) {
+      switch ((unsigned)s->sType) {
       case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_IMAGE_FORMAT_INFO:
          external_info = (const void *) s;
          break;
@@ -695,6 +704,9 @@ v3dv_GetPhysicalDeviceImageFormatProperties2(VkPhysicalDevice physicalDevice,
          default:
             assert("Unknown DRM format modifier");
          }
+         break;
+      case VK_STRUCTURE_TYPE_WSI_IMAGE_CREATE_INFO_MESA:
+         /* Do nothing, v3dv_image_init will handle it */;
          break;
       default:
          vk_debug_ignored_stype(s->sType);

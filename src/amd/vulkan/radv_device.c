@@ -26,6 +26,7 @@
 #include <sys/inotify.h>
 #endif
 
+#include "layers/radv_app_workarounds.h"
 #include "meta/radv_meta.h"
 #include "util/disk_cache.h"
 #include "util/u_debug.h"
@@ -53,13 +54,12 @@ typedef void *drmDevicePtr;
 #endif
 #include "util/build_id.h"
 #include "util/driconf.h"
-#include "util/mesa-sha1.h"
+#include "util/mesa-blake3.h"
 #include "util/os_time.h"
 #include "util/timespec.h"
 #include "util/u_atomic.h"
 #include "util/u_process.h"
 #include "vulkan/vk_icd.h"
-#include "winsys/null/radv_null_winsys_public.h"
 #include "git_sha1.h"
 #include "sid.h"
 #include "vk_format.h"
@@ -72,7 +72,7 @@ typedef void *drmDevicePtr;
 static bool
 radv_trap_handler_enabled()
 {
-   return !!getenv("RADV_TRAP_HANDLER");
+   return !!os_get_option("RADV_TRAP_HANDLER");
 }
 
 bool
@@ -398,7 +398,7 @@ radv_parse_vrs_rates(const char *str)
 static const char *
 radv_get_force_vrs_config_file(void)
 {
-   return getenv("RADV_FORCE_VRS_CONFIG_FILE");
+   return os_get_option("RADV_FORCE_VRS_CONFIG_FILE");
 }
 
 static enum radv_force_vrs
@@ -601,7 +601,7 @@ radv_device_init_rgp(struct radv_device *device)
            radv_sqtt_queue_events_enabled() ? "enabled" : "disabled");
 
    if (radv_spm_trace_enabled(pdev)) {
-      if (pdev->info.gfx_level >= GFX10 && pdev->info.gfx_level < GFX11_5) {
+      if (pdev->info.gfx_level >= GFX10 && pdev->info.gfx_level <= GFX12) {
          if (!radv_spm_init(device))
             return VK_ERROR_INITIALIZATION_FAILED;
       } else {
@@ -716,7 +716,7 @@ radv_device_init_tools(struct radv_device *device)
    if (result != VK_SUCCESS)
       return result;
 
-   if ((instance->vk.trace_mode & RADV_TRACE_MODE_RRA) && radv_enable_rt(pdev)) {
+   if (radv_bvh_dumping_enabled(instance) && radv_enable_rt(pdev)) {
       result = radv_rra_trace_init(device);
       if (result != VK_SUCCESS)
          return result;
@@ -763,6 +763,30 @@ add_entrypoints(struct dispatch_table_builder *b, const struct vk_device_entrypo
 }
 
 static void
+init_app_workarounds_entrypoints(struct radv_device *device, struct dispatch_table_builder *b)
+{
+   const struct radv_physical_device *pdev = radv_device_physical(device);
+   const struct radv_instance *instance = radv_physical_device_instance(pdev);
+   struct vk_device_entrypoint_table table = {0};
+
+#define SET_ENTRYPOINT(app_layer, entrypoint) table.entrypoint = app_layer##_##entrypoint;
+   if (!strcmp(instance->drirc.debug.app_layer, "metroexodus")) {
+      SET_ENTRYPOINT(metro_exodus, GetSemaphoreCounterValue);
+   } else if (!strcmp(instance->drirc.debug.app_layer, "rage2")) {
+      SET_ENTRYPOINT(rage2, CmdBeginRenderPass);
+   } else if (!strcmp(instance->drirc.debug.app_layer, "quanticdream")) {
+      SET_ENTRYPOINT(quantic_dream, UnmapMemory2);
+   } else if (!strcmp(instance->drirc.debug.app_layer, "no_mans_sky")) {
+      SET_ENTRYPOINT(no_mans_sky, CreateImageView);
+   } else if (!strcmp(instance->drirc.debug.app_layer, "strange_brigade")) {
+      SET_ENTRYPOINT(strange_brigade, CmdPipelineBarrier2);
+   }
+#undef SET_ENTRYPOINT
+
+   add_entrypoints(b, &table, RADV_APP_DISPATCH_TABLE);
+}
+
+static void
 init_dispatch_tables(struct radv_device *device, struct radv_physical_device *pdev)
 {
    const struct radv_instance *instance = radv_physical_device_instance(pdev);
@@ -779,22 +803,12 @@ init_dispatch_tables(struct radv_device *device, struct radv_physical_device *pd
    if (radv_device_fault_detection_enabled(device) || gather_ctx_rolls)
       add_entrypoints(&b, &annotate_device_entrypoints, RADV_ANNOTATE_DISPATCH_TABLE);
 
-   if (!strcmp(instance->drirc.debug.app_layer, "metroexodus")) {
-      add_entrypoints(&b, &metro_exodus_device_entrypoints, RADV_APP_DISPATCH_TABLE);
-   } else if (!strcmp(instance->drirc.debug.app_layer, "rage2")) {
-      add_entrypoints(&b, &rage2_device_entrypoints, RADV_APP_DISPATCH_TABLE);
-   } else if (!strcmp(instance->drirc.debug.app_layer, "quanticdream")) {
-      add_entrypoints(&b, &quantic_dream_device_entrypoints, RADV_APP_DISPATCH_TABLE);
-   } else if (!strcmp(instance->drirc.debug.app_layer, "no_mans_sky")) {
-      add_entrypoints(&b, &no_mans_sky_device_entrypoints, RADV_APP_DISPATCH_TABLE);
-   } else if (!strcmp(instance->drirc.debug.app_layer, "strange_brigade")) {
-      add_entrypoints(&b, &strange_brigade_device_entrypoints, RADV_APP_DISPATCH_TABLE);
-   }
+   init_app_workarounds_entrypoints(device, &b);
 
    if (instance->vk.trace_mode & RADV_TRACE_MODE_RGP)
       add_entrypoints(&b, &sqtt_device_entrypoints, RADV_RGP_DISPATCH_TABLE);
 
-   if ((instance->vk.trace_mode & RADV_TRACE_MODE_RRA) && radv_enable_rt(pdev))
+   if (radv_bvh_dumping_enabled(instance) && radv_enable_rt(pdev))
       add_entrypoints(&b, &rra_device_entrypoints, RADV_RRA_DISPATCH_TABLE);
 
 #ifndef _WIN32
@@ -864,12 +878,9 @@ static void
 radv_device_init_cache_key(struct radv_device *device)
 {
    const struct radv_physical_device *pdev = radv_device_physical(device);
-   const struct radv_instance *instance = radv_physical_device_instance(pdev);
    struct radv_device_cache_key *key = &device->cache_key;
    struct mesa_blake3 ctx;
 
-   key->keep_shader_info = device->keep_shader_info;
-   key->trap_excp_flags = device->trap_handler_shader && instance->trap_excp_flags;
    key->image_2d_view_of_3d = device->vk.enabled_features.image2DViewOf3D && pdev->info.gfx_level == GFX9;
    key->mesh_shader_queries = device->vk.enabled_features.meshShaderQueries && pdev->emulate_mesh_shader_queries;
    key->primitives_generated_query = radv_uses_primitives_generated_query(device);
@@ -1090,6 +1101,11 @@ radv_destroy_device(struct radv_device *device, const VkAllocationCallbacks *pAl
 {
    radv_device_finish_perf_counter(device);
 
+   if (device->zero_bo) {
+      device->ws->buffer_make_resident(device->ws, device->zero_bo, false);
+      radv_bo_destroy(device, NULL, device->zero_bo);
+   }
+
    if (device->gfx_init)
       radv_bo_destroy(device, NULL, device->gfx_init);
 
@@ -1183,6 +1199,8 @@ radv_CreateDevice(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo *pCr
 
    init_dispatch_tables(device, pdev);
 
+   /* Initialize everything required for compilation, first. */
+
    simple_mtx_init(&device->ctx_roll_mtx, mtx_plain);
    simple_mtx_init(&device->trace_mtx, mtx_plain);
    simple_mtx_init(&device->pstate_mtx, mtx_plain);
@@ -1191,6 +1209,44 @@ radv_CreateDevice(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo *pCr
    simple_mtx_init(&device->blit_queue_mtx, mtx_plain);
 
    device->rt_handles = _mesa_hash_table_create(NULL, _mesa_hash_u32, _mesa_key_u32_equal);
+
+   radv_init_shader_arenas(device);
+
+   /* Initialize the per-device cache key. */
+   radv_device_init_cache_key(device);
+
+   if (!device->vk.disable_internal_cache) {
+      result = radv_device_init_memory_cache(device);
+      if (result != VK_SUCCESS)
+         goto fail;
+   }
+
+   if (pdev->info.gfx_level == GFX10_3) {
+      if (os_get_option("RADV_FORCE_VRS_CONFIG_FILE")) {
+         const char *file = radv_get_force_vrs_config_file();
+
+         device->force_vrs = radv_parse_force_vrs_config_file(file);
+
+         if (radv_device_init_notifier(device)) {
+            device->force_vrs_enabled = true;
+         } else {
+            fprintf(stderr, "radv: Failed to initialize the notifier for RADV_FORCE_VRS_CONFIG_FILE!\n");
+         }
+      } else if (os_get_option("RADV_FORCE_VRS")) {
+         const char *vrs_rates = os_get_option("RADV_FORCE_VRS");
+
+         device->force_vrs = radv_parse_vrs_rates(vrs_rates);
+         device->force_vrs_enabled = device->force_vrs != RADV_FORCE_VRS_1x1;
+      }
+   }
+
+   device->force_aniso = MIN2(16, (int)debug_get_num_option("RADV_TEX_ANISO", -1));
+   if (device->force_aniso >= 0) {
+      fprintf(stderr, "radv: Forcing anisotropy filter to %ix\n", 1 << util_logbase2(device->force_aniso));
+   }
+
+   /* PKT3_LOAD_SH_REG_INDEX is supported on GFX8+, but it hangs with compute queues until GFX10.3. */
+   device->load_grid_size_from_user_sgpr = pdev->info.gfx_level >= GFX10_3;
 
    device->ws = pdev->ws;
    device->vk.sync = device->ws->get_sync_provider(device->ws);
@@ -1202,28 +1258,8 @@ radv_CreateDevice(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo *pCr
                                       ? NULL
                                       : pdev->ws->copy_sync_payloads;
 
-   /* Enable the global BO list by default. */
-   /* TODO: Remove the per cmdbuf BO list tracking after few Mesa releases if no blockers. */
-   device->use_global_bo_list = !pdev->info.is_virtio;
-
-   /* Disable it for debugging purposes if no features require it. */
-   if (instance->debug_flags & RADV_DEBUG_NO_BO_LIST) {
-      if (!device->vk.enabled_features.bufferDeviceAddress && !device->vk.enabled_features.descriptorIndexing &&
-          !device->vk.enabled_features.descriptorBindingUniformBufferUpdateAfterBind &&
-          !device->vk.enabled_features.descriptorBindingSampledImageUpdateAfterBind &&
-          !device->vk.enabled_features.descriptorBindingStorageImageUpdateAfterBind &&
-          !device->vk.enabled_features.descriptorBindingStorageBufferUpdateAfterBind &&
-          !device->vk.enabled_features.descriptorBindingUniformTexelBufferUpdateAfterBind &&
-          !device->vk.enabled_features.descriptorBindingStorageTexelBufferUpdateAfterBind &&
-          !device->vk.enabled_features.descriptorBindingUpdateUnusedWhilePending &&
-          !device->vk.enabled_features.descriptorBindingPartiallyBound) {
-         device->use_global_bo_list = false;
-      } else {
-         fprintf(stderr, "radv: Can't disable the global BO list because some features require it!\n");
-      }
-   }
-
-   radv_init_shader_arenas(device);
+   /* VM_ALWAYS_VALID must be supported. */
+   assert(pdev->info.has_vm_always_valid);
 
    device->overallocation_disallowed = overallocation_disallowed;
    mtx_init(&device->overallocation_mutex, mtx_plain);
@@ -1331,33 +1367,8 @@ radv_CreateDevice(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo *pCr
     */
    device->dispatch_initiator_task = device->dispatch_initiator | S_00B800_DISABLE_DISP_PREMPT_EN(1);
 
-   if (pdev->info.gfx_level == GFX10_3) {
-      if (getenv("RADV_FORCE_VRS_CONFIG_FILE")) {
-         const char *file = radv_get_force_vrs_config_file();
-
-         device->force_vrs = radv_parse_force_vrs_config_file(file);
-
-         if (radv_device_init_notifier(device)) {
-            device->force_vrs_enabled = true;
-         } else {
-            fprintf(stderr, "radv: Failed to initialize the notifier for RADV_FORCE_VRS_CONFIG_FILE!\n");
-         }
-      } else if (getenv("RADV_FORCE_VRS")) {
-         const char *vrs_rates = getenv("RADV_FORCE_VRS");
-
-         device->force_vrs = radv_parse_vrs_rates(vrs_rates);
-         device->force_vrs_enabled = device->force_vrs != RADV_FORCE_VRS_1x1;
-      }
-   }
-
-   /* PKT3_LOAD_SH_REG_INDEX is supported on GFX8+, but it hangs with compute queues until GFX10.3. */
-   device->load_grid_size_from_user_sgpr = pdev->info.gfx_level >= GFX10_3;
-
    /* Keep shader info for GPU hangs debugging. */
    device->keep_shader_info = radv_device_fault_detection_enabled(device) || radv_trap_handler_enabled();
-
-   /* Initialize the per-device cache key before compiling meta shaders. */
-   radv_device_init_cache_key(device);
 
    result = radv_device_init_tools(device);
    if (result != VK_SUCCESS)
@@ -1390,19 +1401,21 @@ radv_CreateDevice(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo *pCr
        device->vk.enabled_features.extendedDynamicState3ColorBlendEquation)
       radv_shader_part_cache_init(&device->ps_epilogs, &ps_epilog_ops);
 
-   if (pdev->info.has_graphics && !(instance->debug_flags & RADV_DEBUG_NO_IB_CHAINING))
-      radv_create_gfx_preamble(device);
+   if (pdev->info.has_zero_index_buffer_bug || pdev->cache_key.mitigate_smem_oob) {
+      result = radv_bo_create(device, NULL, 4096, 4096, RADEON_DOMAIN_VRAM,
+                              RADEON_FLAG_NO_CPU_ACCESS | RADEON_FLAG_NO_INTERPROCESS_SHARING | RADEON_FLAG_READ_ONLY |
+                                 RADEON_FLAG_ZERO_VRAM | RADEON_FLAG_32BIT,
+                              RADV_BO_PRIORITY_VIRTUAL, 0, true, &device->zero_bo);
+      if (result != VK_SUCCESS)
+         goto fail;
 
-   if (!device->vk.disable_internal_cache) {
-      result = radv_device_init_memory_cache(device);
+      result = device->ws->buffer_make_resident(device->ws, device->zero_bo, true);
       if (result != VK_SUCCESS)
          goto fail;
    }
 
-   device->force_aniso = MIN2(16, (int)debug_get_num_option("RADV_TEX_ANISO", -1));
-   if (device->force_aniso >= 0) {
-      fprintf(stderr, "radv: Forcing anisotropy filter to %ix\n", 1 << util_logbase2(device->force_aniso));
-   }
+   if (pdev->info.has_graphics && !(instance->debug_flags & RADV_DEBUG_NO_IB_CHAINING))
+      radv_create_gfx_preamble(device);
 
    if (device->vk.enabled_features.performanceCounterQueryPools) {
       result = radv_device_init_perf_counter(device);
@@ -1504,160 +1517,6 @@ radv_GetDeviceImageMemoryRequirements(VkDevice device, const VkDeviceImageMemory
    radv_GetImageMemoryRequirements2(device, &info2, pMemoryRequirements);
 
    radv_DestroyImage(device, image, NULL);
-}
-
-static uint32_t
-radv_surface_max_layer_count(struct radv_image_view *iview)
-{
-   return iview->vk.view_type == VK_IMAGE_VIEW_TYPE_3D ? iview->extent.depth
-                                                       : (iview->vk.base_array_layer + iview->vk.layer_count);
-}
-
-static unsigned
-radv_get_dcc_max_uncompressed_block_size(const struct radv_device *device, const struct radv_image *image)
-{
-   const struct radv_physical_device *pdev = radv_device_physical(device);
-
-   if (pdev->info.gfx_level < GFX10 && image->vk.samples > 1) {
-      if (image->planes[0].surface.bpe == 1)
-         return V_028C78_MAX_BLOCK_SIZE_64B;
-      else if (image->planes[0].surface.bpe == 2)
-         return V_028C78_MAX_BLOCK_SIZE_128B;
-   }
-
-   return V_028C78_MAX_BLOCK_SIZE_256B;
-}
-
-void
-radv_initialise_color_surface(struct radv_device *device, struct radv_color_buffer_info *cb,
-                              struct radv_image_view *iview)
-{
-   const struct radv_physical_device *pdev = radv_device_physical(device);
-   const struct radv_instance *instance = radv_physical_device_instance(pdev);
-   uint64_t va;
-   const struct radv_image_plane *plane = &iview->image->planes[iview->plane_id];
-   const struct radeon_surf *surf = &plane->surface;
-
-   memset(cb, 0, sizeof(*cb));
-
-   const unsigned num_layers =
-      iview->image->vk.image_type == VK_IMAGE_TYPE_3D ? (iview->extent.depth - 1) : (iview->image->vk.array_layers - 1);
-
-   const struct ac_cb_state cb_state = {
-      .surf = surf,
-      .format = radv_format_to_pipe_format(iview->vk.format),
-      .width = vk_format_get_plane_width(iview->image->vk.format, iview->plane_id, iview->extent.width),
-      .height = vk_format_get_plane_height(iview->image->vk.format, iview->plane_id, iview->extent.height),
-      .first_layer = iview->vk.base_array_layer,
-      .last_layer = radv_surface_max_layer_count(iview) - 1,
-      .num_layers = num_layers,
-      .num_samples = iview->image->vk.samples,
-      .num_storage_samples = iview->image->vk.samples,
-      .base_level = iview->vk.base_mip_level,
-      .num_levels = iview->image->vk.mip_levels,
-      .gfx10 =
-         {
-            .nbc_view = iview->nbc_view.valid ? &iview->nbc_view : NULL,
-         },
-   };
-
-   ac_init_cb_surface(&pdev->info, &cb_state, &cb->ac);
-
-   uint32_t plane_id = iview->image->disjoint ? iview->plane_id : 0;
-   va = iview->image->bindings[plane_id].addr;
-
-   const struct ac_mutable_cb_state mutable_cb_state = {
-      .surf = surf,
-      .cb = &cb->ac,
-      .va = va,
-      .base_level = iview->vk.base_mip_level,
-      .num_samples = iview->image->vk.samples,
-      .fmask_enabled = radv_image_has_fmask(iview->image),
-      .cmask_enabled = radv_image_has_cmask(iview->image),
-      .fast_clear_enabled = !(instance->debug_flags & RADV_DEBUG_NO_FAST_CLEARS),
-      .tc_compat_cmask_enabled = radv_image_is_tc_compat_cmask(iview->image),
-      .dcc_enabled = radv_dcc_enabled(iview->image, iview->vk.base_mip_level) &&
-                     (pdev->info.gfx_level >= GFX11 || !iview->disable_dcc_mrt),
-      .gfx10 =
-         {
-            .nbc_view = iview->nbc_view.valid ? &iview->nbc_view : NULL,
-         },
-   };
-
-   ac_set_mutable_cb_surface_fields(&pdev->info, &mutable_cb_state, &cb->ac);
-}
-
-void
-radv_initialise_vrs_surface(struct radv_image *image, struct radv_buffer *htile_buffer, struct radv_ds_buffer_info *ds)
-{
-   const struct radeon_surf *surf = &image->planes[0].surface;
-
-   assert(image->vk.format == VK_FORMAT_D16_UNORM);
-   memset(ds, 0, sizeof(*ds));
-
-   ds->ac.db_z_info = S_028038_FORMAT(V_028040_Z_16) | S_028038_SW_MODE(surf->u.gfx9.swizzle_mode) |
-                      S_028038_ZRANGE_PRECISION(1) | S_028038_TILE_SURFACE_ENABLE(1);
-   ds->ac.db_stencil_info = S_02803C_FORMAT(V_028044_STENCIL_INVALID);
-
-   ds->ac.db_depth_size = S_02801C_X_MAX(image->vk.extent.width - 1) | S_02801C_Y_MAX(image->vk.extent.height - 1);
-
-   ds->ac.u.gfx6.db_htile_data_base = radv_buffer_get_va(htile_buffer->bo) >> 8;
-   ds->ac.u.gfx6.db_htile_surface =
-      S_028ABC_FULL_CACHE(1) | S_028ABC_PIPE_ALIGNED(1) | S_028ABC_VRS_HTILE_ENCODING(V_028ABC_VRS_HTILE_4BIT_ENCODING);
-}
-
-void
-radv_initialise_ds_surface(const struct radv_device *device, struct radv_ds_buffer_info *ds,
-                           struct radv_image_view *iview, VkImageAspectFlags ds_aspects)
-{
-   const struct radv_physical_device *pdev = radv_device_physical(device);
-   unsigned level = iview->vk.base_mip_level;
-   bool stencil_only = iview->image->vk.format == VK_FORMAT_S8_UINT;
-
-   assert(vk_format_get_plane_count(iview->image->vk.format) == 1);
-
-   memset(ds, 0, sizeof(*ds));
-
-   uint32_t max_slice = radv_surface_max_layer_count(iview) - 1;
-
-   /* Recommended value for better performance with 4x and 8x. */
-   ds->db_render_override2 = S_028010_DECOMPRESS_Z_ON_FLUSH(iview->image->vk.samples >= 4) |
-                             S_028010_CENTROID_COMPUTATION_MODE(pdev->info.gfx_level >= GFX10_3);
-
-   const struct ac_ds_state ds_state = {
-      .surf = &iview->image->planes[0].surface,
-      .va = iview->image->bindings[0].addr,
-      .format = radv_format_to_pipe_format(iview->image->vk.format),
-      .width = iview->image->vk.extent.width,
-      .height = iview->image->vk.extent.height,
-      .level = level,
-      .num_levels = iview->image->vk.mip_levels,
-      .num_samples = iview->image->vk.samples,
-      .first_layer = iview->vk.base_array_layer,
-      .last_layer = max_slice,
-      .stencil_only = stencil_only,
-      .z_read_only = !(ds_aspects & VK_IMAGE_ASPECT_DEPTH_BIT),
-      .stencil_read_only = !(ds_aspects & VK_IMAGE_ASPECT_STENCIL_BIT),
-      .htile_enabled = radv_htile_enabled(iview->image, level),
-      .htile_stencil_disabled = radv_image_tile_stencil_disabled(device, iview->image),
-      .vrs_enabled = radv_image_has_vrs_htile(device, iview->image),
-   };
-
-   ac_init_ds_surface(&pdev->info, &ds_state, &ds->ac);
-
-   const struct ac_mutable_ds_state mutable_ds_state = {
-      .ds = &ds->ac,
-      .format = radv_format_to_pipe_format(iview->image->vk.format),
-      .tc_compat_htile_enabled = radv_tc_compat_htile_enabled(iview->image, level),
-      .zrange_precision = true,
-      .no_d16_compression = true,
-   };
-
-   ac_set_mutable_ds_surface_fields(&pdev->info, &mutable_ds_state, &ds->ac);
-
-   if (pdev->info.gfx_level >= GFX11) {
-      radv_gfx11_set_db_render_control(device, iview->image->vk.samples, &ds->db_render_control);
-   }
 }
 
 void
@@ -1795,13 +1654,11 @@ radv_device_set_pstate(struct radv_device *device, bool enable)
    struct radeon_winsys *ws = device->ws;
    enum radeon_ctx_pstate pstate = enable ? instance->profile_pstate : RADEON_CTX_PSTATE_NONE;
 
-   if (pdev->info.has_stable_pstate) {
-      /* pstate is per-device; setting it for one ctx is sufficient.
-       * We pick the first initialized one below. */
-      for (unsigned i = 0; i < RADV_NUM_HW_CTX; i++)
-         if (device->hw_ctx[i])
-            return ws->ctx_set_pstate(device->hw_ctx[i], pstate) >= 0;
-   }
+   /* pstate is per-device; setting it for one ctx is sufficient. We pick the first initialized one
+    * below. */
+   for (unsigned i = 0; i < RADV_NUM_HW_CTX; i++)
+      if (device->hw_ctx[i])
+         return ws->ctx_set_pstate(device->hw_ctx[i], pstate) >= 0;
 
    return true;
 }

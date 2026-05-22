@@ -249,7 +249,7 @@ impl<'a, N> DepthFirstSearch for ReachesDFS<'a, N> {
 
     fn pre(&mut self, id: usize) -> Self::ChildIter {
         if id == self.stop || self.reaches.contains(id) {
-            return (&[]).iter().cloned();
+            return [].iter().cloned();
         }
 
         self.reaches.insert(id);
@@ -330,6 +330,7 @@ pub struct CFG<N> {
     nodes: Vec<CFGNode<N>>,
 }
 
+#[expect(clippy::len_without_is_empty)]
 impl<N> CFG<N> {
     /// Creates a new CFG from nodes and edges.
     pub fn from_blocks_edges(

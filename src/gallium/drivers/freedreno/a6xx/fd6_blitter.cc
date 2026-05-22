@@ -7,8 +7,6 @@
  *    Rob Clark <robclark@freedesktop.org>
  */
 
-#define FD_BO_NO_HARDPIN 1
-
 #include "util/format_srgb.h"
 #include "util/half_float.h"
 #include "util/u_dump.h"
@@ -91,8 +89,7 @@ fd6_ifmt(enum a6xx_format fmt)
       return R2D_FLOAT16;
 
    default:
-      UNREACHABLE("bad format");
-      return (enum a6xx_2d_ifmt)0;
+      return R2D_NONE;
    }
 }
 
@@ -113,10 +110,8 @@ ok_dims(const struct pipe_resource *r, const struct pipe_box *b, int lvl)
 }
 
 static bool
-ok_format(enum pipe_format pfmt)
+ok_format(const struct fd_dev_info *info, enum pipe_format pfmt, bool check_a2d)
 {
-   enum a6xx_format fmt = fd6_color_format(pfmt, TILE6_LINEAR);
-
    if (util_format_is_compressed(pfmt))
       return true;
 
@@ -133,7 +128,15 @@ ok_format(enum pipe_format pfmt)
       break;
    }
 
+   if (!fd6_color_format_supported(info, pfmt, TILE6_LINEAR))
+      return false;
+
+   enum a6xx_format fmt = fd6_color_format(pfmt, TILE6_LINEAR);
+
    if (fmt == FMT6_NONE)
+      return false;
+
+   if (check_a2d && (fd6_ifmt(fmt) == R2D_NONE))
       return false;
 
    return true;
@@ -175,7 +178,7 @@ dump_blit_info(const struct pipe_blit_info *info)
 }
 
 static bool
-can_do_blit(const struct pipe_blit_info *info)
+can_do_blit(const struct fd_dev_info *dev_info, const struct pipe_blit_info *info)
 {
    /* I think we can do scaling, but not in z dimension since that would
     * require blending..
@@ -183,8 +186,8 @@ can_do_blit(const struct pipe_blit_info *info)
    fail_if(info->dst.box.depth != info->src.box.depth);
 
    /* Fail if unsupported format: */
-   fail_if(!ok_format(info->src.format));
-   fail_if(!ok_format(info->dst.format));
+   fail_if(!ok_format(dev_info, info->src.format, true));
+   fail_if(!ok_format(dev_info, info->dst.format, true));
 
    /* using the 2d path seems to canonicalize NaNs when the source format
     * is a 16-bit floating point format, likely because it implicitly
@@ -250,7 +253,9 @@ static bool
 can_do_clear(const struct pipe_resource *prsc, unsigned level,
              const struct pipe_box *box)
 {
-   return ok_format(prsc->format) &&
+   struct fd_screen *screen = fd_screen(prsc->screen);
+
+   return ok_format(screen->info, prsc->format, true) &&
           ok_dims(prsc, box, level) &&
           (fd_resource_nr_samples(prsc) == 1);
 
@@ -267,32 +272,24 @@ emit_setup(struct fd_context *ctx, fd_cs &cs)
                           FD6_FLUSH_CCU_DEPTH |
                           FD6_INVALIDATE_CCU_DEPTH);
 
+   fd6_set_render_mode<CHIP>(cs, {RM6_BLIT2DSCALE});
+
    /* normal BLIT_OP_SCALE operation needs bypass RB_CCU_CNTL */
-   fd6_emit_ccu_cntl<CHIP>(cs, ctx->screen, false);
+   fd6_emit_gmem_cache_cntl<CHIP>(cs, ctx->screen, false);
 }
 
 template <chip CHIP>
 static void
 emit_blit_fini(struct fd_context *ctx, fd_cs &cs)
 {
-   const struct fd_dev_info *info = ctx->screen->info;
-
    fd6_event_write<CHIP>(ctx, cs, FD_LABEL);
 
-   if (info->a6xx.magic.RB_DBG_ECO_CNTL != info->a6xx.magic.RB_DBG_ECO_CNTL_blit) {
-      fd_pkt7(cs, CP_WAIT_FOR_IDLE, 0);
-      fd_pkt4(cs, 1)
-         .add(A6XX_RB_DBG_ECO_CNTL(.dword = info->a6xx.magic.RB_DBG_ECO_CNTL_blit));
-   }
+   fd6_set_rb_dbg_eco_mode<CHIP>(ctx, cs, true);
 
    fd_pkt7(cs, CP_BLIT, 1)
       .add(CP_BLIT_0(.op = BLIT_OP_SCALE));
 
-   if (info->a6xx.magic.RB_DBG_ECO_CNTL != info->a6xx.magic.RB_DBG_ECO_CNTL_blit) {
-      fd_pkt7(cs, CP_WAIT_FOR_IDLE, 0);
-      fd_pkt4(cs, 1)
-         .add(A6XX_RB_DBG_ECO_CNTL(.dword = info->a6xx.magic.RB_DBG_ECO_CNTL));
-   }
+   fd6_set_rb_dbg_eco_mode<CHIP>(ctx, cs, false);
 }
 
 /* nregs: 5 */
@@ -324,7 +321,6 @@ emit_blit_setup(fd_ncrb<CHIP> &ncrb, enum pipe_format pfmt,
    if (CHIP >= A7XX) {
       ncrb.add(TPL1_A2D_BLT_CNTL(CHIP,
          .raw_copy = false,
-         .start_offset_texels = 0,
          .type = A6XX_TEX_2D,
       ));
    }
@@ -511,6 +507,8 @@ static void
 fd6_clear_ubwc(struct fd_batch *batch, struct fd_resource *rsc) assert_dt
 {
    fd_cs cs(fd_batch_get_prologue(batch));
+
+   fd6_set_render_mode<CHIP>(cs, {RM6_BLIT2DSCALE});
 
    clear_ubwc_setup<CHIP>(cs);
 
@@ -814,7 +812,7 @@ clear_lrz_setup(fd_cs &cs, struct fd_resource *zsbuf, struct fd_bo *lrz, double 
    ncrb.add(GRAS_A2D_DEST_TL(CHIP, .x = 0, .y = 0));
    ncrb.add(GRAS_A2D_DEST_BR(CHIP,
       .x = zsbuf->lrz_layout.lrz_pitch - 1,
-      .y = zsbuf->lrz_layout.lrz_height - 1,
+      .y = zsbuf->lrz_layout.lrz_height * zsbuf->b.b.array_size - 1,
    ));
 
    union pipe_color_union clear_color = { .f = {depth} };
@@ -833,11 +831,9 @@ clear_lrz_setup(fd_cs &cs, struct fd_resource *zsbuf, struct fd_bo *lrz, double 
 
 template <chip CHIP>
 void
-fd6_clear_lrz(struct fd_batch *batch, struct fd_resource *zsbuf,
+fd6_clear_lrz(fd_cs &cs, struct fd_resource *zsbuf,
               struct fd_bo *lrz, double depth)
 {
-   fd_cs cs(fd_batch_get_prologue(batch));
-
    if (DEBUG_BLIT) {
       fprintf(stderr, "lrz clear:\ndst resource: ");
       util_dump_resource(stderr, &zsbuf->b.b);
@@ -1169,7 +1165,6 @@ resolve_tile_setup(struct fd_batch *batch, fd_cs &cs, uint32_t base,
                    struct pipe_surface *psurf, uint32_t unknown_8c01)
 {
    const struct fd_gmem_stateobj *gmem = batch->gmem_state;
-   uint64_t gmem_base = batch->ctx->screen->gmem_base + base;
    uint32_t gmem_pitch = gmem->bin_w * batch->framebuffer.samples *
                          util_format_get_blocksize(psurf->format);
    unsigned width = pipe_surface_width(psurf);
@@ -1212,7 +1207,12 @@ resolve_tile_setup(struct fd_batch *batch, fd_cs &cs, uint32_t base,
       .width = width,
       .height = height,
    ));
-   ncrb.add(TPL1_A2D_SRC_TEXTURE_BASE(CHIP, .qword = gmem_base));
+
+   /* gen8 simply uses gmem offset when GMEM tiling (TILE6_2) is specified: */
+   if (CHIP < A8XX)
+      base += batch->ctx->screen->gmem_base;
+
+   ncrb.add(TPL1_A2D_SRC_TEXTURE_BASE(CHIP, .qword = base));
    ncrb.add(TPL1_A2D_SRC_TEXTURE_PITCH(CHIP, .pitch = gmem_pitch));
 }
 
@@ -1251,7 +1251,7 @@ handle_rgba_blit(struct fd_context *ctx, const struct pipe_blit_info *info)
 
    assert(!(info->mask & PIPE_MASK_ZS));
 
-   if (!can_do_blit(info))
+   if (!can_do_blit(ctx->screen->info, info))
       return false;
 
    struct fd_resource *src = fd_resource(info->src.resource);
@@ -1285,7 +1285,7 @@ handle_rgba_blit(struct fd_context *ctx, const struct pipe_blit_info *info)
 
    DBG_BLIT(info, batch);
 
-   trace_start_blit(&batch->trace, cs.ring(), info->src.resource->target,
+   trace_start_blit(&batch->trace, cs, info->src.resource->target,
                     info->dst.resource->target);
 
    if ((info->src.resource->target == PIPE_BUFFER) &&
@@ -1300,7 +1300,7 @@ handle_rgba_blit(struct fd_context *ctx, const struct pipe_blit_info *info)
       emit_blit_texture<CHIP>(ctx, cs, info);
    }
 
-   trace_end_blit(&batch->trace, cs.ring());
+   trace_end_blit(&batch->trace, cs);
 
    fd6_emit_flushes<CHIP>(batch->ctx, cs,
                           FD6_FLUSH_CCU_COLOR |
@@ -1417,7 +1417,7 @@ handle_zs_blit(struct fd_context *ctx,
       /* non-UBWC Z24_UNORM_S8_UINT_AS_R8G8B8A8 is broken on a630, fall back to
        * 8888_unorm.
        */
-      if (!ctx->screen->info->a6xx.has_z24uint_s8uint) {
+      if (!ctx->screen->info->props.has_z24uint_s8uint) {
          if (!src->layout.ubwc && !dst->layout.ubwc) {
             blit.src.format = PIPE_FORMAT_RGBA8888_UINT;
             blit.dst.format = PIPE_FORMAT_RGBA8888_UINT;
@@ -1546,7 +1546,7 @@ fd6_blitter_init(struct pipe_context *pctx)
 FD_GENX(fd6_blitter_init);
 
 unsigned
-fd6_tile_mode_for_format(enum pipe_format pfmt)
+fd6_tile_mode_for_format(const struct fd_dev_info *info, enum pipe_format pfmt)
 {
    if (!util_is_power_of_two_nonzero(util_format_get_blocksize(pfmt)))
       return TILE6_LINEAR;
@@ -1554,7 +1554,7 @@ fd6_tile_mode_for_format(enum pipe_format pfmt)
    /* basically just has to be a format we can blit, so uploads/downloads
     * via linear staging buffer works:
     */
-   if (ok_format(pfmt))
+   if (ok_format(info, pfmt, false))
       return TILE6_3;
 
    return TILE6_LINEAR;
@@ -1563,12 +1563,6 @@ fd6_tile_mode_for_format(enum pipe_format pfmt)
 unsigned
 fd6_tile_mode(const struct pipe_resource *tmpl)
 {
-   /* if the mipmap level 0 is still too small to be tiled, then don't
-    * bother pretending:
-    */
-   if ((tmpl->width0 < FDL_MIN_UBWC_WIDTH) &&
-         !util_format_is_depth_or_stencil(tmpl->format))
-      return TILE6_LINEAR;
-
-   return fd6_tile_mode_for_format(tmpl->format);
+   struct fd_screen *screen = fd_screen(tmpl->screen);
+   return fd6_tile_mode_for_format(screen->info, tmpl->format);
 }

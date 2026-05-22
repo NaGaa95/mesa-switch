@@ -366,3 +366,36 @@ Starting with Intel 12th generation/Alder Lake-P and Intel Arc Alchemist, the In
 - Manual download: You can download the firmware from the official repository: https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/tree/i915. Place the downloaded files in the /lib/firmware/i915 directory.
 
 Important: For optimal performance, we recommend updating the GuC firmware to version 70.6.3 or later.
+
+Debugging tips
+--------------
+
+When running into rendering/hang issues here are a few things that can
+be experimented with to try to narrow down the issue :
+
+- Run with ``INTEL_DEBUG=stall`` : stall execution, flush and
+  invalidate all caches between draw/dispatch/trace operations,
+  helpful to detect synchronization issues between draw/dispatch/trace
+  operations
+
+- Run with ``INTEL_DEBUG=sync`` : wait for completion of previous
+  command buffers before submitting new ones, helpful to detect
+  synchronization between command buffers
+
+- Run with ``INTEL_DEBUG=noccs`` : disable compression, helpful to
+  detect compressed data handling issues in the driver
+
+- Run with ``ANV_QUEUE_OVERRIDE=c=0,b=0`` : disable the async compute
+  queue and transfer queue, helpful to identify synchronization issues
+  between queues
+
+- Run with ``INTEL_DEBUG=noccs-modifier`` : disable compressed
+  modifiers, helpful to identify compression data handling issues
+  between applications (application and compositor)
+
+- Run with ``INTEL_DEBUG=no-resource-barrier`` : disable use of the
+  new RESOURCE_BARRIER instruction on Xe2+, helpful to identify
+  synchronization issues associated to this instruction
+
+A combinaison of those can also be tried if the issue has multiple
+causes, for example : ``INTEL_DEBUG=stall,sync``

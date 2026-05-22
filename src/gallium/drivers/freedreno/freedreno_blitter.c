@@ -29,6 +29,7 @@ default_dst_texture(struct pipe_surface *dst_templ, struct pipe_resource *dst,
                     unsigned dstlevel, unsigned dstz)
 {
    memset(dst_templ, 0, sizeof(*dst_templ));
+   dst_templ->texture = dst;
    dst_templ->level = dstlevel;
    dst_templ->first_layer = dstz;
    dst_templ->last_layer = dstz;
@@ -203,6 +204,8 @@ build_f16_copy_fs_shader(struct pipe_screen *pscreen, enum pipe_texture_target t
 
    nir_store_var(b, out_color, tex, 0xf);
 
+   pscreen->finalize_nir(pscreen, b->shader, true);
+
    return b->shader;
 }
 
@@ -212,7 +215,7 @@ fd_blitter_blit(struct fd_context *ctx, const struct pipe_blit_info *info)
    struct pipe_resource *dst = info->dst.resource;
    struct pipe_resource *src = info->src.resource;
    struct pipe_context *pipe = &ctx->base;
-   struct pipe_surface *dst_view, dst_templ;
+   struct pipe_surface dst_templ;
    struct pipe_sampler_view src_templ, *src_view;
    void *fs = NULL;
 
@@ -221,7 +224,6 @@ fd_blitter_blit(struct fd_context *ctx, const struct pipe_blit_info *info)
    /* Initialize the surface. */
    default_dst_texture(&dst_templ, dst, info->dst.level, info->dst.box.z);
    dst_templ.format = info->dst.format;
-   dst_view = pipe->create_surface(pipe, dst, &dst_templ);
 
    /* Initialize the sampler view. */
    default_src_texture(&src_templ, src, info->src.level);
@@ -253,12 +255,11 @@ fd_blitter_blit(struct fd_context *ctx, const struct pipe_blit_info *info)
 
    /* Copy. */
    util_blitter_blit_generic(
-      ctx->blitter, dst_view, &info->dst.box, src_view, &info->src.box,
+      ctx->blitter, &dst_templ, &info->dst.box, src_view, &info->src.box,
       src->width0, src->height0, info->mask, info->filter,
       info->scissor_enable ? &info->scissor : NULL, info->alpha_blend, false, 0,
       fs);
 
-   pipe_surface_reference(&dst_view, NULL);
    pipe_sampler_view_reference(&src_view, NULL);
 
    fd_blitter_pipe_end(ctx);
@@ -397,17 +398,14 @@ static void
 fd_blit_stencil_fallback(struct fd_context *ctx, const struct pipe_blit_info *info)
    assert_dt
 {
-   struct pipe_context *pctx = &ctx->base;
-   struct pipe_surface *dst_view, dst_templ;
+   struct pipe_surface dst_templ;
 
    util_blitter_default_dst_texture(&dst_templ, info->dst.resource,
                                     info->dst.level, info->dst.box.z);
 
-   dst_view = pctx->create_surface(pctx, info->dst.resource, &dst_templ);
-
    fd_blitter_prep(ctx, info);
 
-   util_blitter_clear_depth_stencil(ctx->blitter, dst_view, PIPE_CLEAR_STENCIL,
+   util_blitter_clear_depth_stencil(ctx->blitter, &dst_templ, PIPE_CLEAR_STENCIL,
                                     0, 0, info->dst.box.x, info->dst.box.y,
                                     info->dst.box.width, info->dst.box.height);
 
@@ -417,8 +415,6 @@ fd_blit_stencil_fallback(struct fd_context *ctx, const struct pipe_blit_info *in
       ctx->blitter, info->dst.resource, info->dst.level, &info->dst.box,
       info->src.resource, info->src.level, &info->src.box,
       info->scissor_enable ? &info->scissor : NULL);
-
-   pipe_surface_unref(pctx, &dst_view);
 }
 
 /**

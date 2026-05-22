@@ -33,7 +33,7 @@
 #include <fcntl.h>
 #include <stdbool.h>
 #include <stdio.h>
-#include <xf86drm.h>
+#include "util/libdrm.h"
 #include <cutils/properties.h>
 #include <drm-uapi/drm_fourcc.h>
 #include <sync/sync.h>

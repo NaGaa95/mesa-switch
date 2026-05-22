@@ -893,6 +893,9 @@ bool
 wsi_drm_image_needs_buffer_blit(const struct wsi_device *wsi,
                                 const struct wsi_drm_image_params *params)
 {
+   if (WSI_DEBUG & WSI_DEBUG_BUFFER)
+      return true;
+
    if (!params->same_gpu)
       return true;
 

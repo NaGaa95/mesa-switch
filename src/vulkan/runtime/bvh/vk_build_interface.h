@@ -110,4 +110,12 @@ struct ploc_args {
    uint32_t internal_node_offset;
 };
 
+struct hploc_args {
+   REF(vk_ir_header) header;
+   VOID_REF bvh;
+   REF(key_id_pair) ids;
+   VOID_REF ranges;
+   uint32_t internal_node_base;
+};
+
 #endif

@@ -9,7 +9,7 @@
 #include "util/streaming-load-memcpy.h"
 
 #define MIN_SIZE   512
-#define MAX_SIZE   (128 * 1024 * 1024)
+#define MAX_SIZE   (256 * 1024 * 1024)
 #define SIZE_SHIFT 1
 #define WARMUP_RUNS 16
 #define NUM_RUNS   32
@@ -257,7 +257,7 @@ void si_test_dma_perf(struct si_screen *sscreen)
                      si_barrier_after_simple_buffer_op(sctx, 0, dst, src);
                   }
 
-                  sctx->barrier_flags |= SI_BARRIER_INV_L2;
+                  si_set_barrier_flags(sctx, SI_BARRIER_INV_L2);
                }
 
                ctx->end_query(ctx, q);

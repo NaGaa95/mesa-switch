@@ -1,6 +1,37 @@
 # Copyright © 2017 Intel Corporation
 # SPDX-License-Identifier: MIT
 
+blorp_shader_files = files(
+  'blorp_shaders.cl',
+)
+
+blorp_shaders_spv = custom_target(
+  input : blorp_shader_files,
+  output : 'blorp_shaders.spv',
+  command : [
+    prog_mesa_clc, '-o', '@OUTPUT@', '--depfile', '@DEPFILE@',
+    blorp_shader_files, '--',
+    '-I' + join_paths(meson.project_source_root(), 'include'),
+    '-I' + join_paths(meson.project_source_root(), 'src/compiler/libcl'),
+    '-I' + join_paths(meson.project_source_root(), 'src'),
+    '-I' + join_paths(meson.current_source_dir(), '.'),
+    cl_args,
+    ],
+  depends : [gen_cl_xml_pack],
+  depfile : 'blorp_shaders.h.d',
+)
+
+blorp_shaders = custom_target(
+  input : blorp_shaders_spv,
+  output : ['blorp_shaders.cpp', 'blorp_shaders.h'],
+  command : [prog_vtn_bindgen2, blorp_shaders_spv, '@OUTPUT0@', '@OUTPUT1@'],
+)
+
+idep_blorp_shaders = declare_dependency(
+  sources : [blorp_shaders],
+  include_directories : include_directories('.'),
+)
+
 files_libblorp = files(
   'blorp.c',
   'blorp.h',
@@ -26,7 +57,10 @@ libblorp = static_library(
   include_directories : [inc_include, inc_src, inc_intel, inc_intel_compiler],
   c_args : [no_override_init_args],
   gnu_symbol_visibility : 'hidden',
-  dependencies : [idep_nir_headers, idep_genxml, idep_mesautil, idep_intel_dev],
+  dependencies : [
+    idep_nir_headers, idep_genxml, idep_mesautil, idep_intel_dev,
+    idep_blorp_shaders
+  ],
   build_by_default: false,
 )
 
@@ -41,7 +75,10 @@ if with_intel_elk
     include_directories : [inc_include, inc_src, inc_intel],
     c_args : [no_override_init_args],
     gnu_symbol_visibility : 'hidden',
-    dependencies : [idep_nir_headers, idep_genxml, idep_mesautil, idep_intel_dev],
+    dependencies : [
+      idep_nir_headers, idep_genxml, idep_mesautil, idep_intel_dev,
+      idep_blorp_shaders
+    ],
     build_by_default: true, # FIXME XXX
   )
 

@@ -216,6 +216,9 @@ struct radeon_cmdbuf {
    uint16_t max_prev; /* Space in array pointed to by prev. */
    unsigned prev_dw;  /* Total number of dwords in previous chunks. */
 
+   struct radeon_cmdbuf *gang_cs;
+   bool gang;
+
    /* Memory usage of the buffer list. These are always 0 for preamble IBs. */
    uint32_t used_vram_kb;
    uint32_t used_gart_kb;
@@ -398,7 +401,7 @@ struct radeon_winsys {
     * \param md        Metadata
     */
    void (*buffer_set_metadata)(struct radeon_winsys *ws, struct pb_buffer_lean *buf,
-                               struct radeon_bo_metadata *md, struct radeon_surf *surf);
+                               struct radeon_bo_metadata *md, const struct radeon_surf *surf);
 
    /**
     * Get a winsys buffer from a winsys handle. The internal structure
@@ -463,13 +466,6 @@ struct radeon_winsys {
    bool (*buffer_commit)(struct radeon_winsys *ws, struct pb_buffer_lean *buf,
                          uint64_t offset, uint64_t size, bool commit);
 
-   /**
-    * Calc size of the first committed part of the given sparse buffer.
-    * \note Only implemented by the amdgpu winsys.
-    * \return the skipped count if the range_offset fall into a hole.
-    */
-   unsigned (*buffer_find_next_committed_memory)(struct pb_buffer_lean *buf,
-                        uint64_t range_offset, unsigned *range_size);
    /**
     * Return the virtual address of a buffer.
     *
@@ -706,12 +702,14 @@ struct radeon_winsys {
     * Add a fence dependency to the CS, so that the CS will wait for
     * the fence before execution.
     */
-   void (*cs_add_fence_dependency)(struct radeon_cmdbuf *rcs, struct pipe_fence_handle *fence);
+   void (*cs_add_fence_dependency)(struct radeon_cmdbuf *rcs, struct pipe_fence_handle *fence,
+                                   uint64_t timeline_point);
 
    /**
     * Signal a syncobj when the CS finishes execution.
     */
-   void (*cs_add_syncobj_signal)(struct radeon_cmdbuf *rcs, struct pipe_fence_handle *fence);
+   void (*cs_add_syncobj_signal)(struct radeon_cmdbuf *rcs, struct pipe_fence_handle *fence,
+                                 uint64_t timeline_point);
 
    /**
     * Returns the amd_ip_type type of a CS.
@@ -792,16 +790,32 @@ struct radeon_winsys {
    bool (*cs_set_pstate)(struct radeon_cmdbuf *rcs, enum radeon_ctx_pstate state);
 
    /**
-    * Pass the VAs to the buffers where various information is saved by the FW during mcbp.
-    */
-   void (*cs_set_mcbp_reg_shadowing_va)(struct radeon_cmdbuf *rcs, uint64_t regs_va,
-                                                                  uint64_t csa_va);
-   /**
     * Submits the preamble IB, which is the IB that initializes immutable registers and states.
     * This must be the first IB for that queue type, and it affects all current and future contexts.
     * If the IB has been submitted already, the call is ignored.
     */
    bool (*userq_submit_cs_preamble_ib_once)(struct radeon_cmdbuf *rcs, struct ac_pm4_state *pm4);
+
+   /**
+    * Create and add a compute command stream to existing rcs command stream which will
+    * be combined as a gang submission to GPU.
+    */
+   bool (*cs_create_compute_gang)(struct radeon_cmdbuf *rcs);
+
+   /**
+    * In case of gfx11.5, register shadowing enabling and shadow regs addresses has to be done
+    * using CONTEXT_CONTROL and LOAD_* packets. Also these packets have to be sumitted for every
+    * job.
+    */
+   bool (*userq_f32_init_reg_shadowing)(struct radeon_cmdbuf *rcs, struct ac_pm4_state *pm4);
+
+   /**
+    * Gets the shadow regs va address from the given radeon_cmdbuf. The radeon_cmdbuf will be gfx_cs
+    * and it is per context. In case of userqueue, The shadow regs va address is per userqueue. The
+    * gfx_cs will be for tied to a userqueue and the shadow regs va address returned will be for
+    * that userqueue.
+    */
+   uint64_t (*userq_f32_get_shadow_regs_va)(struct radeon_cmdbuf *rcs);
 };
 
 static inline bool radeon_emitted(struct radeon_cmdbuf *rcs, unsigned num_dw)

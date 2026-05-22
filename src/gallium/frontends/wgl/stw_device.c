@@ -113,6 +113,7 @@ static const driOptionDescription gallium_driconf[] = {
 DRI_CONF_SECTION("WGL")
    DRI_CONF_WGL_FRAME_LATENCY(2)
    DRI_CONF_WGL_SWAP_INTERVAL(1)
+   DRI_CONF_WGL_REQUIRE_GDI_COMPAT(false)
 DRI_CONF_SECTION_END
 };
 
@@ -242,6 +243,7 @@ stw_cleanup(void)
       return;
    }
 
+   free(stw_dev->st_options.force_explicit_uniform_loc_zero);
    free(stw_dev->st_options.force_gl_vendor);
    free(stw_dev->st_options.force_gl_renderer);
    free(stw_dev->st_options.mesa_extension_override);

@@ -362,6 +362,7 @@ v3d_init_screen_caps(struct v3d_screen *screen)
         caps->supported_prim_modes_with_restart = screen->prim_types;
 
         caps->texture_buffer_objects = true;
+        caps->buffer_sampler_view_rgba_only = true;
 
         caps->texture_buffer_offset_alignment = V3D_TMU_TEXEL_ALIGN;
 
@@ -391,6 +392,8 @@ v3d_init_screen_caps(struct v3d_screen *screen)
 
         caps->device_reset_status_query = screen->devinfo.has_reset_counter;
         caps->robust_buffer_access_behavior = true;
+
+        caps->sample_shading = true;
 
         /* FIXME: same settings as v3dv, maybe put them in a common place. */
         if (screen->devinfo.ver >= 71) {
@@ -587,12 +590,12 @@ v3d_screen_get_compiler_options(struct pipe_screen *pscreen,
                 .lower_fsqrt = true,
                 .lower_ifind_msb = true,
                 .lower_isign = true,
-                .lower_ldexp = true,
                 .lower_hadd = true,
                 .lower_fisnormal = true,
                 .lower_mul_high = true,
                 .lower_wpos_pntc = true,
                 .lower_to_scalar = true,
+                .lower_interpolate_at = true,
                 .lower_int64_options =
                         nir_lower_bcsel64 |
                         nir_lower_conv64 |
@@ -608,6 +611,8 @@ v3d_screen_get_compiler_options(struct pipe_screen *pscreen,
                 .lower_ufind_msb = true,
                 .has_fsub = true,
                 .has_isub = true,
+                .has_imul24 = true,
+                .has_umul24 = true,
                 .has_uclz = true,
                 .divergence_analysis_options =
                        nir_divergence_multiple_workgroup_per_compute_subgroup,
@@ -617,6 +622,7 @@ v3d_screen_get_compiler_options(struct pipe_screen *pscreen,
                  * limit register pressure impact.
                  */
                 .max_unroll_iterations = 16,
+                .max_samples = 4,
                 .force_indirect_unrolling_sampler = true,
                 .scalarize_ddx = true,
                 .max_varying_expression_cost = 4,

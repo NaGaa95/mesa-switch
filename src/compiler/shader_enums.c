@@ -208,6 +208,34 @@ gl_varying_slot_name_for_stage(gl_varying_slot slot, mesa_shader_stage stage)
       }
       break;
 
+   case MESA_SHADER_VERTEX:
+      switch (slot) {
+      case VARYING_SLOT_GS_HEADER_IR3: return "VARYING_SLOT_GS_HEADER_IR3";
+      default:
+         /* Not an overlapping value. */
+         break;
+      }
+      break;
+
+   case MESA_SHADER_TESS_EVAL:
+      switch (slot) {
+      case VARYING_SLOT_GS_HEADER_IR3: return "VARYING_SLOT_GS_HEADER_IR3";
+      default:
+         /* Not an overlapping value. */
+         break;
+      }
+      break;
+
+   case MESA_SHADER_GEOMETRY:
+      switch (slot) {
+      case VARYING_SLOT_GS_HEADER_IR3: return "VARYING_SLOT_GS_HEADER_IR3";
+      case VARYING_SLOT_GS_VERTEX_FLAGS_IR3: return "VARYING_SLOT_GS_VERTEX_FLAGS_IR3";
+      default:
+         /* Not an overlapping value. */
+         break;
+      }
+      break;
+
    default:
       break;
    }
@@ -366,8 +394,6 @@ gl_system_value_name(gl_system_value sysval)
      ENUM(SYSTEM_VALUE_SAMPLE_MASK_IN),
      ENUM(SYSTEM_VALUE_LAYER_ID),
      ENUM(SYSTEM_VALUE_HELPER_INVOCATION),
-     ENUM(SYSTEM_VALUE_COLOR0),
-     ENUM(SYSTEM_VALUE_COLOR1),
      ENUM(SYSTEM_VALUE_TESS_COORD),
      ENUM(SYSTEM_VALUE_VERTICES_IN),
      ENUM(SYSTEM_VALUE_PRIMITIVE_ID),
@@ -468,6 +494,7 @@ gl_frag_result_name(gl_frag_result result)
       ENUM(FRAG_RESULT_DATA5),
       ENUM(FRAG_RESULT_DATA6),
       ENUM(FRAG_RESULT_DATA7),
+      ENUM(FRAG_RESULT_DUAL_SRC_BLEND),
    };
    STATIC_ASSERT(ARRAY_SIZE(names) == FRAG_RESULT_MAX);
    return NAME(result);
@@ -486,4 +513,20 @@ mesa_scope_name(mesa_scope scope)
       ENUM(SCOPE_DEVICE),
    };
    return NAME(scope);
+}
+
+int
+mesa_frag_result_get_color_index(gl_frag_result result)
+{
+   switch (result) {
+   case FRAG_RESULT_COLOR:
+      return 0;
+   case FRAG_RESULT_DUAL_SRC_BLEND:
+      return 1;
+   default:
+      if (result >= FRAG_RESULT_DATA0 && result <= FRAG_RESULT_DATA7)
+         return result - FRAG_RESULT_DATA0;
+
+      return -1;
+   }
 }

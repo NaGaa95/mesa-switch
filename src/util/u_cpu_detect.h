@@ -104,6 +104,13 @@ struct util_cpu_caps_t {
 
    unsigned has_clflushopt:1;
 
+   unsigned has_rv_fd:1;
+   unsigned has_rv_c:1;
+   unsigned has_rv_v:1;
+   unsigned has_rv_zba:1;
+   unsigned has_rv_zbb:1;
+   unsigned has_rv_zbs:1;
+
    unsigned num_L3_caches;
    unsigned num_cpu_mask_bits;
    unsigned max_vector_bits;

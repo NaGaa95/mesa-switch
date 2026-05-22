@@ -305,6 +305,22 @@ reg_cp(struct ir3_cp_ctx *ctx, struct ir3_instruction *instr,
       struct ir3_register *src_reg = src->srcs[0];
       unsigned new_flags = reg->flags;
 
+      /* Narrowing integer cov instructions from GPR to uGPR do not
+       * behave the way you'd expect on gen8.  Instead of "chopping"
+       * out the high bits, if any high bit is set you get 0x7fff or
+       * 0xffff depending on whether src_type is signed or unsigned.
+       * Float conversions behave as expected.
+       */
+      if (ctx->shader->compiler->info->props.has_salu_int_narrowing_quirk &&
+          (instr->opc == OPC_MOV) &&
+          (instr->cat1.dst_type != instr->cat1.src_type) &&
+          (type_size(instr->cat1.dst_type) <
+           type_size(instr->cat1.src_type)) &&
+          !type_float(instr->cat1.dst_type) &&
+          (instr->dsts[0]->flags & IR3_REG_SHARED) &&
+          !(src->srcs[0]->flags & (IR3_REG_SHARED | IR3_REG_CONST | IR3_REG_SHARED)))
+         return false;
+
       combine_flags(&new_flags, src);
 
       if (ir3_valid_flags(instr, n, new_flags)) {

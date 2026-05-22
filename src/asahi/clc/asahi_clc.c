@@ -53,7 +53,7 @@ optimize(nir_shader *nir)
       NIR_PASS(progress, nir, nir_lower_var_copies);
       NIR_PASS(progress, nir, nir_lower_vars_to_ssa);
 
-      NIR_PASS(progress, nir, nir_copy_prop);
+      NIR_PASS(progress, nir, nir_opt_copy_prop);
       NIR_PASS(progress, nir, nir_opt_remove_phis);
       NIR_PASS(progress, nir, nir_lower_all_phis_to_scalar);
       NIR_PASS(progress, nir, nir_opt_dce);
@@ -114,7 +114,7 @@ compile(void *memctx, const uint32_t *spirv, size_t spirv_size)
    NIR_PASS(_, nir, nir_lower_returns);
    NIR_PASS(_, nir, nir_inline_functions);
    nir_remove_non_exported(nir);
-   NIR_PASS(_, nir, nir_copy_prop);
+   NIR_PASS(_, nir, nir_opt_copy_prop);
    NIR_PASS(_, nir, nir_opt_deref);
 
    /* We can't deal with constant data, get rid of it */
@@ -313,13 +313,6 @@ main(int argc, char **argv)
 
          NIR_PASS(_, s, nir_lower_explicit_io, nir_var_mem_shared,
                   nir_address_format_62bit_generic);
-
-         /* Unroll loops before lowering indirects */
-         bool progress = false;
-         do {
-            progress = false;
-            NIR_PASS(progress, s, nir_opt_loop);
-         } while (progress);
 
          agx_preprocess_nir(s);
 

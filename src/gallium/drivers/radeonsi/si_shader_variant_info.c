@@ -6,6 +6,78 @@
 #include "nir.h"
 #include "nir_range_analysis.h"
 #include "sid.h"
+#include "si_pipe.h"
+
+/* The spi_shader_*_format fields depend on the framebuffer state and the
+ * NIR shader (monolithic or main part).
+ */
+void si_shader_update_spi_shader_formats(struct si_shader *shader, nir_shader *nir)
+{
+   unsigned spi_shader_col_format = shader->key.ps.part.epilog.spi_shader_col_format;
+   unsigned value = 0, num_mrts = 0;
+   unsigned i, num_targets = (util_last_bit(spi_shader_col_format) + 3) / 4;
+   uint64_t colors_written = UINT64_MAX;
+
+   shader->info.spi_shader_z_format = ac_get_spi_shader_z_format(shader->info.writes_z, shader->info.writes_stencil,
+                                                                 shader->info.writes_sample_mask,
+                                                                 shader->key.ps.part.epilog.alpha_to_coverage_via_mrtz);
+
+   if (nir) {
+      colors_written = (nir->info.outputs_written >> FRAG_RESULT_DATA0) & BITFIELD_MASK(8);
+      if (nir->info.outputs_written & BITFIELD_BIT(FRAG_RESULT_DUAL_SRC_BLEND))
+         colors_written |= 0x2;
+      if (nir->info.outputs_written & BITFIELD64_BIT(FRAG_RESULT_COLOR)) {
+         if (colors_written == 0)
+            colors_written = UINT64_MAX; /* color0_writes_all_cbufs */
+         else
+            colors_written |= 0x1;
+      }
+   }
+
+   /* Remove holes in spi_shader_col_format. */
+   for (i = 0; i < num_targets; i++) {
+      unsigned spi_format = (spi_shader_col_format >> (i * 4)) & 0xf;
+
+      if (spi_format && (colors_written & 1u << i)) {
+         value |= spi_format << (num_mrts * 4);
+         num_mrts++;
+      }
+   }
+
+   /* Ensure that some export memory is always allocated, for two reasons:
+    *
+    * 1) Correctness: The hardware ignores the EXEC mask if no export
+    *    memory is allocated, so KILL and alpha test do not work correctly
+    *    without this.
+    * 2) Performance: Every shader needs at least a NULL export, even when
+    *    it writes no color/depth output. The NULL export instruction
+    *    stalls without this setting.
+    *
+    * Don't add this to CB_SHADER_MASK.
+    *
+    * GFX10 supports pixel shaders without exports by setting both
+    * the color and Z formats to SPI_SHADER_ZERO. The hw will skip export
+    * instructions if any are present.
+    *
+    * RB+ depth-only rendering requires SPI_SHADER_32_R.
+    */
+   if (!value) {
+      bool has_mrtz = shader->info.spi_shader_z_format != V_028710_SPI_SHADER_ZERO;
+
+      if (shader->key.ps.part.epilog.rbplus_depth_only_opt) {
+         value = V_028714_SPI_SHADER_32_R;
+      } else if (!has_mrtz) {
+         if (shader->selector->screen->info.gfx_level >= GFX10) {
+            if (shader->info.uses_discard)
+               value = V_028714_SPI_SHADER_32_R;
+         } else {
+            value = V_028714_SPI_SHADER_32_R;
+         }
+      }
+   }
+
+   shader->info.spi_shader_col_format = value;
+}
 
 void si_get_shader_variant_info(struct si_shader *shader,
                                 struct si_temp_shader_variant_info *temp_info, nir_shader *nir)
@@ -25,23 +97,68 @@ void si_get_shader_variant_info(struct si_shader *shader,
        */
       for (unsigned i = 0; i < ARRAY_SIZE(shader->info.ps_inputs); i++)
          shader->info.ps_inputs[i].interpolate = INTERP_MODE_FLAT;
+
+      shader->info.num_ps_per_primitive_inputs =
+         util_bitcount64(nir->info.per_primitive_inputs);
+
+      /* gl_Layer is always from shader arg, not varying */
+      uint64_t maybe_per_prim_inputs =
+         nir->info.inputs_read & ~nir->info.per_primitive_inputs &
+         (VARYING_BIT_PRIMITIVE_ID | VARYING_BIT_VIEWPORT);
+      shader->info.num_ps_maybe_per_primitive_inputs =
+         util_bitcount64(maybe_per_prim_inputs);
    }
 
    nir_foreach_block(block, nir_shader_get_entrypoint(nir)) {
       nir_foreach_instr(instr, block) {
+         unsigned mask;
+
          switch (instr->type) {
          case nir_instr_type_intrinsic: {
             nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
 
             switch (intr->intrinsic) {
+            case nir_intrinsic_load_local_invocation_id:
+               mask = nir_def_components_read(&intr->def);
+               if (mask & BITFIELD_BIT(0))
+                  shader->info.uses_sysval_local_invocation_id_x = true;
+               if (mask & BITFIELD_BIT(1))
+                  shader->info.uses_sysval_local_invocation_id_y = true;
+               if (mask & BITFIELD_BIT(2))
+                  shader->info.uses_sysval_local_invocation_id_z = true;
+               break;
+            case nir_intrinsic_load_workgroup_id:
+               mask = nir_def_components_read(&intr->def);
+               if (mask & BITFIELD_BIT(0))
+                  shader->info.uses_sysval_workgroup_id_x = true;
+               if (mask & BITFIELD_BIT(1))
+                  shader->info.uses_sysval_workgroup_id_y = true;
+               if (mask & BITFIELD_BIT(2))
+                  shader->info.uses_sysval_workgroup_id_z = true;
+               break;
+            case nir_intrinsic_load_workgroup_size:
+               shader->info.uses_sysval_workgroup_size = true;
+               break;
+            case nir_intrinsic_load_num_workgroups:
+               shader->info.uses_sysval_num_workgroups = true;
+               break;
+            case nir_intrinsic_load_num_subgroups:
+               shader->info.uses_sgpr_tg_size = true;
+               break;
+            case nir_intrinsic_load_local_invocation_index:
+            case nir_intrinsic_load_subgroup_id:
+               /* GFX12 computes these using subgroup_id from ttmp8. */
+               if (shader->selector->screen->info.gfx_level < GFX12)
+                  shader->info.uses_sgpr_tg_size = true;
+               break;
             case nir_intrinsic_load_instance_id:
-               shader->info.uses_instance_id = true;
+               shader->info.uses_sysval_instance_id = true;
                break;
             case nir_intrinsic_load_base_instance:
-               shader->info.uses_base_instance = true;
+               shader->info.uses_sysval_base_instance = true;
                break;
             case nir_intrinsic_load_draw_id:
-               shader->info.uses_draw_id = true;
+               shader->info.uses_sysval_draw_id = true;
                break;
             case nir_intrinsic_load_frag_coord:
             case nir_intrinsic_load_sample_pos:
@@ -50,6 +167,7 @@ void si_get_shader_variant_info(struct si_shader *shader,
             case nir_intrinsic_load_input:
             case nir_intrinsic_load_input_vertex:
             case nir_intrinsic_load_per_vertex_input:
+            case nir_intrinsic_load_per_primitive_input:
             case nir_intrinsic_load_interpolated_input: {
                if (nir->info.stage == MESA_SHADER_VERTEX) {
                   shader->info.uses_vmem_load_other = true;
@@ -59,8 +177,8 @@ void si_get_shader_variant_info(struct si_shader *shader,
                        shader->key.ge.mono.instance_divisor_is_fetched) &
                       BITFIELD_BIT(nir_intrinsic_base(intr))) {
                      /* Instanced attribs. */
-                     shader->info.uses_instance_id = true;
-                     shader->info.uses_base_instance = true;
+                     shader->info.uses_sysval_instance_id = true;
+                     shader->info.uses_sysval_base_instance = true;
                   }
                } else if (nir->info.stage == MESA_SHADER_TESS_EVAL) {
                   shader->info.uses_vmem_load_other = true;
@@ -78,15 +196,18 @@ void si_get_shader_variant_info(struct si_shader *shader,
                      shader->info.ps_inputs[index].interpolate = INTERP_MODE_SMOOTH;
                      if (intr->def.bit_size == 16)
                         shader->info.ps_inputs[index].fp16_lo_hi_valid |= 0x1 << sem.high_16bits;
+                  } else if (intr->intrinsic == nir_intrinsic_load_per_primitive_input) {
+                     /* per primitive input from mesh shader */
+                     shader->info.ps_inputs[index].interpolate = INTERP_MODE_NONE;
                   }
                }
                break;
             }
-            case nir_intrinsic_load_color0:
+            case nir_intrinsic_load_color0_amd:
                assert(!shader->is_monolithic);
                shader->info.ps_colors_read |= nir_def_components_read(&intr->def);
                break;
-            case nir_intrinsic_load_color1:
+            case nir_intrinsic_load_color1_amd:
                assert(!shader->is_monolithic);
                shader->info.ps_colors_read |= nir_def_components_read(&intr->def) << 4;
                break;
@@ -128,6 +249,7 @@ void si_get_shader_variant_info(struct si_shader *shader,
                   shader->info.uses_vmem_load_other = true;
                break;
             case nir_intrinsic_store_output:
+            case nir_intrinsic_store_per_vertex_output:
                if (nir->info.stage == MESA_SHADER_FRAGMENT) {
                   nir_io_semantics sem = nir_intrinsic_io_semantics(intr);
 
@@ -137,8 +259,9 @@ void si_get_shader_variant_info(struct si_shader *shader,
                      shader->info.writes_stencil = true;
                   else if (sem.location == FRAG_RESULT_SAMPLE_MASK)
                      shader->info.writes_sample_mask = true;
-               } else if (nir->info.stage <= MESA_SHADER_GEOMETRY &&
-                          !shader->key.ge.as_ls && !shader->key.ge.as_es) {
+               } else if ((nir->info.stage <= MESA_SHADER_GEOMETRY &&
+                           !shader->key.ge.as_ls && !shader->key.ge.as_es) ||
+                          nir->info.stage == MESA_SHADER_MESH) {
                   nir_io_semantics sem = nir_intrinsic_io_semantics(intr);
 
                   /* Clip/cull distances must be gathered manually because nir_opt_clip_cull_const
@@ -221,8 +344,7 @@ void si_get_shader_variant_info(struct si_shader *shader,
                   shader->info.ps_inputs[index].semantic =
                      (back ? VARYING_SLOT_BFC0 : VARYING_SLOT_COL0) + i;
 
-                  enum glsl_interp_mode mode = i ? nir->info.fs.color1_interp
-                                                 : nir->info.fs.color0_interp;
+                  enum glsl_interp_mode mode = shader->selector->info.color_interpolate[i];
                   shader->info.ps_inputs[index].interpolate =
                      mode == INTERP_MODE_NONE ? INTERP_MODE_COLOR : mode;
                   index++;
@@ -236,6 +358,8 @@ void si_get_shader_variant_info(struct si_shader *shader,
             }
          }
       }
+
+      si_shader_update_spi_shader_formats(shader, nir);
 
       /* ACO needs spi_ps_input_ena before si_init_shader_args. */
       shader->config.spi_ps_input_ena =
@@ -270,22 +394,87 @@ void si_get_shader_variant_info(struct si_shader *shader,
       }
    }
 
-   if (nir->info.stage <= MESA_SHADER_GEOMETRY) {
-      if (!shader->key.ge.as_ls && !shader->key.ge.as_es) {
-         if (nir->xfb_info) {
-            unsigned num_streamout_dwords = 0;
+   if ((nir->info.stage <= MESA_SHADER_GEOMETRY &&
+        !shader->key.ge.as_ls && !shader->key.ge.as_es) ||
+       nir->info.stage == MESA_SHADER_MESH) {
+      if (nir->xfb_info) {
+         unsigned num_streamout_dwords = 0;
 
-            for (unsigned i = 0; i < 4; i++)
-               num_streamout_dwords += nir->info.xfb_stride[i];
-            shader->info.num_streamout_vec4s = DIV_ROUND_UP(num_streamout_dwords, 4);
+         for (unsigned i = 0; i < 4; i++)
+            num_streamout_dwords += nir->info.xfb_stride[i];
+         shader->info.num_streamout_vec4s = DIV_ROUND_UP(num_streamout_dwords, 4);
+      }
+
+      if (shader->key.ge.mono.write_pos_to_clipvertex ||
+          nir->info.outputs_written & VARYING_BIT_CLIP_VERTEX)
+         shader->info.clipdist_mask = SI_USER_CLIP_PLANE_MASK;
+
+      shader->info.clipdist_mask &= ~shader->key.ge.opt.kill_clip_distances;
+   }
+
+   if (nir->info.stage == MESA_SHADER_COMPUTE ||
+       nir->info.stage == MESA_SHADER_KERNEL ||
+       nir->info.stage == MESA_SHADER_TASK) {
+      /* nir_clear_shared_memory uses local_invocation_index. */
+      if (shader->selector->screen->info.gfx_level < GFX12 &&
+          si_should_clear_lds(shader->selector->screen, nir))
+         shader->info.uses_sgpr_tg_size = true;
+
+      /* Determine user SGPRs for compute shader. This includes descriptors in user SGPRs.
+       *
+       * Variable block sizes need 10 bits (1 + log2(SI_MAX_VARIABLE_THREADS_PER_BLOCK)) per dim.
+       * We pack them into a single user SGPR.
+       */
+      unsigned num_user_sgprs = SI_NUM_RESOURCE_SGPRS + (shader->info.uses_sysval_num_workgroups ? 3 : 0) +
+                            (shader->info.uses_sysval_workgroup_size ? 1 : 0) +
+                            shader->selector->nir->info.cs.user_data_components_amd;
+
+      if (nir->info.stage == MESA_SHADER_TASK) {
+         /* task ring entry and draw id
+          * note uses_draw_id is only available after shader variant creation
+          */
+         num_user_sgprs += shader->info.uses_sysval_draw_id ? 3 : 2;
+      } else {
+         /* Compute shaders */
+         /* Fast path for compute shaders - some descriptors passed via user SGPRs. */
+         /* Shader buffers in user SGPRs. */
+         for (unsigned i = 0; i < MIN2(3, nir->info.num_ssbos) && num_user_sgprs <= 12; i++) {
+            num_user_sgprs = align(num_user_sgprs, 4);
+            if (i == 0)
+               shader->info.cs_shaderbufs_sgpr_index = num_user_sgprs;
+            num_user_sgprs += 4;
+            shader->info.cs_num_shaderbufs_in_user_sgprs++;
          }
 
-         if (shader->key.ge.mono.write_pos_to_clipvertex ||
-             nir->info.outputs_written & VARYING_BIT_CLIP_VERTEX)
-            shader->info.clipdist_mask = SI_USER_CLIP_PLANE_MASK;
+         /* Images in user SGPRs. */
+         unsigned non_fmask_images = BITFIELD_MASK(nir->info.num_images);
 
-         shader->info.clipdist_mask &= ~shader->key.ge.opt.kill_clip_distances;
+         /* Remove images with FMASK from the bitmask.  We only care about the first
+          * 3 anyway, so we can take msaa_images[0] and ignore the rest.
+          */
+         if (shader->selector->screen->info.compiler_info.has_fmask)
+            non_fmask_images &= ~nir->info.msaa_images[0];
+
+         for (unsigned i = 0; i < 3 && non_fmask_images & (1 << i); i++) {
+            unsigned num_sgprs = BITSET_TEST(nir->info.image_buffers, i) ? 4 : 8;
+
+            if (align(num_user_sgprs, num_sgprs) + num_sgprs > 16)
+               break;
+
+            num_user_sgprs = align(num_user_sgprs, num_sgprs);
+            if (i == 0)
+               shader->info.cs_images_sgpr_index = num_user_sgprs;
+            num_user_sgprs += num_sgprs;
+            shader->info.cs_num_images_in_user_sgprs++;
+         }
+
+         shader->info.cs_images_num_sgprs = num_user_sgprs - shader->info.cs_images_sgpr_index;
+         /* Only the first few bits matter. */
+         shader->info.cs_image_buffer_mask = nir->info.image_buffers[0];
       }
+
+      assert(num_user_sgprs <= 16);
+      shader->info.cs_num_user_sgprs = num_user_sgprs;
    }
 }
 
@@ -293,6 +482,9 @@ void si_get_shader_variant_info(struct si_shader *shader,
 void si_get_late_shader_variant_info(struct si_shader *shader, struct si_shader_args *args,
                                      nir_shader *nir)
 {
+   /* mesh shader know this after ac_nir_lower_ngg_mesh() */
+   shader->info.shared_size = nir->info.shared_size;
+
    nir_foreach_block(block, nir_shader_get_entrypoint(nir)) {
       nir_foreach_instr(instr, block) {
          if (instr->type != nir_instr_type_intrinsic)
@@ -323,7 +515,7 @@ void si_get_late_shader_variant_info(struct si_shader *shader, struct si_shader_
             }
             break;
          case nir_intrinsic_export_amd: {
-            unsigned target = nir_intrinsic_base(intr);
+            unsigned target = nir_intrinsic_target(intr);
             if (target >= V_008DFC_SQ_EXP_POS && target <= V_008DFC_SQ_EXP_POS + 4) {
                shader->info.nr_pos_exports = MAX2(shader->info.nr_pos_exports,
                                                   target - V_008DFC_SQ_EXP_POS + 1);
@@ -404,7 +596,20 @@ void si_fixup_spi_ps_input_config(struct si_shader *shader)
       shader->config.spi_ps_input_ena |= S_0286CC_PERSP_SAMPLE_ENA(1);
    }
 
-   /* At least one pair of interpolation weights must be enabled. */
-   if (!(shader->config.spi_ps_input_ena & 0x7f))
-      shader->config.spi_ps_input_ena |= S_0286CC_PERSP_SAMPLE_ENA(1);
+   /* At least one pair of barycentric coordinates or LINE_STIPPLE_TEX_ENA must be enabled.
+    * Since LINE_STIPPLE_TEX_ENA is the only one that loads only 1 VGPR, use it.
+    *
+    * We can't set LINE_STIPPLE_TEX_ENA on GFX12 because it reduces primitive throughput to only
+    * 1 SE. Other gens are fine (tested on Navi10, Navi21, Navi31).
+    * TODO: Test Strix Halo.
+    */
+   if (!(shader->config.spi_ps_input_ena & 0x7f) &&
+       !G_0286CC_LINE_STIPPLE_TEX_ENA(shader->config.spi_ps_input_ena)) {
+      /* LLVM sets PERSP_SAMPLE_ENA in this case, so we have to do the same. */
+      if (shader->selector->info.base.use_aco_amd &&
+          shader->selector->screen->info.gfx_level != GFX12)
+         shader->config.spi_ps_input_ena |= S_0286CC_LINE_STIPPLE_TEX_ENA(1);
+      else
+         shader->config.spi_ps_input_ena |= S_0286CC_PERSP_SAMPLE_ENA(1);
+   }
 }

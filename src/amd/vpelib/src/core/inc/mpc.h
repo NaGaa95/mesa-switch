@@ -91,6 +91,8 @@ struct mpcc_blnd_cfg {
     int top_gain;
     int bottom_inside_gain;
     int bottom_outside_gain;
+
+    enum mpcc_blend_mode blend_mode;
 };
 
 enum mpc_output_csc_mode {
@@ -109,8 +111,7 @@ struct mpc_denorm_clamp {
 
 struct mpc_funcs {
     void (*program_mpcc_mux)(struct mpc *mpc, enum mpc_mpccid mpcc_idx, enum mpc_mux_topsel topsel,
-        enum mpc_mux_botsel botsel, enum mpc_mux_outmux outmux, enum mpc_mux_oppid oppid,
-        enum mpcc_blend_mode blend_mode);
+        enum mpc_mux_botsel botsel, enum mpc_mux_outmux outmux, enum mpc_mux_oppid oppid);
 
     void (*program_mpcc_blending)(
         struct mpc *mpc, enum mpc_mpccid mpcc_idx, struct mpcc_blnd_cfg *blnd_cfg);

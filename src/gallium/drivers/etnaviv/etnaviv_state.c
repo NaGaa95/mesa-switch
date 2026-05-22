@@ -1139,9 +1139,6 @@ static const struct etna_state_updater etna_state_updates[] = {
       etna_update_blend, ETNA_DIRTY_BLEND | ETNA_DIRTY_FRAMEBUFFER
    },
    {
-      etna_update_blend_color, ETNA_DIRTY_BLEND_COLOR | ETNA_DIRTY_FRAMEBUFFER,
-   },
-   {
       etna_update_ts_config, ETNA_DIRTY_DERIVE_TS,
    },
    {

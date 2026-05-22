@@ -21,39 +21,6 @@ type_size_vec4(const struct glsl_type *type, bool bindless)
    return glsl_count_attribute_slots(type, false);
 }
 
-void
-radv_nir_lower_io_vars_to_scalar(nir_shader *nir, nir_variable_mode mask)
-{
-   bool progress = false;
-
-   NIR_PASS(progress, nir, nir_lower_io_vars_to_scalar, mask);
-   if (progress) {
-      /* Optimize the new vector code and then remove dead vars */
-      NIR_PASS(_, nir, nir_copy_prop);
-      NIR_PASS(_, nir, nir_opt_shrink_vectors, true);
-
-      if (mask & nir_var_shader_out) {
-         /* Optimize swizzled movs of load_const for nir_link_opt_varyings's constant propagation. */
-         NIR_PASS(_, nir, nir_opt_constant_folding);
-
-         /* For nir_link_opt_varyings's duplicate input opt */
-         NIR_PASS(_, nir, nir_opt_cse);
-      }
-
-      /* Run copy-propagation to help remove dead output variables (some shaders have useless copies
-       * to/from an output), so compaction later will be more effective.
-       *
-       * This will have been done earlier but it might not have worked because the outputs were
-       * vector.
-       */
-      if (nir->info.stage == MESA_SHADER_TESS_CTRL)
-         NIR_PASS(_, nir, nir_opt_copy_prop_vars);
-
-      NIR_PASS(_, nir, nir_opt_dce);
-      NIR_PASS(_, nir, nir_remove_dead_variables, nir_var_function_temp | nir_var_shader_in | nir_var_shader_out, NULL);
-   }
-}
-
 typedef struct {
    uint64_t always_per_vertex;
    uint64_t potentially_per_primitive;
@@ -149,18 +116,11 @@ radv_nir_lower_io(struct radv_device *device, nir_shader *nir)
       NIR_PASS(_, nir, nir_lower_tess_level_array_vars_to_vec);
    }
 
-   if (nir->info.stage == MESA_SHADER_VERTEX) {
-      NIR_PASS(_, nir, nir_lower_io, nir_var_shader_in, type_size_vec4, 0);
-      NIR_PASS(_, nir, nir_lower_io, nir_var_shader_out, type_size_vec4, nir_lower_io_lower_64bit_to_32);
-   } else {
-      NIR_PASS(_, nir, nir_lower_io, nir_var_shader_in | nir_var_shader_out, type_size_vec4,
-               nir_lower_io_lower_64bit_to_32 | nir_lower_io_use_interpolated_input_intrinsics);
-   }
+   NIR_PASS(_, nir, nir_lower_io, nir_var_shader_in | nir_var_shader_out, type_size_vec4,
+            nir_lower_io_lower_64bit_to_32 | nir_lower_io_use_interpolated_input_intrinsics);
 
-   /* This pass needs actual constants */
+   /* Fold constant offset srcs for IO. */
    NIR_PASS(_, nir, nir_opt_constant_folding);
-
-   NIR_PASS(_, nir, nir_io_add_const_offset_to_base, nir_var_shader_in | nir_var_shader_out);
 
    if (nir->xfb_info) {
       NIR_PASS(_, nir, nir_io_add_intrinsic_xfb_info);
@@ -169,18 +129,13 @@ radv_nir_lower_io(struct radv_device *device, nir_shader *nir)
          /* The total number of shader outputs is required for computing the pervertex LDS size for
           * VS/TES when lowering NGG streamout.
           */
-         nir_assign_io_var_locations(nir, nir_var_shader_out, &nir->num_outputs, nir->info.stage);
+         nir_assign_io_var_locations(nir, nir_var_shader_out);
       }
    }
 
    if (nir->info.stage == MESA_SHADER_FRAGMENT) {
       /* Lower explicit input load intrinsics to sysvals for the layer ID. */
       NIR_PASS(_, nir, nir_lower_system_values);
-
-      /* Recompute FS input intrinsic bases to assign a location to each FS input.
-       * The computed base will match the index of each input in SPI_PS_INPUT_CNTL_n.
-       */
-      radv_recompute_fs_input_bases(nir);
    }
 
    NIR_PASS(_, nir, nir_opt_dce);
@@ -264,11 +219,10 @@ radv_nir_lower_io_to_mem(struct radv_device *device, struct radv_shader_stage *s
       NIR_PASS(_, nir, ac_nir_lower_gs_inputs_to_mem, map_input, pdev->info.gfx_level, false);
       return true;
    } else if (nir->info.stage == MESA_SHADER_TASK) {
-      ac_nir_lower_task_outputs_to_mem(nir, pdev->task_info.payload_entry_size, pdev->task_info.num_entries,
-                                       info->cs.has_query);
+      ac_nir_lower_task_outputs_to_mem(nir, info->cs.has_query);
       return true;
    } else if (nir->info.stage == MESA_SHADER_MESH) {
-      ac_nir_lower_mesh_inputs_to_mem(nir, pdev->task_info.payload_entry_size, pdev->task_info.num_entries);
+      ac_nir_lower_mesh_inputs_to_mem(nir);
       return true;
    }
 

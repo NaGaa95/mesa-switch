@@ -41,8 +41,9 @@ def print_once(*args, **kwargs):
     print(*args, **kwargs)
 
 
-def pretty_duration(seconds):
+def pretty_duration(seconds: int | float) -> str:
     """Pretty print duration"""
+    seconds = int(seconds)
     hours, rem = divmod(seconds, 3600)
     minutes, seconds = divmod(rem, 60)
     if hours:
@@ -177,3 +178,7 @@ def wait_for_pipeline(projects, sha: str, timeout=None):
             print(" not found", flush=True)
             return (None, None)
         time.sleep(1)
+
+@cache
+def is_gitlab_job() -> bool:
+    return os.getenv("CI_JOB_ID") is not None

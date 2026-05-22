@@ -6,6 +6,8 @@ _libmda = static_library(
   [
     'debug_archiver.h',
     'debug_archiver.c',
+    'mda_private.h',
+    'mda_match.c',
     'slice.h',
     'slice.c',
     'tar.h',
@@ -30,6 +32,7 @@ if with_tests
       [
         'tar_test.cpp',
         'slice_test.cpp',
+        'mda_test.cpp',
       ],
       dependencies: [
         idep_gtest,

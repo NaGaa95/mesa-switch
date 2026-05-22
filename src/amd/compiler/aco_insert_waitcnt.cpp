@@ -349,9 +349,9 @@ get_vmem_mask(wait_ctx& ctx, Instruction* instr)
 }
 
 wait_imm
-get_imm(wait_ctx& ctx, PhysReg reg, wait_entry& entry)
+get_imm(wait_ctx& ctx, bool linear_rc, wait_entry& entry)
 {
-   if (reg.reg() >= 256) {
+   if (!linear_rc) {
       uint32_t events = entry.logical_events;
 
       /* ALU can't safely write to unwritten destination VGPR lanes with DS/VMEM on GFX11+ without
@@ -387,8 +387,9 @@ check_instr(wait_ctx& ctx, wait_imm& wait, Instruction* instr)
       /* check consecutively read gprs */
       for (unsigned j = 0; j < op.size(); j++) {
          std::map<PhysReg, wait_entry>::iterator it = ctx.gpr_map.find(PhysReg{op.physReg() + j});
-         if (it != ctx.gpr_map.end() && it->second.wait_on_read)
-            wait.combine(get_imm(ctx, PhysReg{op.physReg() + j}, it->second));
+         if (it != ctx.gpr_map.end() && it->second.wait_on_read) {
+            wait.combine(get_imm(ctx, op.regClass().is_linear(), it->second));
+         }
       }
    }
 
@@ -401,14 +402,14 @@ check_instr(wait_ctx& ctx, wait_imm& wait, Instruction* instr)
          if (it == ctx.gpr_map.end())
             continue;
 
-         wait_imm reg_imm = get_imm(ctx, reg, it->second);
+         wait_imm reg_imm = get_imm(ctx, def.regClass().is_linear(), it->second);
 
          /* Vector Memory reads and writes decrease the counter in the order they were issued.
           * Before GFX12, they also write VGPRs in order if they're of the same type.
           * We can do this for GFX12 and different types for GFX11 if we know that the two
           * VMEM loads do not write the same register half or the same lanes.
           */
-         uint8_t vmem_type = get_vmem_type(ctx.gfx_level, ctx.program->family, instr);
+         uint8_t vmem_type = get_vmem_type(instr, ctx.program->dev.has_point_sample_accel);
          if (vmem_type) {
             wait_event event = get_vmem_event(ctx, instr, vmem_type);
             wait_type type = (wait_type)(ffs(ctx.info->get_counters_for_event(event)) - 1);
@@ -567,12 +568,16 @@ void
 kill(wait_imm& imm, depctr_wait& depctr, Instruction* instr, wait_ctx& ctx,
      memory_sync_info sync_info)
 {
-   if (instr->opcode == aco_opcode::s_setpc_b64 || (debug_flags & DEBUG_FORCE_WAITCNT)) {
+   if (debug_flags & DEBUG_FORCE_WAITCNT) {
       /* Force emitting waitcnt states right after the instruction if there is
        * something to wait for. This is also applied for s_setpc_b64 to ensure
        * waitcnt states are inserted before jumping to the PS epilog.
        */
       force_waitcnt(ctx, imm);
+   }
+   if (instr->opcode == aco_opcode::s_setpc_b64 || instr->opcode == aco_opcode::s_swappc_b64) {
+      for (std::pair<const PhysReg, wait_entry>& e : ctx.gpr_map)
+         imm.combine(e.second.imm);
    }
 
    check_instr(ctx, imm, instr);
@@ -834,7 +839,7 @@ gen(Instruction* instr, wait_ctx& ctx)
    case Format::MIMG:
    case Format::GLOBAL:
    case Format::SCRATCH: {
-      uint8_t type = get_vmem_type(ctx.gfx_level, ctx.program->family, instr);
+      uint8_t type = get_vmem_type(instr, ctx.program->dev.has_point_sample_accel);
       wait_event ev = get_vmem_event(ctx, instr, type);
       uint32_t mask = ev == event_vmem ? get_vmem_mask(ctx, instr) : 0;
 
@@ -1028,8 +1033,10 @@ handle_block(Program* program, Block& block, wait_ctx& ctx)
    /* For last block of a program which has succeed shader part, wait all memory ops done
     * before go to next shader part.
     */
-   if (block.kind & block_kind_end_with_regs)
-      force_waitcnt(ctx, queued_imm);
+   if (block.kind & block_kind_end_with_regs) {
+      for (std::pair<const PhysReg, wait_entry>& e : ctx.gpr_map)
+         queued_imm.combine(e.second.imm);
+   }
 
    if (!queued_imm.empty())
       emit_waitcnt(ctx, new_instructions, queued_imm);

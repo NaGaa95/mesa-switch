@@ -84,6 +84,8 @@
 static const enum pipe_format dri2_pbuffer_visuals[] = {
    PIPE_FORMAT_R16G16B16A16_FLOAT,
    PIPE_FORMAT_R16G16B16X16_FLOAT,
+   PIPE_FORMAT_R16G16B16A16_UNORM,
+   PIPE_FORMAT_R16G16B16X16_UNORM,
    PIPE_FORMAT_B10G10R10A2_UNORM,
    PIPE_FORMAT_B10G10R10X2_UNORM,
    PIPE_FORMAT_BGRA8888_UNORM,
@@ -482,6 +484,7 @@ dri2_add_pbuffer_configs_for_visuals(_EGLDisplay *disp)
 
    for (unsigned i = 0; dri2_dpy->driver_configs[i] != NULL; i++) {
       struct dri2_egl_config *dri2_conf;
+      EGLint config_group = 0;
       struct gl_config *gl_config =
          (struct gl_config *) dri2_dpy->driver_configs[i];
       int idx = dri2_pbuffer_visual_index(gl_config->color_format);
@@ -489,8 +492,20 @@ dri2_add_pbuffer_configs_for_visuals(_EGLDisplay *disp)
       if (idx == -1)
          continue;
 
+      /* Put the 16 bpc rgb[a] unorm formats into a lower priority EGL config
+       * group 1, so they don't get preferably chosen by eglChooseConfig().
+       */
+      if (util_format_is_unorm16(util_format_description(gl_config->color_format)))
+         config_group = 1;
+
+      const EGLint attr_list[] = {
+         EGL_CONFIG_SELECT_GROUP_EXT,
+         config_group,
+         EGL_NONE,
+      };
+
       dri2_conf = dri2_add_config(disp, dri2_dpy->driver_configs[i],
-                                  EGL_PBUFFER_BIT, NULL);
+                                  EGL_PBUFFER_BIT, attr_list);
       if (dri2_conf)
          format_count[idx]++;
    }

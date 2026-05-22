@@ -109,7 +109,7 @@ if with_dri
     files_egl += files('drivers/dri2/platform_x11.c')
     incs_for_egl += inc_loader_x11
     link_for_egl += libloader_x11
-    if with_dri_platform == 'drm'
+    if with_dri_platform == 'drm' or with_dri_platform == 'pseudo-drm'
       files_egl += files('drivers/dri2/platform_x11_dri3.c')
     endif
     deps_for_egl += [dep_x11_xcb, dep_xcb_xrandr, dep_xcb_xfixes, dep_xcb_shm]
@@ -148,7 +148,7 @@ elif with_platform_haiku
   incs_for_egl += [inc_mesa]
   incs_for_egl += [include_directories('../gallium/frontends/hgl')]
 
-  link_for_egl += [libmesa, libgallium, libswhgl, libsthgl]
+  link_for_egl += [libmesa, libgallium, libswhgl, libsthgl, libglapi]
   deps_for_egl += [cpp.find_library('be'), driver_swrast]
 elif with_platform_switch
   incs_for_egl += [inc_gallium, inc_gallium_aux, inc_gallium_winsys, inc_mesa]

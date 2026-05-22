@@ -2,7 +2,7 @@
 
 set -u
 
-uncollapsed_section_start wine "Setting up Wine"
+section_start wine "Setting up Wine"
 
 export WINEPREFIX="$1"
 export WINEDEBUG="-all"

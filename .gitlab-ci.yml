@@ -184,6 +184,7 @@ stages:
   - freedreno-nightly
   - etnaviv
   - etnaviv-nightly
+  - imagination-nightly
   - software-renderer
   - software-renderer-nightly
   - layered-backends
@@ -233,13 +234,14 @@ include:
   rules:
     - !reference [.common-rules, rules]
     # Run when re-enabling a disabled farm, but not when disabling it
-    - !reference [.disable-farm-mr-rules, rules]
+    - !reference [.disable-farm-rules, rules]
     # Never run immediately after merging, as we just ran everything
     - !reference [.never-post-merge-rules, rules]
     # Only rebuild containers in merge pipelines if any tags have been
     # changed, else we'll just use the already-built containers
     - if: *is-merge-attempt
       changes: &image_tags_path
+        - .gitlab-ci.yml
         - .gitlab-ci/image-tags.yml
       when: on_success
     # Skip everything for pre-merge and merge pipelines which don't change
@@ -283,7 +285,7 @@ include:
   rules:
     - !reference [.common-rules, rules]
     # Run when re-enabling a disabled farm, but not when disabling it
-    - !reference [.disable-farm-mr-rules, rules]
+    - !reference [.disable-farm-rules, rules]
     # Never run immediately after merging, as we just ran everything
     - !reference [.never-post-merge-rules, rules]
     # Build everything in merge pipelines, if any files affecting the pipeline
@@ -342,7 +344,7 @@ include:
   rules:
     - !reference [.common-rules, rules]
     # Run when re-enabling a disabled farm, but not when disabling it
-    - !reference [.disable-farm-mr-rules, rules]
+    - !reference [.disable-farm-rules, rules]
     # Never run immediately after merging, as we just ran everything
     - !reference [.never-post-merge-rules, rules]
     # Build everything in merge pipelines, if any files affecting the pipeline

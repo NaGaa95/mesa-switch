@@ -124,11 +124,8 @@ rkt_create_context(struct pipe_screen *screen,
    pctx->buffer_subdata = u_default_buffer_subdata;
    pctx->clear_buffer = u_default_clear_buffer;
 
-   pctx->ml_operation_supported = rkt_ml_operation_supported;
-   pctx->ml_subgraph_create = rkt_ml_subgraph_create;
    pctx->ml_subgraph_invoke = rkt_ml_subgraph_invoke;
    pctx->ml_subgraph_read_output = rkt_ml_subgraph_read_outputs;
-   pctx->ml_subgraph_destroy = rkt_ml_subgraph_destroy;
 
    return pctx;
 }
@@ -204,6 +201,12 @@ rkt_screen_get_fd(struct pipe_screen *pscreen)
    return rkt_screen(pscreen)->fd;
 }
 
+static struct pipe_ml_device *
+rkt_get_ml_device(struct pipe_screen *pscreen)
+{
+   return &rkt_screen(pscreen)->ml_device.base;
+}
+
 struct pipe_screen *
 rkt_screen_create(int fd,
                   const struct pipe_screen_config *config,
@@ -227,6 +230,11 @@ rkt_screen_create(int fd,
    screen->context_create = rkt_create_context;
    screen->resource_create = rkt_resource_create;
    screen->resource_destroy = rkt_resource_destroy;
+
+   rkt_screen->ml_device.base.ml_operation_supported = rkt_ml_operation_supported;
+   rkt_screen->ml_device.base.ml_subgraph_create = rkt_ml_subgraph_create;
+   rkt_screen->ml_device.base.ml_subgraph_destroy = rkt_ml_subgraph_destroy;
+   screen->get_ml_device = rkt_get_ml_device;
 
    return screen;
 }

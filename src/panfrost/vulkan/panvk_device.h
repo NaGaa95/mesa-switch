@@ -20,7 +20,6 @@
 #include "panvk_utrace_perfetto.h"
 
 #include "kmod/pan_kmod.h"
-#include "util/pan_ir.h"
 #include "util/perf/u_trace.h"
 
 #include "util/simple_mtx.h"
@@ -60,6 +59,10 @@ struct panvk_device {
    struct {
       simple_mtx_t lock;
       struct util_vma_heap heap;
+      struct util_vma_heap fixed_heap;
+      struct util_vma_heap *priv_heap;
+      bool split_heap;
+      bool extended_range;
    } as;
 
    struct {
@@ -148,8 +151,29 @@ static inline uint32_t
 panvk_device_adjust_bo_flags(const struct panvk_device *device,
                              uint32_t bo_flags)
 {
+   struct panvk_physical_device *pdev =
+      to_panvk_physical_device(device->vk.physical);
+
+   /* Dumping of GPU buffers messes up with CPU caches by loading buffers
+    * into cachelines which are sometimes assumed to be invalidated by the
+    * rest of the code. We could explicitly invalidate after a dump, but
+    * this is simpler to just disable cached-mappings when PANVK_DEBUG="dump".
+    * Tracing has the same fundamental issue, but we'll take care of that
+    * at the desc/CS pools level.
+    */
+   const bool allow_wb_mmap =
+      (pdev->kmod.dev->props.supported_bo_flags & PAN_KMOD_BO_FLAG_WB_MMAP) &&
+      !PANVK_DEBUG(DUMP) && !PANVK_DEBUG(NO_WB_MMAP);
+
+   if (!allow_wb_mmap)
+      bo_flags &= ~PAN_KMOD_BO_FLAG_WB_MMAP;
+
    if (PANVK_DEBUG(DUMP) || PANVK_DEBUG(TRACE))
       bo_flags &= ~PAN_KMOD_BO_FLAG_NO_MMAP;
+
+   if (!(device->kmod.dev->props.supported_bo_flags &
+         PAN_KMOD_BO_FLAG_GPU_UNCACHED))
+      bo_flags &= ~PAN_KMOD_BO_FLAG_GPU_UNCACHED;
 
    return bo_flags;
 }
@@ -161,26 +185,34 @@ panvk_get_gpu_page_size(const struct panvk_device *device)
 }
 
 static inline uint64_t
-panvk_as_alloc(struct panvk_device *device, uint64_t size, uint64_t alignment)
+panvk_as_alloc(struct panvk_device *device, struct util_vma_heap *heap,
+               uint64_t size, uint64_t alignment)
 {
    simple_mtx_lock(&device->as.lock);
-   uint64_t address = util_vma_heap_alloc(&device->as.heap, size, alignment);
+   uint64_t address = util_vma_heap_alloc(heap, size, alignment);
    simple_mtx_unlock(&device->as.lock);
    return address;
 }
 
-static inline void
-panvk_as_free(struct panvk_device *device, uint64_t address, uint64_t size)
+static inline uint64_t
+panvk_as_alloc_fixed_address(struct panvk_device *device,
+                             struct util_vma_heap *heap, uint64_t address,
+                             uint64_t size)
 {
    simple_mtx_lock(&device->as.lock);
-   util_vma_heap_free(&device->as.heap, address, size);
+   bool alloc_result = util_vma_heap_alloc_addr(heap, address, size);
    simple_mtx_unlock(&device->as.lock);
+   return alloc_result ? address : 0;
 }
 
-VkResult panvk_map_to_blackhole(struct panvk_device *device,
-                                uint64_t address, uint64_t size);
-
-struct pan_kmod_bo *panvk_get_blackhole(struct panvk_device *device);
+static inline void
+panvk_as_free(struct panvk_device *device, struct util_vma_heap *heap,
+              uint64_t address, uint64_t size)
+{
+   simple_mtx_lock(&device->as.lock);
+   util_vma_heap_free(heap, address, size);
+   simple_mtx_unlock(&device->as.lock);
+}
 
 #if PAN_ARCH
 VkResult

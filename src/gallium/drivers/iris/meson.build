@@ -37,6 +37,7 @@ files_libiris = files(
   'iris_measure.c',
   'iris_measure.h',
   'iris_monitor.c',
+  'iris_nir_analyze_ubo_ranges.c',
   'iris_perf.h',
   'iris_perf.c',
   'iris_performance_query.c',
@@ -54,7 +55,7 @@ files_libiris = files(
 )
 
 iris_per_hw_ver_libs = []
-foreach v : ['80', '90', '110', '120', '125', '200', '300']
+foreach v : ['80', '90', '110', '120', '125', '200', '300', '350']
   if v == '80' and not with_intel_elk
     continue
   endif
@@ -92,7 +93,7 @@ libiris = static_library(
                   idep_intel_blorp_elk, idep_intel_decoder_elk,
                   idep_intel_blorp, idep_intel_decoder_brw,
                   idep_intel_compiler_elk, idep_intel_compiler_brw,
-                  idep_mesautil],
+                  idep_intel_compiler_jay, idep_mesautil],
   link_with : [
     iris_per_hw_ver_libs, libisl,
     libintel_perf

@@ -794,6 +794,19 @@
   channels: [UN8, UN8, UN8, UN8]
   swizzles: [X, Y, Z, 1]
 
+# 16 bit versions
+- name: R16G16_R16B16_422_UNORM
+  layout: subsampled
+  colorspace: RGB
+  block: {width: 2, height: 1, depth: 1}
+  channels: [UN16, UN16, UN16, UN16]
+  swizzles: [X, Y, Z, 1]
+- name: X6R10X6G10_X6R10X6B10_422_UNORM
+  layout: subsampled
+  colorspace: RGB
+  block: {width: 2, height: 1, depth: 1}
+  channels: [UN16, UN16, UN16, UN16]
+  swizzles: [X, Y, Z, 1]
 
 # some special formats not fitting anywhere else
 - name: R11G11B10_FLOAT
@@ -2178,6 +2191,15 @@
   block: {width: 1, height: 1, depth: 1}
   channels: [UN8]
   swizzles: [X, 0, 0, 1]
+
+# 10-bit channels stored in 16-bit containers (upper 10 bits used,
+# lower 6 bits are padding).
+- name: X6R10X6G10X6B10X6A10_UNORM
+  layout: other
+  colorspace: RGB
+  block: {width: 1, height: 1, depth: 1}
+  channels: [UN16, UN16, UN16, UN16]
+  swizzles: [X, Y, Z, W]
 
 # Formats for plane 0/plane 1 of P010
 - name: X6R10_UNORM

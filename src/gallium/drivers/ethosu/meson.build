@@ -1,6 +1,8 @@
 # Copyright 2019 Google, Inc
 # SPDX-License-Identifier: MIT
 
+subdir('mlw_codec')
+
 ethosu_registers = custom_target(
   'ethosu_registers.h',
   input : ['gen_parser.py', 'gen_header.py', 'registers.xml'],
@@ -13,18 +15,20 @@ files_ethosu = files(
   'ethosu_cmd.c',
   'ethosu_coefs.c',
   'ethosu_device.c',
+  'ethosu_encode.cpp',
   'ethosu_lower.c',
   'ethosu_ml.c',
   'ethosu_sched.c',
-  'mlw_codec/mlw_encode.c',
+  'ethosu_sched_u85.c',
 )
 
 libethosu = static_library(
   'ethosu',
   [files_ethosu, ethosu_registers],
-  include_directories : [inc_gallium_aux, inc_gallium, inc_include, inc_src],
+  include_directories : [inc_gallium_aux, inc_gallium, inc_include, inc_src, inc_libmlw_codec],
   gnu_symbol_visibility : 'hidden',
   dependencies : [idep_mesautil, dep_libdrm],
+  link_with : [libmlw_codec],
 )
 
 driver_ethosu = declare_dependency(

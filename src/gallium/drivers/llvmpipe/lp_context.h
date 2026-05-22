@@ -59,6 +59,9 @@ struct lp_velems_state;
 struct llvmpipe_context {
    struct pipe_context pipe;  /**< base class */
 
+   /** Context creation flags */
+   unsigned flags;
+
    struct list_head list;
    /** Constant state objects */
    const struct pipe_blend_state *blend;
@@ -197,6 +200,10 @@ struct llvmpipe_context {
    int max_global_buffers;
    struct pipe_resource **global_buffers;
 
+   /** Used for context reset emulation, see LP_CONTEXT_RESET_FILE */
+   const char *context_reset_file_path;
+   int64_t context_creation_time_ns;
+   int64_t context_reset_time_ns;
 };
 
 

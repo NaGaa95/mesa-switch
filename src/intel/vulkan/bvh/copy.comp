@@ -65,7 +65,7 @@ main(void)
    REF(anv_accel_struct_header) header = REF(anv_accel_struct_header)(copy_src_addr);
 
    uint64_t instance_base = args.src_addr + SIZEOF(vk_accel_struct_serialization_header);
-   uint64_t instance_offset = SIZEOF(anv_accel_struct_header);
+   uint64_t instance_offset = DEREF(header).instance_leaves_offset;
 
    /* We store the address of instance_leaf after bvh header */
    uint64_t instance_end = DEREF(header).instance_count * SIZEOF(uint64_t);

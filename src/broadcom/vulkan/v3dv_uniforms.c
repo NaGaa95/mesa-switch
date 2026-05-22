@@ -25,31 +25,23 @@
  * IN THE SOFTWARE.
  */
 
-#include "v3dv_private.h"
+#include "v3dv_device.h"
+#include "v3dv_cmd_buffer.h"
+#include "v3dv_image.h"
 
 /* Our Vulkan resource indices represent indices in descriptor maps which
  * include all shader stages, so we need to size the arrays below
  * accordingly. For now we only support a maximum of 3 stages: VS, GS, FS.
  */
-#define MAX_STAGES 3
-
-#define MAX_TOTAL_TEXTURE_SAMPLERS (V3D_MAX_TEXTURE_SAMPLERS * MAX_STAGES)
 struct texture_bo_list {
    struct v3dv_bo *tex[MAX_TOTAL_TEXTURE_SAMPLERS];
 };
 
-/* This tracks state BOs for both textures and samplers, so we
- * multiply by 2.
- */
-#define MAX_TOTAL_STATES (2 * V3D_MAX_TEXTURE_SAMPLERS * MAX_STAGES)
 struct state_bo_list {
    uint32_t count;
    struct v3dv_bo *states[MAX_TOTAL_STATES];
 };
 
-#define MAX_TOTAL_UNIFORM_BUFFERS ((MAX_UNIFORM_BUFFERS + \
-                                    MAX_INLINE_UNIFORM_BUFFERS) * MAX_STAGES)
-#define MAX_TOTAL_STORAGE_BUFFERS (MAX_STORAGE_BUFFERS * MAX_STAGES)
 struct buffer_bo_list {
    struct v3dv_bo *ubo[MAX_TOTAL_UNIFORM_BUFFERS];
    struct v3dv_bo *ssbo[MAX_TOTAL_STORAGE_BUFFERS];

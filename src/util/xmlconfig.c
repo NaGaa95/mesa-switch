@@ -69,7 +69,7 @@ static inline void regfree(regex_t* r) {}
 static bool
 be_verbose(void)
 {
-   const char *s = getenv("MESA_DEBUG");
+   const char *s = os_get_option("MESA_DEBUG");
    if (!s)
       return true;
 
@@ -599,7 +599,7 @@ __driUtilMessage(const char *f, ...)
    va_list args;
    const char *libgl_debug;
 
-   libgl_debug=getenv("LIBGL_DEBUG");
+   libgl_debug=os_get_option("LIBGL_DEBUG");
    if (libgl_debug && !strstr(libgl_debug, "quiet")) {
       fprintf(stderr, "libGL: ");
       va_start(args, f);
@@ -740,7 +740,7 @@ parseAppAttr(struct OptConfData *data, const char **attr)
 {
    uint32_t i;
    const char *exec = NULL;
-   const char *sha1 = NULL;
+   const char *blake3 = NULL;
    const char *exec_regexp = NULL;
    const char *application_name_match = NULL;
    const char *application_versions = NULL;
@@ -752,7 +752,7 @@ parseAppAttr(struct OptConfData *data, const char **attr)
       if (!strcmp(attr[i], "name")) /* not needed here */;
       else if (!strcmp(attr[i], "executable")) exec = attr[i+1];
       else if (!strcmp(attr[i], "executable_regexp")) exec_regexp = attr[i+1];
-      else if (!strcmp(attr[i], "sha1")) sha1 = attr[i+1];
+      else if (!strcmp(attr[i], "blake3")) blake3 = attr[i+1];
       else if (!strcmp(attr[i], "application_name_match"))
          application_name_match = attr[i+1];
       else if (!strcmp(attr[i], "application_versions"))
@@ -770,10 +770,10 @@ parseAppAttr(struct OptConfData *data, const char **attr)
          regfree(&re);
       } else
          XML_WARNING("Invalid executable_regexp=\"%s\".", exec_regexp);
-   } else if (sha1) {
-      /* SHA1_DIGEST_STRING_LENGTH includes terminating null byte */
-      if (strlen(sha1) != (SHA1_DIGEST_STRING_LENGTH - 1)) {
-         XML_WARNING("Incorrect sha1 application attribute");
+   } else if (blake3) {
+      /* BLAKE3_HEX_LEN includes terminating null byte */
+      if (strlen(blake3) != (BLAKE3_HEX_LEN - 1)) {
+         XML_WARNING("Incorrect blake3 application attribute");
          data->ignoringApp = data->inApp;
       } else {
          size_t len;
@@ -781,13 +781,13 @@ parseAppAttr(struct OptConfData *data, const char **attr)
          char path[PATH_MAX];
          if (util_get_process_exec_path(path, ARRAY_SIZE(path)) > 0 &&
              (content = os_read_file(path, &len))) {
-            uint8_t sha1x[SHA1_DIGEST_LENGTH];
-            char sha1s[SHA1_DIGEST_STRING_LENGTH];
-            _mesa_sha1_compute(content, len, sha1x);
-            _mesa_sha1_format((char*) sha1s, sha1x);
+            uint8_t blake3x[BLAKE3_KEY_LEN];
+            char blake3s[BLAKE3_HEX_LEN];
+            _mesa_blake3_compute(content, len, blake3x);
+            _mesa_blake3_format((char*) blake3s, blake3x);
             free(content);
 
-            if (strcmp(sha1, sha1s)) {
+            if (strcmp(blake3, blake3s)) {
                data->ignoringApp = data->inApp;
             }
          } else {
@@ -873,7 +873,7 @@ parseOptConfAttr(struct OptConfData *data, const char **attr)
          /* don't use XML_WARNING, drirc defines options for all drivers,
           * but not all drivers support them */
          return;
-      else if (getenv(cache->info[opt].name)) {
+      else if (os_get_option(cache->info[opt].name)) {
          /* don't use XML_WARNING, we want the user to see this! */
          if (be_verbose()) {
             fprintf(stderr,
@@ -1184,7 +1184,7 @@ parseStaticConfig(struct OptConfData *data)
             "name", a->name,
             "executable", a->executable,
             "executable_regexp", a->executable_regexp,
-            "sha1", a->sha1,
+            "blake3", a->blake3,
             "application_name_match", a->application_name_match,
             "application_versions", a->application_versions,
             NULL
@@ -1256,17 +1256,18 @@ driParseConfigFiles(driOptionCache *cache, const driOptionCache *info,
    userData.execName = execname;
 
 #if WITH_XMLCONFIG
-   char *home, *configdir;
+   const char *configdir;
+   const char *home;
 
    /* parse from either $DRIRC_CONFIGDIR or $datadir/drirc.d */
-   if ((configdir = getenv("DRIRC_CONFIGDIR")))
+   if ((configdir = os_get_option("DRIRC_CONFIGDIR")))
       parseConfigDir(&userData, configdir);
    else {
       parseConfigDir(&userData, DATADIR "/drirc.d");
       parseOneConfigFile(&userData, SYSCONFDIR "/drirc");
    }
 
-   if ((home = getenv("HOME"))) {
+   if ((home = os_get_option("HOME"))) {
       char filename[PATH_MAX];
 
       snprintf(filename, PATH_MAX, "%s/.drirc", home);

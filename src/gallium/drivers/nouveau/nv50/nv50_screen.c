@@ -217,7 +217,6 @@ nv50_init_screen_caps(struct nv50_screen *screen)
    caps->max_varyings = 15;
    caps->max_vertex_buffers = 16;
    caps->gl_begin_end_buffer_size = 512 * 1024; /* TODO: Investigate tuning this */
-   caps->max_texture_mb = 0; /* TODO: use 1/2 of VRAM for this? */
 
    caps->supported_prim_modes_with_restart =
    caps->supported_prim_modes = BITFIELD_MASK(MESA_PRIM_COUNT);
@@ -272,7 +271,7 @@ nv50_init_screen_caps(struct nv50_screen *screen)
    caps->cull_distance = true;
    caps->shader_array_components = true;
    caps->legacy_math_rules = true;
-   caps->tgsi_tex_txf_lz = true;
+   caps->tgsi_tex_txf_lz = false;
    caps->shader_clock = true;
    caps->can_bind_const_buffer_as_vertex = true;
    caps->clear_scissored = true;

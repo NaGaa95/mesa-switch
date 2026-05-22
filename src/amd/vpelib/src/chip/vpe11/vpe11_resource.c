@@ -58,102 +58,106 @@
     .reg_name = {BASE(reg##reg_name##_BASE_IDX) + reg##reg_name, reg##reg_name##_##DEFAULT,        \
         reg##reg_name##_##DEFAULT, false}
 
-static struct vpe_caps caps = {
-    .max_input_size =
-        {
-            .width  = 16384,
-            .height = 16384,
-        },
-    .max_output_size =
-        {
-            .width  = 16384,
-            .height = 16384,
-        },
-    .min_input_size =
-        {
-            .width  = 1,
-            .height = 1,
-        },
-    .min_output_size =
-        {
-            .width  = 1,
-            .height = 1,
-        },
-    .lut_size               = LUT_BUFFER_SIZE,
-    .rotation_support       = 0,
-    .h_mirror_support       = 1,
-    .v_mirror_support       = 0,
-    .is_apu                 = 1,
-    .bg_color_check_support = 0,
-    .resource_caps =
-        {
-            .num_dpp       = 1,
-            .num_opp       = 1,
-            .num_mpc_3dlut = 1,
-            .num_queue     = 8,
-            .num_cdc_be    = 1,
-        },
-    .color_caps = {.dpp =
-                       {
-                           .pre_csc    = 1,
-                           .luma_key   = 0,
-                           .color_key  = 1,
-                           .dgam_ram   = 0,
-                           .post_csc   = 1,
-                           .gamma_corr = 1,
-                           .hw_3dlut   = 1,
-                           .ogam_ram   = 1, /**< programmable gam in output -> gamma_corr */
-                           .ocsc       = 0,
-                           .dgam_rom_caps =
+static struct vpe_caps
+   caps = {
+            .max_input_size =
+                {
+                    .width  = 16384,
+                    .height = 16384,
+                },
+            .max_output_size =
+                {
+                    .width  = 16384,
+                    .height = 16384,
+                },
+            .min_input_size =
+                {
+                    .width  = 1,
+                    .height = 1,
+                },
+            .min_output_size =
+                {
+                    .width  = 1,
+                    .height = 1,
+                },
+            .lut_size               = LUT_BUFFER_SIZE,
+            .rotation_support       = 0,
+            .h_mirror_support       = 1,
+            .v_mirror_support       = 0,
+            .is_apu                 = 1,
+            .bg_color_check_support = 0,
+
+            .prefer_external_scaler_coef = 1,
+
+            .resource_caps =
+                {
+                    .num_dpp       = 1,
+                    .num_opp       = 1,
+                    .num_mpc_3dlut = 1,
+                    .num_queue     = 8,
+                    .num_cdc_be    = 1,
+                },
+            .color_caps = {.dpp =
                                {
-                                   .srgb     = 1,
-                                   .bt2020   = 1,
-                                   .gamma2_2 = 1,
-                                   .pq       = 1,
-                                   .hlg      = 1,
+                                   .pre_csc    = 1,
+                                   .luma_key   = 0,
+                                   .color_key  = 1,
+                                   .dgam_ram   = 0,
+                                   .post_csc   = 1,
+                                   .gamma_corr = 1,
+                                   .hw_3dlut   = 1,
+                                   .ogam_ram   = 1, /**< programmable gam in output -> gamma_corr */
+                                   .ocsc       = 0,
+                                   .dgam_rom_caps =
+                                       {
+                                           .srgb     = 1,
+                                           .bt2020   = 1,
+                                           .gamma2_2 = 1,
+                                           .pq       = 1,
+                                           .hlg      = 1,
+                                       },
                                },
-                       },
-        .mpc =
-            {
-                .gamut_remap         = 1,
-                .ogam_ram            = 1,
-                .ocsc                = 1,
-                .shared_3d_lut       = 1,
-                .global_alpha        = 1,
-                .top_bottom_blending = 0,
-            }},
-    .plane_caps =
-        {
-            .per_pixel_alpha = 1,
-            .input_pixel_format_support =
+                .mpc =
+                    {
+                        .gamut_remap         = 1,
+                        .ogam_ram            = 1,
+                        .ocsc                = 1,
+                        .shared_3d_lut       = 1,
+                        .global_alpha        = 1,
+                        .top_bottom_blending = 0,
+                    }},
+            .plane_caps =
                 {
-                    .argb_packed_32b = 1,
-                    .nv12            = 1,
-                    .fp16            = 0,
-                    .p010            = 1, /**< planar 4:2:0 10-bit */
-                    .p016            = 0, /**< planar 4:2:0 16-bit */
-                    .ayuv            = 0, /**< packed 4:4:4 */
-                    .yuy2            = 0, /**< packed 4:2:2 */
-                },
-            .output_pixel_format_support =
-                {
-                    .argb_packed_32b = 1,
-                    .nv12            = 0,
-                    .fp16            = 1,
-                    .p010            = 0, /**< planar 4:2:0 10-bit */
-                    .p016            = 0, /**< planar 4:2:0 16-bit */
-                    .ayuv            = 0, /**< packed 4:4:4 */
-                    .yuy2 = 0
-                },
-            .max_upscale_factor = 64000,
+                    .per_pixel_alpha = 1,
+                    .input_pixel_format_support =
+                        {
+                            .argb_packed_32b = 1,
+                            .nv12            = 1,
+                            .fp16            = 0,
+                            .p010            = 1, /**< planar 4:2:0 10-bit */
+                            .p016            = 0, /**< planar 4:2:0 16-bit */
+                            .ayuv            = 0, /**< packed 4:4:4 */
+                            .yuy2            = 0, /**< packed 4:2:2 */
+                        },
+                    .output_pixel_format_support =
+                        {
+                            .argb_packed_32b = 1,
+                            .nv12            = 0,
+                            .fp16            = 1,
+                            .p010            = 0, /**< planar 4:2:0 10-bit */
+                            .p016            = 0, /**< planar 4:2:0 16-bit */
+                            .ayuv            = 0, /**< packed 4:4:4 */
+                            .yuy2 = 0
+                        },
+                    .max_upscale_factor = 64000,
 
-            // 6:1 downscaling ratio: 1000/6 = 166.666
-            .max_downscale_factor = 167,
+                    // 6:1 downscaling ratio: 1000/6 = 166.666
+                    .max_downscale_factor = 167,
 
-            .pitch_alignment    = 256,
-            .addr_alignment     = 256,
-            .max_viewport_width = 1024,
-        },
+                    .pitch_alignment    = 256,
+                    .addr_alignment     = 256,
+                    .max_viewport_width = 1024,
+                },
 };
 
 enum vpe_status vpe11_construct_resource(struct vpe_priv *vpe_priv, struct resource *res)
@@ -210,6 +214,7 @@ enum vpe_status vpe11_construct_resource(struct vpe_priv *vpe_priv, struct resou
     res->update_blnd_gamma                 = vpe10_update_blnd_gamma;
     res->update_output_gamma               = vpe10_update_output_gamma;
     res->validate_cached_param             = vpe11_validate_cached_param;
+    res->calculate_shaper                  = vpe10_calculate_shaper;
 
     return VPE_STATUS_OK;
 err:

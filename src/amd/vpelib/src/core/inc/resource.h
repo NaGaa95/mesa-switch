@@ -88,7 +88,7 @@ struct resource {
     uint16_t (*get_bg_stream_idx)(struct vpe_priv *vpe_priv);
 
     uint16_t (*find_bg_gaps)(struct vpe_priv *vpe_priv, const struct vpe_rect *target_rect,
-        struct vpe_rect *gaps, uint16_t max_gaps);
+        struct vpe_rect *gaps, uint32_t alignment, uint16_t max_gaps);
 
     void (*create_bg_segments)(
         struct vpe_priv *vpe_priv, struct vpe_rect *gaps, uint16_t gaps_cnt, enum vpe_cmd_ops ops);
@@ -114,6 +114,9 @@ struct resource {
         bool geometric_scaling);
 
     bool (*validate_cached_param)(struct vpe_priv *vpe_priv, const struct vpe_build_param *param);
+
+    enum vpe_status (*calculate_shaper)(struct vpe_priv *vpe_priv, struct stream_ctx *stream_ctx);
+
     // Indicates the nominal range hdr input content should be in during processing.
     int internal_hdr_normalization;
 
@@ -157,13 +160,15 @@ struct pipe_ctx *vpe_pipe_find_owner(struct vpe_priv *vpe_priv, uint32_t stream_
 void vpe_clip_stream(
     struct vpe_rect *src_rect, struct vpe_rect *dst_rect, const struct vpe_rect *target_rect);
 
-void calculate_scaling_ratios(struct scaler_data *scl_data, struct vpe_rect *src_rect,
+void vpe_calculate_scaling_ratios(struct scaler_data *scl_data, struct vpe_rect *src_rect,
     struct vpe_rect *dst_rect, enum vpe_surface_pixel_format format);
+
+enum lut3d_type vpe_get_stream_lut3d_type(struct stream_ctx *stream_ctx);
 
 uint16_t vpe_get_num_segments(struct vpe_priv *vpe_priv, const struct vpe_rect *src,
     const struct vpe_rect *dst, const uint32_t max_seg_width);
 
-bool should_generate_cmd_info(struct stream_ctx *stream_ctx);
+bool vpe_should_generate_cmd_info(struct stream_ctx *stream_ctx);
 
 enum vpe_status vpe_resource_build_scaling_params(struct segment_ctx *segment);
 
@@ -184,6 +189,8 @@ bool vpe_rec_is_equal(struct vpe_rect rec1, struct vpe_rect rec2);
 const struct vpe_caps *vpe_get_capability(enum vpe_ip_level ip_level);
 
 void vpe_setup_check_funcs(struct vpe_check_support_funcs *funcs, enum vpe_ip_level ip_level);
+
+uint32_t vpe_get_recout_width_alignment(const struct vpe_build_param *params);
 
 #ifdef __cplusplus
 }

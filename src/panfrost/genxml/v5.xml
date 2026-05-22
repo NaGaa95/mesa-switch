@@ -1,3 +1,8 @@
+<!--
+  Copyright (C) 2020 Collabora Ltd.
+  SPDX-License-Identifier: MIT
+-->
+
 <panxml arch="5">
   <enum name="Attribute Type">
     <value name="1D" value="1"/>

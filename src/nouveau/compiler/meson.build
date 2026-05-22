@@ -98,6 +98,7 @@ _libnak_ir_proc_rs = rust.proc_macro(
   'nak_ir_proc',
   files('nak/ir_proc.rs'),
   dependencies : [idep_compiler_proc_rs],
+  rust_args : rust_global_args,
 )
 
 _libnak_rs = static_library(
@@ -169,7 +170,7 @@ nak_nir_algebraic_c = custom_target(
 _libnak = static_library(
   'nak',
   [libnak_c_files, nak_nir_algebraic_c],
-  include_directories : [inc_include, inc_src, inc_gallium],
+  include_directories : [inc_include, inc_src],
   dependencies : libnak_deps,
   link_with : [_libnak_rs],
   c_args : [no_override_init_args],

@@ -633,7 +633,7 @@ valid_draw_indirect(struct gl_context *ctx,
     *      structure,  be in buffer objects,  and may not be called when
     *      the default vertex array object is bound."
     */
-   if (ctx->API != API_OPENGL_COMPAT &&
+   if (!_mesa_is_desktop_gl_compat(ctx) &&
        ctx->Array.VAO == ctx->Array.DefaultVAO)
       return GL_INVALID_OPERATION;
 

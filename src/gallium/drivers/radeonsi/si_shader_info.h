@@ -29,10 +29,8 @@ struct si_shader_info {
       uint8_t num_ssbos;
       uint8_t num_images;
       uint32_t textures_used;
-      uint32_t image_buffers;
-      uint32_t msaa_images;
 
-      unsigned shared_size;
+      unsigned task_payload_size;
       uint16_t workgroup_size[3];
       bool workgroup_size_variable:1;
       enum gl_derivative_group derivative_group:2;
@@ -75,6 +73,15 @@ struct si_shader_info {
          struct {
             uint8_t user_data_components_amd:4;
          } cs;
+
+         struct {
+            uint16_t max_vertices_out;
+            uint16_t max_primitives_out;
+         } mesh;
+
+         struct {
+            bool linear_taskmesh_dispatch : 1;
+         } task;
       };
    } base;
 
@@ -119,7 +126,7 @@ struct si_shader_info {
    uint8_t colors_written;
    uint16_t output_color_types; /**< Each bit pair is enum si_color_output_type */
    bool color0_writes_all_cbufs; /**< gl_FragColor */
-   bool reads_samplemask;   /**< does fragment shader read sample mask? */
+   bool uses_sysval_sample_mask_in;   /**< does fragment shader read sample mask? */
    bool reads_tess_factors; /**< If TES reads TESSINNER or TESSOUTER */
    bool writes_z;           /**< does fragment shader write Z value? */
    /* We need both because both can be present in different conditional blocks. */
@@ -132,22 +139,17 @@ struct si_shader_info {
    bool uses_persp_center_color;
    bool uses_persp_centroid_color;
    bool uses_persp_sample_color;
-   bool uses_persp_center;
-   bool uses_persp_centroid;
-   bool uses_persp_sample;
-   bool uses_linear_center;
-   bool uses_linear_centroid;
-   bool uses_linear_sample;
+   bool uses_sysval_persp_center;
+   bool uses_sysval_persp_centroid;
+   bool uses_sysval_persp_sample;
+   bool uses_sysval_linear_center;
+   bool uses_sysval_linear_centroid;
+   bool uses_sysval_linear_sample;
    bool uses_interp_at_offset;
    bool uses_interp_at_sample;
-   bool uses_primid;
-   bool uses_frontface;
-   bool uses_invocationid;
-   bool uses_thread_id[3];
-   bool uses_block_id[3];
-   bool uses_variable_block_size;
-   bool uses_grid_size;
-   bool uses_tg_size;
+   bool uses_sysval_primitive_id;
+   bool uses_sysval_front_face;
+   bool uses_sysval_invocation_id;
    bool uses_atomic_ordered_add;
    bool writes_psize;
    bool writes_primid;
@@ -156,6 +158,7 @@ struct si_shader_info {
    bool uses_bindless_samplers;
    bool uses_bindless_images;
    bool has_divergent_loop;
+   bool tess_turns_off_ngg;
 
    /* A flag to check if vrs2x2 can be enabled to reduce number of
     * fragment shader invocations if flat shading.
@@ -171,6 +174,13 @@ struct si_shader_info {
 
    /* frag coord and sample pos per component read mask. */
    uint8_t reads_frag_coord_mask;
+
+   unsigned ngg_cull_vert_threshold; /* UINT32_MAX = disabled */
+   enum mesa_prim rast_prim;
+
+   /* bitmasks of used descriptor slots */
+   uint64_t active_const_and_shader_buffers;
+   uint64_t active_samplers_and_images;
 };
 
 /* Temporary info used during shader variant compilation that's forgotten after compilation is
@@ -195,15 +205,19 @@ union si_ps_input_info {
 struct si_shader_variant_info {
    uint32_t vs_output_ps_input_cntl[NUM_TOTAL_VARYING_SLOTS];
    union si_ps_input_info ps_inputs[SI_NUM_INTERP];
+   uint32_t spi_shader_col_format;
+   uint8_t spi_shader_z_format;
    uint8_t num_ps_inputs;
+   uint8_t num_ps_per_primitive_inputs;
+   uint8_t num_ps_maybe_per_primitive_inputs;
    uint8_t ps_colors_read;
    uint8_t num_input_sgprs;
    uint8_t num_input_vgprs;
    bool uses_vmem_load_other : 1; /* all other VMEM loads and atomics with return */
    bool uses_vmem_sampler_or_bvh : 1;
-   bool uses_instance_id : 1;
-   bool uses_base_instance : 1;
-   bool uses_draw_id : 1;
+   bool uses_sysval_instance_id : 1;
+   bool uses_sysval_base_instance : 1;
+   bool uses_sysval_draw_id : 1;
    bool uses_vs_state_indexed : 1; /* VS_STATE_INDEXED */
    bool uses_gs_state_provoking_vtx_first : 1;
    bool uses_gs_state_outprim : 1;
@@ -211,15 +225,34 @@ struct si_shader_variant_info {
    bool writes_stencil : 1;
    bool writes_sample_mask : 1;
    bool uses_discard : 1;
+   bool uses_mesh_scratch_ring : 1;
+   bool uses_sysval_local_invocation_id_x : 1;
+   bool uses_sysval_local_invocation_id_y : 1;
+   bool uses_sysval_local_invocation_id_z : 1;
+   bool uses_sysval_workgroup_id_x : 1;
+   bool uses_sysval_workgroup_id_y : 1;
+   bool uses_sysval_workgroup_id_z : 1;
+   bool uses_sysval_workgroup_size : 1;
+   bool uses_sysval_num_workgroups : 1;
+   bool uses_sgpr_tg_size : 1;
    uint8_t nr_pos_exports;
    uint8_t nr_param_exports;
+   uint8_t nr_prim_param_exports;
    uint8_t clipdist_mask;
    uint8_t culldist_mask;
    uint8_t num_streamout_vec4s;
    uint8_t max_simd_waves;
    uint8_t ngg_lds_scratch_size;
+   uint8_t cs_num_user_sgprs;
+   uint8_t cs_shaderbufs_sgpr_index;
+   uint8_t cs_num_shaderbufs_in_user_sgprs;
+   uint8_t cs_images_sgpr_index;
+   uint8_t cs_images_num_sgprs;
+   uint8_t cs_num_images_in_user_sgprs;
+   uint8_t cs_image_buffer_mask; /* which image bindings are buffers, only the first few bits matter */
    uint16_t private_mem_vgprs;
    uint32_t ngg_lds_vertex_size; /* VS,TES: Cull+XFB, GS: GSVS size */
+   uint32_t shared_size;
    ac_nir_legacy_gs_info legacy_gs;
 };
 

@@ -77,7 +77,7 @@ query_features_from_kernel(struct etna_gpu *gpu)
 	STATIC_ASSERT(ETNA_GPU_FEATURES_12 == 0xf);
 
 	for (unsigned i = ETNA_GPU_FEATURES_0; i <= ETNA_GPU_FEATURES_12; i++) {
-		uint64_t val;
+		uint64_t val = 0;
 
 		etna_gpu_get_param(gpu, i, &val);
 		features[i - ETNA_GPU_FEATURES_0] = val;
@@ -141,12 +141,14 @@ query_features_from_kernel(struct etna_gpu *gpu)
 	ETNA_FEATURE(chipMinorFeatures6, NO_ASTC);
 	ETNA_FEATURE(chipMinorFeatures6, V4_COMPRESSION);
 
+	ETNA_FEATURE(chipMinorFeatures7, BLT_64BPP_MASKED_CLEAR_FIX);
 	ETNA_FEATURE(chipMinorFeatures7, RS_NEW_BASEADDR);
 	ETNA_FEATURE(chipMinorFeatures7, PE_NO_ALPHA_TEST);
 
 	ETNA_FEATURE(chipMinorFeatures8, SH_NO_ONECONST_LIMIT);
 
 	ETNA_FEATURE(chipMinorFeatures10, DEC400);
+	ETNA_FEATURE(chipMinorFeatures10, WIDELINE_TRIANGLE_EMU);
 }
 
 static void

@@ -455,8 +455,9 @@ class VulkanMarshalingCodegen(VulkanTypeIterator):
         lenAccess = self.lenAccessor(vulkanType)
 
         if self.direction == "write":
-            self.cgen.stmt("saveStringArray(%s, %s, %s)" % (self.streamVarName,
-                                                            access, lenAccess))
+            if lenAccess is not None:
+                self.cgen.stmt("saveStringArray(%s, %s, %s)" % (self.streamVarName,
+                                                                access, lenAccess))
         else:
             castExpr = \
                 self.makeCastExpr( \
@@ -468,7 +469,10 @@ class VulkanMarshalingCodegen(VulkanTypeIterator):
     def onStaticArr(self, vulkanType):
         access = self.exprValueAccessor(vulkanType)
         lenAccess = self.lenAccessor(vulkanType)
-        finalLenExpr = "%s * %s" % (lenAccess, self.cgen.sizeofExpr(vulkanType))
+        if lenAccess is not None:
+            finalLenExpr = "%s * %s" % (lenAccess, self.cgen.sizeofExpr(vulkanType))
+        else:
+            finalLenExpr = self.cgen.sizeofExpr(vulkanType)
         self.genStreamCall(vulkanType, access, finalLenExpr)
 
     # Old version VkEncoder may have some sType values conflict with VkDecoder

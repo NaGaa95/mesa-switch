@@ -5,10 +5,12 @@
 
 #include "ethosu_device.h"
 #include "ethosu_ml.h"
+#include "ethosu_public.h"
 
 #include "drm-uapi/ethosu_accel.h"
 
 #include <xf86drm.h>
+#include <string.h>
 #include "util/os_mman.h"
 #include "util/u_inlines.h"
 #include "util/u_surface.h"
@@ -20,6 +22,7 @@ static const struct debug_named_value ethosu_debug_options[] = {
    {"zero_bos", ETHOSU_DBG_ZERO, "Zero buffers for debugging"},
    {"disable_nhcwb16", ETHOSU_DBG_DISABLE_NHCWB16, "Disable NHCWB16"},
    {"disable_sram", ETHOSU_DBG_DISABLE_SRAM, "Disable SRAM"},
+   {"force_u85", ETHOSU_DBG_FORCE_U85, "Force U85 behavior even on U65 hardware"},
    DEBUG_NAMED_VALUE_END};
 
 DEBUG_GET_ONCE_FLAGS_OPTION(ethosu_debug, "ETHOSU_DEBUG", ethosu_debug_options, 0)
@@ -50,7 +53,6 @@ ethosu_buffer_map(struct pipe_context *pctx,
    struct ethosu_screen *screen = ethosu_screen(pctx->screen);
    struct ethosu_resource *rsc = ethosu_resource(prsc);
    struct drm_ethosu_bo_wait bo_wait = {0};
-   struct drm_ethosu_bo_mmap_offset bo_mmap_offset = {0};
    int ret;
 
    assert(level == 0);
@@ -74,20 +76,9 @@ ethosu_buffer_map(struct pipe_context *pctx,
    if (ret == -1)
       goto free_transfer;
 
-   bo_mmap_offset.handle = rsc->handle;
-   ret = drmIoctl(screen->fd, DRM_IOCTL_ETHOSU_BO_MMAP_OFFSET, &bo_mmap_offset);
-   if (ret == -1)
-      goto free_transfer;
-
-   uint8_t *map = os_mmap(NULL, prsc->width0, PROT_READ | PROT_WRITE, MAP_SHARED,
-                          screen->fd, bo_mmap_offset.offset);
-   assert(map != MAP_FAILED);
-   if (map == MAP_FAILED)
-      goto free_transfer;
-
    *out_transfer = transfer;
 
-   return map + box->x;
+   return (uint8_t *)rsc->map + box->x;
 
 free_transfer:
    pipe_resource_reference(&transfer->resource, NULL);
@@ -124,11 +115,9 @@ ethosu_create_context(struct pipe_screen *screen,
    pctx->buffer_subdata = u_default_buffer_subdata;
    pctx->clear_buffer = u_default_clear_buffer;
 
-   pctx->ml_operation_supported = ethosu_ml_operation_supported;
-   pctx->ml_subgraph_create = ethosu_ml_subgraph_create;
+   pctx->ml_subgraph_deserialize = ethosu_ml_subgraph_deserialize;
    pctx->ml_subgraph_invoke = ethosu_ml_subgraph_invoke;
    pctx->ml_subgraph_read_output = ethosu_ml_subgraph_read_outputs;
-   pctx->ml_subgraph_destroy = ethosu_ml_subgraph_destroy;
 
    return pctx;
 }
@@ -166,8 +155,23 @@ ethosu_resource_create(struct pipe_screen *pscreen,
 
    rsc->handle = arg.handle;
 
+   struct drm_ethosu_bo_mmap_offset bo_mmap_offset = {0};
+   bo_mmap_offset.handle = rsc->handle;
+   ret = drmIoctl(screen->fd, DRM_IOCTL_ETHOSU_BO_MMAP_OFFSET, &bo_mmap_offset);
+   if (ret < 0)
+      goto close_bo;
+
+   rsc->map = os_mmap(NULL, rsc->bo_size, PROT_READ | PROT_WRITE, MAP_SHARED,
+                      screen->fd, bo_mmap_offset.offset);
+   if (rsc->map == MAP_FAILED)
+      goto close_bo;
+
    return &rsc->base;
 
+close_bo: {
+   struct drm_gem_close close_arg = { .handle = rsc->handle };
+   drmIoctl(screen->fd, DRM_IOCTL_GEM_CLOSE, &close_arg);
+}
 free_rsc:
    ralloc_free(rsc);
    return NULL;
@@ -181,6 +185,8 @@ ethosu_resource_destroy(struct pipe_screen *pscreen,
    struct ethosu_screen *screen = ethosu_screen(pscreen);
    struct drm_gem_close arg = {0};
    int ret;
+
+   os_munmap(rsc->map, rsc->bo_size);
 
    arg.handle = rsc->handle;
 
@@ -211,6 +217,54 @@ dev_query(struct ethosu_screen *screen)
    assert(ret != -1);
 }
 
+static struct pipe_ml_device *
+ethosu_ml_device_create_accel(struct pipe_screen *pscreen)
+{
+   struct ethosu_screen *screen = ethosu_screen(pscreen);
+
+   return &screen->ml_device.base;
+}
+
+static void
+set_device_arch(struct ethosu_ml_device *device, bool is_u65)
+{
+   device->is_u65 = is_u65;
+
+   if (is_u65) {
+      device->ifm_ublock.width = 2;
+      device->ifm_ublock.height = 2;
+      device->ifm_ublock.depth = 8;
+      device->ofm_ublock.width = 2;
+      device->ofm_ublock.height = 2;
+      device->ofm_ublock.depth = 8;
+      device->max_concurrent_blocks = 3;
+   } else {
+      device->ifm_ublock.width = 4;
+      device->ifm_ublock.height = 4;
+      device->ifm_ublock.depth = 16;
+      device->ofm_ublock.width = 4;
+      device->ofm_ublock.height = 1;
+      device->ofm_ublock.depth = 8;
+      device->max_concurrent_blocks = 7;
+   }
+}
+
+static void
+ethosu_ml_device_destroy(struct pipe_ml_device *pdev)
+{
+   ralloc_free(pdev);
+}
+
+static void
+set_device_callbacks(struct ethosu_ml_device *device)
+{
+   device->base.ml_operation_supported = ethosu_ml_operation_supported;
+   device->base.ml_subgraph_create = ethosu_ml_subgraph_create;
+   device->base.ml_subgraph_serialize = ethosu_ml_subgraph_serialize;
+   device->base.ml_subgraph_destroy = ethosu_ml_subgraph_destroy;
+   device->base.ml_device_destroy = ethosu_ml_device_destroy;
+}
+
 struct pipe_screen *
 ethosu_screen_create(int fd,
                      const struct pipe_screen_config *config,
@@ -230,14 +284,56 @@ ethosu_screen_create(int fd,
    ethosu_screen->fd = fd;
    dev_query(ethosu_screen);
 
+   bool is_u65 = DRM_ETHOSU_ARCH_MAJOR(ethosu_screen->info.id) == 1;
+   if (DBG_ENABLED(ETHOSU_DBG_FORCE_U85))
+      is_u65 = false;
+
+   set_device_arch(&ethosu_screen->ml_device, is_u65);
+   ethosu_screen->ml_device.sram_size = ethosu_screen->info.sram_size;
+
    if (DBG_ENABLED(ETHOSU_DBG_DISABLE_SRAM))
-      ethosu_screen->info.sram_size = 0;
+      ethosu_screen->ml_device.sram_size = 0;
 
    screen->get_screen_fd = ethosu_screen_get_fd;
    screen->destroy = ethosu_destroy_screen;
    screen->context_create = ethosu_create_context;
    screen->resource_create = ethosu_resource_create;
    screen->resource_destroy = ethosu_resource_destroy;
+   screen->get_ml_device = ethosu_ml_device_create_accel;
+
+   ethosu_screen->ml_device.base.id =
+      ralloc_asprintf(ethosu_screen, "ethosu-%u-256-%u",
+                      is_u65 ? 65 : 85, ethosu_screen->info.sram_size);
+   set_device_callbacks(&ethosu_screen->ml_device);
 
    return screen;
+}
+
+struct pipe_ml_device *
+ethosu_ml_device_create(const char *spec)
+{
+   struct ethosu_ml_device *device = NULL;
+   unsigned gen, macs;
+   uint32_t sram_size = 0;
+   int n;
+
+   /* Parse "GEN-MACS-SRAM" */
+   n = sscanf(spec, "%u-%u-%u", &gen, &macs, &sram_size);
+   if (n != 3)
+      return NULL;
+   if (gen != 65 && gen != 85)
+      return NULL;
+   if (macs != 256)
+      return NULL;
+
+   ethosu_debug = debug_get_option_ethosu_debug();
+
+   device = rzalloc(NULL, struct ethosu_ml_device);
+
+   set_device_arch(device, gen == 65);
+   device->sram_size = sram_size;
+
+   set_device_callbacks(device);
+
+   return &device->base;
 }

@@ -3,23 +3,18 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include "tu_perfetto.h"
+
 #include <perfetto.h>
 
-#include "tu_perfetto.h"
-#include "tu_buffer.h"
-#include "tu_device.h"
-#include "tu_queue.h"
-#include "tu_image.h"
-
-#include "util/hash_table.h"
-#include "util/perf/u_perfetto.h"
 #include "util/perf/u_perfetto_renderpass.h"
 
-#include "tu_cmd_buffer.h"
+#include "tu_buffer.h"
+#include "tu_device.h"
+#include "tu_image.h"
+#include "tu_queue.h"
 #include "tu_tracepoints.h"
 #include "tu_tracepoints_perfetto.h"
-#include "vk_object.h"
-#include "vk_util.h"
 
 /* we can't include tu_knl.h and tu_device.h */
 
@@ -38,8 +33,10 @@ tu_device_get_u_trace(struct tu_device *device);
 /**
  * Queue-id's
  */
-enum {
-   DEFAULT_HW_QUEUE_ID,
+enum tu_queue_id {
+   BR_HW_QUEUE_ID,
+   BV_HW_QUEUE_ID,
+
    /* Labels set via VK_EXT_debug_utils are in a separate track due to the
     * following part of the spec:
     *  "An application may open a debug label region in one command buffer and
@@ -67,6 +64,8 @@ enum tu_stage_id {
    SECONDARY_CMD_BUFFER_STAGE_ID,
    CMD_BUFFER_ANNOTATION_RENDER_PASS_STAGE_ID,
    BINNING_STAGE_ID,
+   CONCURRENT_BINNING_STAGE_ID,
+   CONCURRENT_BINNING_BARRIER_STAGE_ID,
    GMEM_STAGE_ID,
    BYPASS_STAGE_ID,
    BLIT_STAGE_ID,
@@ -78,6 +77,18 @@ enum tu_stage_id {
    GMEM_LOAD_STAGE_ID,
    GMEM_STORE_STAGE_ID,
    SYSMEM_RESOLVE_STAGE_ID,
+   CUSTOM_RESOLVE_STAGE_ID,
+   CLEAR_COLOR_IMAGE_STAGE_ID,
+   CLEAR_DEPTH_STENCIL_IMAGE_STAGE_ID,
+   COPY_BUFFER_TO_IMAGE_STAGE_ID,
+   COPY_IMAGE_TO_BUFFER_STAGE_ID,
+   COPY_IMAGE_STAGE_ID,
+   RESOLVE_IMAGE_STAGE_ID,
+   FILL_BUFFER_STAGE_ID,
+   COPY_BUFFER_STAGE_ID,
+   UPDATE_BUFFER_STAGE_ID,
+   SLOW_CLEAR_LRZ_STAGE_ID,
+   DISABLE_LRZ_STAGE_ID,
    // TODO add the rest from fd_stage_id
 };
 
@@ -85,7 +96,8 @@ static const struct {
    const char *name;
    const char *desc;
 } queues[] = {
-   [DEFAULT_HW_QUEUE_ID] = {"GPU Queue 0", "Default Adreno Hardware Queue"},
+   [BR_HW_QUEUE_ID] = {"GPU Queue 0", "Default Adreno Hardware Queue"},
+   [BV_HW_QUEUE_ID] = {"GPU Queue 1", "Adreno Bin Visibility Queue"},
    [ANNOTATIONS_QUEUE_ID] = {"Annotations", "Annotations Queue"},
 };
 
@@ -99,6 +111,8 @@ static const struct {
    [SECONDARY_CMD_BUFFER_STAGE_ID] = { "Secondary Command Buffer" },
    [CMD_BUFFER_ANNOTATION_RENDER_PASS_STAGE_ID]    = { "Annotation", "Render Pass Command Buffer Annotation" },
    [BINNING_STAGE_ID]        = { "Binning", "Perform Visibility pass and determine target bins" },
+   [CONCURRENT_BINNING_STAGE_ID] = { "Concurrent Binning", "Perform concurrent Visibility pass and determine target bins" },
+   [CONCURRENT_BINNING_BARRIER_STAGE_ID] = {"Concurrent Binning Barrier", "Concurrent binning cannot happen earlier than this point"},
    [GMEM_STAGE_ID]           = { "GMEM", "Rendering to GMEM" },
    [BYPASS_STAGE_ID]         = { "Bypass", "Rendering to system memory" },
    [BLIT_STAGE_ID]           = { "Blit", "Performing a Blit operation" },
@@ -110,6 +124,18 @@ static const struct {
    [GMEM_LOAD_STAGE_ID]      = { "GMEM Load", "Per tile system memory to GMEM load" },
    [GMEM_STORE_STAGE_ID]     = { "GMEM Store", "Per tile GMEM to system memory store" },
    [SYSMEM_RESOLVE_STAGE_ID] = { "SysMem Resolve", "System memory MSAA resolve" },
+   [CUSTOM_RESOLVE_STAGE_ID] = { "Custom Resolve", "Custom resolve via shader" },
+   [CLEAR_COLOR_IMAGE_STAGE_ID] = { "Clear Color Image", "" },
+   [CLEAR_DEPTH_STENCIL_IMAGE_STAGE_ID] = { "Clear Depth Stencil Image", "" },
+   [COPY_BUFFER_TO_IMAGE_STAGE_ID] = { "Copy Buffer to Image", "" },
+   [COPY_IMAGE_TO_BUFFER_STAGE_ID] = { "Copy Image to Buffer", "" },
+   [COPY_IMAGE_STAGE_ID] = { "Copy Image", "" },
+   [RESOLVE_IMAGE_STAGE_ID] = { "Resolve Image", "" },
+   [FILL_BUFFER_STAGE_ID] = { "Fill Buffer", "" },
+   [COPY_BUFFER_STAGE_ID] = { "Copy Buffer", "" },
+   [UPDATE_BUFFER_STAGE_ID] = { "Update Buffer", "" },
+   [SLOW_CLEAR_LRZ_STAGE_ID] = { "Slow Clear LRZ", "Perform slow clear of LRZ for this image, should be avoided" },
+   [DISABLE_LRZ_STAGE_ID] = { "Disable LRZ", "Disable LRZ for this image, should be avoided" },
    // TODO add the rest
 };
 
@@ -323,12 +349,18 @@ stage_end(struct tu_device *dev, uint64_t ts_ns, enum tu_stage_id stage_id,
       emit_sync_timestamp(clocks);
    }
 
-   uint32_t queue_id = DEFAULT_HW_QUEUE_ID;
+   uint32_t queue_id = BR_HW_QUEUE_ID;
    switch (stage->stage_id) {
       case CMD_BUFFER_ANNOTATION_STAGE_ID:
       case CMD_BUFFER_ANNOTATION_RENDER_PASS_STAGE_ID:
          queue_id = ANNOTATIONS_QUEUE_ID;
          break;
+      /* We only know dynamically whether concurrent binning was enabled. Just
+       * assume it is and always make binning appear on the BV timeline.
+       */
+      case CONCURRENT_BINNING_STAGE_ID:
+      case CONCURRENT_BINNING_BARRIER_STAGE_ID:
+         queue_id = BV_HW_QUEUE_ID;
       default:
          break;
    }
@@ -577,9 +609,10 @@ CREATE_EVENT_CALLBACK(cmd_buffer, CMD_BUFFER_STAGE_ID)
 CREATE_EVENT_CALLBACK(secondary_cmd_buffer, SECONDARY_CMD_BUFFER_STAGE_ID)
 CREATE_EVENT_CALLBACK(render_pass, RENDER_PASS_STAGE_ID)
 CREATE_EVENT_CALLBACK(binning_ib, BINNING_STAGE_ID)
+CREATE_EVENT_CALLBACK(concurrent_binning_ib, CONCURRENT_BINNING_STAGE_ID)
+CREATE_EVENT_CALLBACK(concurrent_binning_barrier, CONCURRENT_BINNING_BARRIER_STAGE_ID)
 CREATE_EVENT_CALLBACK(draw_ib_gmem, GMEM_STAGE_ID)
 CREATE_EVENT_CALLBACK(draw_ib_sysmem, BYPASS_STAGE_ID)
-CREATE_EVENT_CALLBACK(blit, BLIT_STAGE_ID)
 CREATE_EVENT_CALLBACK(draw, DRAW_STAGE_ID)
 CREATE_EVENT_CALLBACK(compute, COMPUTE_STAGE_ID)
 CREATE_EVENT_CALLBACK(compute_indirect, COMPUTE_STAGE_ID)
@@ -590,6 +623,19 @@ CREATE_EVENT_CALLBACK(sysmem_clear_all, CLEAR_SYSMEM_STAGE_ID)
 CREATE_EVENT_CALLBACK(gmem_load, GMEM_LOAD_STAGE_ID)
 CREATE_EVENT_CALLBACK(gmem_store, GMEM_STORE_STAGE_ID)
 CREATE_EVENT_CALLBACK(sysmem_resolve, SYSMEM_RESOLVE_STAGE_ID)
+CREATE_EVENT_CALLBACK(custom_resolve, CUSTOM_RESOLVE_STAGE_ID)
+CREATE_EVENT_CALLBACK(blit_image, BLIT_STAGE_ID)
+CREATE_EVENT_CALLBACK(clear_color_image, CLEAR_COLOR_IMAGE_STAGE_ID)
+CREATE_EVENT_CALLBACK(clear_depth_stencil_image, CLEAR_DEPTH_STENCIL_IMAGE_STAGE_ID)
+CREATE_EVENT_CALLBACK(copy_buffer_to_image, COPY_BUFFER_TO_IMAGE_STAGE_ID)
+CREATE_EVENT_CALLBACK(copy_image, COPY_IMAGE_STAGE_ID)
+CREATE_EVENT_CALLBACK(copy_image_to_buffer, COPY_IMAGE_TO_BUFFER_STAGE_ID)
+CREATE_EVENT_CALLBACK(fill_buffer, FILL_BUFFER_STAGE_ID)
+CREATE_EVENT_CALLBACK(copy_buffer, COPY_BUFFER_STAGE_ID)
+CREATE_EVENT_CALLBACK(update_buffer, UPDATE_BUFFER_STAGE_ID)
+CREATE_EVENT_CALLBACK(resolve_image, RESOLVE_IMAGE_STAGE_ID)
+CREATE_EVENT_CALLBACK(slow_clear_lrz, SLOW_CLEAR_LRZ_STAGE_ID)
+CREATE_EVENT_CALLBACK(disable_lrz, DISABLE_LRZ_STAGE_ID)
 
 void
 tu_perfetto_start_cmd_buffer_annotation(

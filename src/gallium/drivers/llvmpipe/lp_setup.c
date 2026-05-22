@@ -530,7 +530,7 @@ lp_setup_try_clear_zs(struct lp_setup_context *setup,
    enum pipe_format format = setup->fb.zsbuf.format;
 
    const uint32_t zmask32 = (flags & PIPE_CLEAR_DEPTH) ? ~0U : 0U;
-   const uint8_t smask8 = (flags & PIPE_CLEAR_STENCIL) ? ~0U : 0U;
+   const uint8_t smask8 = (flags & PIPE_CLEAR_STENCIL) ? 0xFF : 0x00;
 
    uint64_t zsvalue = util_pack64_z_stencil(format, depth, stencil);
    uint64_t zsmask = util_pack64_mask_z_stencil(format, zmask32, smask8);
@@ -756,6 +756,21 @@ lp_setup_set_alpha_ref_value(struct lp_setup_context *setup,
    }
 }
 
+void
+lp_setup_set_depth_bounds_test_value(struct lp_setup_context *setup,
+                                     float min_depth_bounds,
+                                     float max_depth_bounds)
+{
+   LP_DBG(DEBUG_SETUP, "%s %f %f\n",
+          __func__, min_depth_bounds, max_depth_bounds);
+
+   if (setup->fs.current.jit_context.min_depth_bounds != min_depth_bounds ||
+       setup->fs.current.jit_context.max_depth_bounds != max_depth_bounds) {
+      setup->fs.current.jit_context.min_depth_bounds = min_depth_bounds;
+      setup->fs.current.jit_context.max_depth_bounds = max_depth_bounds;
+      setup->dirty |= LP_SETUP_NEW_FS;
+   }
+}
 
 void
 lp_setup_set_stencil_ref_values(struct lp_setup_context *setup,
@@ -1143,7 +1158,7 @@ try_update_scene_state(struct lp_setup_context *setup)
                 sizeof setup->fs.current.jit_context);
          memcpy(&stored->jit_resources,
                 &setup->fs.current.jit_resources,
-                sizeof setup->fs.current.jit_resources);         
+                sizeof setup->fs.current.jit_resources);
 
          stored->variant = setup->fs.current.variant;
 

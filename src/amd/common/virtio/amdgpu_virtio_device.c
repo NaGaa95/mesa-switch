@@ -63,11 +63,11 @@ static void amdvgpu_device_reference(struct amdvgpu_device **dst,
       dev = *dst;
 
       /* Destroy BOs before closing vdrm */
-      hash_table_foreach(dev->handle_to_vbo, entry) {
-         struct amdvgpu_bo *bo = entry->data;
+      hash_table_u64_foreach(dev->handle_to_vbo, entry) {
+         struct amdvgpu_bo *bo = entry.data;
          amdvgpu_bo_free(dev, bo);
       }
-      _mesa_hash_table_destroy(dev->handle_to_vbo, NULL);
+      _mesa_hash_table_u64_destroy(dev->handle_to_vbo);
       /* Destroy contextx. */
       hash_table_foreach(&dev->contexts, entry)
          amdvgpu_cs_ctx_free(dev, (uint32_t)(uintptr_t)entry->key);
@@ -136,7 +136,7 @@ int amdvgpu_device_initialize(int fd, uint32_t *drm_major, uint32_t *drm_minor,
    simple_mtx_init(&dev->handle_to_vbo_mutex, mtx_plain);
    simple_mtx_init(&dev->contexts_mutex, mtx_plain);
 
-   dev->handle_to_vbo = _mesa_hash_table_create_u32_keys(NULL);
+   dev->handle_to_vbo = _mesa_hash_table_u64_create(NULL);
 
    p_atomic_set(&dev->next_blob_id, 1);
 
@@ -189,7 +189,7 @@ int amdvgpu_device_initialize(int fd, uint32_t *drm_major, uint32_t *drm_minor,
 init_sync_provider:
    *p = vdrm_vpipe_get_sync(dev->vdev);
    if (!(*p))
-      *p = util_sync_provider_drm(fd);
+      *p = util_sync_provider_drm(dev->fd);
 
    return 0;
 }

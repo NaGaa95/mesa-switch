@@ -53,7 +53,6 @@
 
 #ifdef __HAIKU__
 #include <sys/param.h>
-#undef ALIGN
 #endif
 
 #ifdef __cplusplus
@@ -679,29 +678,7 @@ util_memcpy_cpu_to_le32(void * restrict dest, const void * restrict src, size_t 
 }
 
 /**
- * Align a value up to an alignment value
- *
- * If \c value is not already aligned to the requested alignment value, it
- * will be rounded up.
- *
- * \param value  Value to be rounded
- * \param alignment  Alignment value to be used.  This must be a power of two.
- *
- * \sa ROUND_DOWN_TO()
- */
-
-#if defined(ALIGN)
-#undef ALIGN
-#endif
-static inline uint32_t
-ALIGN(uint32_t value, uint32_t alignment)
-{
-   assert(util_is_power_of_two_nonzero(alignment));
-   return ALIGN_POT(value, alignment);
-}
-
-/**
- * Like ALIGN(), but works with a non-power-of-two alignment.
+ * Like align(), but works with a non-power-of-two alignment.
  */
 static inline uintptr_t
 ALIGN_NPOT(uintptr_t value, int32_t alignment)
@@ -719,13 +696,19 @@ ALIGN_NPOT(uintptr_t value, int32_t alignment)
  * \param value  Value to be rounded
  * \param alignment  Alignment value to be used.  This must be a power of two.
  *
- * \sa ALIGN()
+ * \sa align()
  */
 static inline uint64_t
 ROUND_DOWN_TO(uint64_t value, uint32_t alignment)
 {
    assert(util_is_power_of_two_nonzero(alignment));
    return ((value) & ~(uint64_t)(alignment - 1));
+}
+
+static inline uint64_t
+ROUND_DOWN_TO_NPOT(uint64_t value, uint32_t alignment)
+{
+   return value - (value % alignment);
 }
 
 /**
@@ -761,9 +744,8 @@ align_uintptr(uintptr_t value, uintptr_t alignment)
 static inline size_t
 util_align_npot(size_t value, size_t alignment)
 {
-   if (value % alignment)
-      return value + (alignment - (value % alignment));
-   return value;
+   assert(alignment > 0);
+   return (value + alignment - 1) / alignment * alignment;
 }
 
 static inline size_t
@@ -886,9 +868,45 @@ util_is_aligned(uintmax_t n, uintmax_t a)
 }
 
 static inline bool
+util_ptr_is_aligned(const void *ptr, uintmax_t a)
+{
+   return util_is_aligned((uintptr_t) ptr, a);
+}
+
+static inline bool
 util_is_sint16(int x)
 {
    return x >= INT16_MIN && x <= INT16_MAX;
+}
+
+static inline bool
+util_is_uint16(int x)
+{
+   return x >= 0 && x <= UINT16_MAX;
+}
+
+/* Heuristic to determine whether a uint32_t is probably actually a float
+ * (http://stackoverflow.com/a/2953466)
+ */
+static inline bool
+util_is_probably_float(uint32_t bits)
+{
+   int exp = ((bits & 0x7f800000U) >> 23) - 127;
+   uint32_t mant = bits & 0x007fffff;
+
+   /* +- 0.0 */
+   if (exp == -127 && mant == 0)
+      return true;
+
+   /* +- 1 billionth to 1 billion */
+   if (-30 <= exp && exp <= 30)
+      return true;
+
+   /* some value with only a few binary digits */
+   if ((mant & 0x0000ffff) == 0)
+      return true;
+
+   return false;
 }
 
 #ifdef __cplusplus

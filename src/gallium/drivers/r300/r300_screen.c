@@ -79,17 +79,17 @@ static const char* r300_get_name(struct pipe_screen* pscreen)
 
 static void r300_disk_cache_create(struct r300_screen* r300screen)
 {
-    struct mesa_sha1 ctx;
-    unsigned char sha1[20];
-    char cache_id[20 * 2 + 1];
+    blake3_hasher ctx;
+    unsigned char blake3[BLAKE3_KEY_LEN];
+    char cache_id[BLAKE3_HEX_LEN];
 
-    _mesa_sha1_init(&ctx);
+    _mesa_blake3_init(&ctx);
     if (!disk_cache_get_function_identifier(r300_disk_cache_create,
                                             &ctx))
         return;
 
-    _mesa_sha1_final(&ctx, sha1);
-    mesa_bytes_to_hex(cache_id, sha1, 20);
+    _mesa_blake3_final(&ctx, blake3);
+    mesa_bytes_to_hex(cache_id, blake3, BLAKE3_KEY_LEN);
 
     r300screen->disk_shader_cache =
                     disk_cache_create(r300_get_family_name(r300screen),
@@ -123,7 +123,6 @@ static struct disk_cache* r300_get_disk_shader_cache(struct pipe_screen* pscreen
    .lower_insert_byte = true,                 \
    .lower_insert_word = true,                 \
    .lower_uniforms_to_ubo = true,             \
-   .lower_vector_cmp = true,                  \
    .no_integers = true
 
 static const nir_shader_compiler_options r500_vs_compiler_options = {

@@ -148,7 +148,7 @@ static void preproc_vecs(pco_func *func)
             .instr = instr,
             .ref = psrc,
          };
-         util_dynarray_append(uses, pco_use, use);
+         util_dynarray_append(uses, use);
       }
    }
 
@@ -461,9 +461,10 @@ static bool pco_ra_func(pco_func *func, pco_ra_ctx *ctx)
 
    preproc_vecs(func);
 
+   unsigned num_rsvd_vtxins = func->parent_shader->data.common.vtxins;
    unsigned num_ssas = func->next_ssa;
    unsigned num_vregs = func->next_vreg;
-   unsigned num_vars = num_ssas + num_vregs;
+   unsigned num_vars = num_ssas + num_vregs + num_rsvd_vtxins;
 
    /* Collect used bit sizes. */
    uint8_t used_bits = 0;
@@ -492,7 +493,9 @@ static bool pco_ra_func(pco_func *func, pco_ra_ctx *ctx)
    assert(only_32bit);
 
    struct ra_regs *ra_regs =
-      ra_alloc_reg_set(func, ctx->allocable_temps, !only_32bit);
+      ra_alloc_reg_set(func,
+                       ctx->allocable_temps + ctx->allocable_vtxins,
+                       !only_32bit);
 
    BITSET_WORD *comps =
       rzalloc_array_size(ra_regs, sizeof(*comps), BITSET_WORDS(num_ssas));
@@ -609,6 +612,11 @@ static bool pco_ra_func(pco_func *func, pco_ra_ctx *ctx)
 
       for (unsigned t = 0; t < ctx->allocable_temps - (stride - 1); ++t)
          ra_class_add_reg(ra_class, t);
+
+      for (unsigned t = ctx->allocable_temps;
+           t < ctx->allocable_temps + ctx->allocable_vtxins - (stride - 1);
+           ++t)
+         ra_class_add_reg(ra_class, t);
    }
 
    ra_set_finalize(ra_regs, NULL);
@@ -685,6 +693,26 @@ static bool pco_ra_func(pco_func *func, pco_ra_ctx *ctx)
 
          live_ranges[src.val].end =
             MAX2(live_ranges[src.val].end, instr->index);
+      }
+
+      /* Ensure that vertex input registers with pre-initialised data are not
+       * clobbered too early.
+       */
+      if (ctx->allocable_vtxins > 0) {
+         pco_foreach_instr_src_vtxin_reg (psrc, instr) {
+            pco_ref src = *psrc;
+
+            /* Place vtxin regs after ssa vars and vregs. */
+            src.val += num_ssas + num_vregs;
+
+            live_ranges[src.val].end =
+               MAX2(live_ranges[src.val].end, instr->index);
+            live_ranges[src.val].start = 0;
+
+            ra_set_node_reg(ra_graph,
+                            src.val,
+                            psrc->val + ctx->allocable_temps);
+         }
       }
    }
 
@@ -869,8 +897,7 @@ static bool pco_ra_func(pco_func *func, pco_ra_ctx *ctx)
             override ? ra_get_node_reg(ra_graph, override->ref.val)
                      : ra_get_node_reg(ra_graph, instr->dest[0].val);
 
-         struct util_dynarray copies;
-         util_dynarray_init(&copies, NULL);
+         struct util_dynarray copies = UTIL_DYNARRAY_INIT;
 
          unsigned highest_temp = 0;
          unsigned lowest_temp = ~0;
@@ -899,16 +926,31 @@ static bool pco_ra_func(pco_func *func, pco_ra_ctx *ctx)
                }
 
                for (unsigned u = 0; u < chans; ++u) {
-                  pco_ref dest =
-                     pco_ref_hwreg(temp_dest_base + offset, PCO_REG_CLASS_TEMP);
+                  pco_ref dest;
+                  if (temp_dest_base + offset >= ctx->allocable_temps) {
+                     dest = pco_ref_hwreg(temp_dest_base + offset -
+                                             ctx->allocable_temps,
+                                          PCO_REG_CLASS_VTXIN);
+                  } else {
+                     dest = pco_ref_hwreg(temp_dest_base + offset,
+                                          PCO_REG_CLASS_TEMP);
+                  }
+
                   dest = pco_ref_offset(dest, u);
                   dest = pco_ref_offset(dest, ctx->temp_alloc_offset);
 
                   pco_ref src;
-                  if (pco_ref_is_ssa(*psrc) || pco_ref_is_vreg(*psrc))
-                     src = pco_ref_hwreg(temp_src_base, PCO_REG_CLASS_TEMP);
-                  else
+                  if (pco_ref_is_ssa(*psrc) || pco_ref_is_vreg(*psrc)) {
+                     if (temp_src_base >= ctx->allocable_temps) {
+                        src =
+                           pco_ref_hwreg(temp_src_base - ctx->allocable_temps,
+                                         PCO_REG_CLASS_VTXIN);
+                     } else {
+                        src = pco_ref_hwreg(temp_src_base, PCO_REG_CLASS_TEMP);
+                     }
+                  } else {
                      src = pco_ref_chans(*psrc, 1);
+                  }
 
                   src = pco_ref_offset(src, u);
                   src = pco_ref_offset(src, ctx->temp_alloc_offset);
@@ -945,7 +987,7 @@ static bool pco_ra_func(pco_func *func, pco_ra_ctx *ctx)
                      }
                      */
 
-                     util_dynarray_append(&copies, pco_copy, copy);
+                     util_dynarray_append(&copies, copy);
                   }
                }
 
@@ -982,7 +1024,15 @@ static bool pco_ra_func(pco_func *func, pco_ra_ctx *ctx)
          pdest->type = PCO_REF_TYPE_REG;
          pdest->reg_class = PCO_REG_CLASS_TEMP;
          pdest->val = val + ctx->temp_alloc_offset;
-         temps = MAX2(temps, dest_temps + ctx->temp_alloc_offset);
+
+         /* Got a vertex input register. */
+         if (val >= ctx->allocable_temps) {
+            pdest->reg_class = PCO_REG_CLASS_VTXIN;
+            pdest->val = val - ctx->allocable_temps;
+            vtxins = MAX2(vtxins, dest_temps - ctx->allocable_temps);
+         } else {
+            temps = MAX2(temps, dest_temps + ctx->temp_alloc_offset);
+         }
       }
 
       pco_foreach_instr_src_ssa (psrc, instr) {
@@ -997,6 +1047,12 @@ static bool pco_ra_func(pco_func *func, pco_ra_ctx *ctx)
          psrc->type = PCO_REF_TYPE_REG;
          psrc->reg_class = PCO_REG_CLASS_TEMP;
          psrc->val = val + ctx->temp_alloc_offset;
+
+         /* Got a vertex input register. */
+         if (val >= ctx->allocable_temps) {
+            psrc->reg_class = PCO_REG_CLASS_VTXIN;
+            psrc->val = val - ctx->allocable_temps;
+         }
       }
 
       pco_foreach_instr_dest_vreg (pdest, instr) {
@@ -1006,7 +1062,15 @@ static bool pco_ra_func(pco_func *func, pco_ra_ctx *ctx)
          pdest->type = PCO_REF_TYPE_REG;
          pdest->reg_class = PCO_REG_CLASS_TEMP;
          pdest->val = val + ctx->temp_alloc_offset;
-         temps = MAX2(temps, dest_temps);
+
+         /* Got a vertex input register. */
+         if (val >= ctx->allocable_temps) {
+            pdest->reg_class = PCO_REG_CLASS_VTXIN;
+            pdest->val = val - ctx->allocable_temps;
+            vtxins = MAX2(vtxins, dest_temps - ctx->allocable_temps);
+         } else {
+            temps = MAX2(temps, dest_temps);
+         }
       }
 
       pco_foreach_instr_src_vreg (psrc, instr) {
@@ -1015,6 +1079,12 @@ static bool pco_ra_func(pco_func *func, pco_ra_ctx *ctx)
          psrc->type = PCO_REF_TYPE_REG;
          psrc->reg_class = PCO_REG_CLASS_TEMP;
          psrc->val = val + ctx->temp_alloc_offset;
+
+         /* Got a vertex input register. */
+         if (val >= ctx->allocable_temps) {
+            psrc->reg_class = PCO_REG_CLASS_VTXIN;
+            psrc->val = val - ctx->allocable_temps;
+         }
       }
 
       /* Drop no-ops. */
@@ -1028,6 +1098,7 @@ static bool pco_ra_func(pco_func *func, pco_ra_ctx *ctx)
    ralloc_free(ra_regs);
 
    func->temps = temps;
+   func->vtxins = vtxins;
 
    if (pco_should_print_shader(func->parent_shader) && PCO_DEBUG_PRINT(RA)) {
       printf(
@@ -1061,12 +1132,27 @@ bool pco_ra(pco_shader *shader)
     * unsigned opt_temps = rogue_get_optimal_temps(shader->ctx->dev_info);
     */
 
+   /* If any vertex input registers are already used, round up to the nearest
+    * multiple of 4 as vertex input registers are allocated in blocks of 4.
+    *
+    * This number is used by default as the maximum safe number of vertex input
+    * registers that can be used is not currently known.
+    */
+   unsigned hw_vtxins = ALIGN_POT(shader->data.common.vtxins,
+                                  ROGUE_USRM_GRANULARITY_IN_REGISTERS);
+
+   if (shader->stage != MESA_SHADER_FRAGMENT && !shader->is_internal) {
+      if (PCO_DEBUG(ALLOC_EXTRA_VTXINS)) {
+         hw_vtxins = MAX2(hw_vtxins, rogue_get_vtxins());
+      }
+   }
+
    /* TODO: different number of temps available if preamble/phase change. */
    /* TODO: different number of temps available if barriers are in use. */
-   /* TODO: support for internal and vtxin registers. */
+   /* TODO: support for internal registers. */
    pco_ra_ctx ctx = {
       .allocable_temps = hw_temps,
-      .allocable_vtxins = 0,
+      .allocable_vtxins = hw_vtxins,
       .allocable_interns = 0,
    };
 
@@ -1089,6 +1175,8 @@ bool pco_ra(pco_shader *shader)
          progress |= pco_ra_func(func, &ctx);
 
       shader->data.common.temps = MAX2(shader->data.common.temps, func->temps);
+      shader->data.common.vtxins =
+         MAX2(shader->data.common.vtxins, func->vtxins);
    }
 
    shader->data.common.spilled_temps = ctx.spilled_temps;

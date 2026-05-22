@@ -835,7 +835,7 @@ struct dzn_pipeline_layout {
       ID3D12RootSignature *sig;
    } root;
    struct {
-      uint8_t hash[SHA1_DIGEST_LENGTH];
+      uint8_t hash[BLAKE3_KEY_LEN];
    } stages[MESA_VULKAN_SHADER_STAGES];
 };
 

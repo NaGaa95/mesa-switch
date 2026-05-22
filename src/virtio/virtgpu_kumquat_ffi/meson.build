@@ -3,9 +3,15 @@
 
 inc_virtgpu_kumquat_ffi = include_directories('include')
 
-dep_log = dependency('log',
+dep_rust_log = dependency('rust-log',
   version: '>= 0.4.22',
   fallback: ['log-0.4-rs', 'dep_log'],
+  required: true,
+)
+
+dep_rust_libc = dependency('rust-libc',
+  version: '>= 0.2.168',
+  fallback: ['libc-0.2-rs', 'dep_libc'],
   required: true,
 )
 
@@ -20,10 +26,11 @@ libvirtgpu_kumquat_ffi = static_library(
   gnu_symbol_visibility : 'hidden',
   rust_abi : 'c',
   rust_args : [
+    rust_global_args,
     virtgpu_kumquat_ffi_args,
   ],
   link_with: [libmesa_protocols, libmesa_rust_util, libvirtgpu_kumquat],
-  dependencies: [dep_mesa3d_util, dep_log]
+  dependencies: [dep_mesa3d_util, dep_rust_log, dep_rust_libc]
 )
 
 dep_virtgpu_kumquat_ffi = declare_dependency(

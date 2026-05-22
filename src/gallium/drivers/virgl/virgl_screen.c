@@ -901,31 +901,31 @@ static struct disk_cache *virgl_get_disk_shader_cache (struct pipe_screen *pscre
 
 static void virgl_disk_cache_create(struct virgl_screen *screen)
 {
-   struct mesa_sha1 sha1_ctx;
-   _mesa_sha1_init(&sha1_ctx);
+   blake3_hasher blake3_ctx;
+   _mesa_blake3_init(&blake3_ctx);
 
-#ifdef HAVE_DL_ITERATE_PHDR
+#if HAVE_BUILD_ID
    const struct build_id_note *note =
       build_id_find_nhdr_for_addr(virgl_disk_cache_create);
    assert(note);
 
    unsigned build_id_len = build_id_length(note);
-   assert(build_id_len == 20); /* sha1 */
+   assert(build_id_len == BUILD_ID_EXPECTED_HASH_LENGTH); /* sha1 */
 
    const uint8_t *id_sha1 = build_id_data(note);
    assert(id_sha1);
 
-   _mesa_sha1_update(&sha1_ctx, id_sha1, build_id_len);
+   _mesa_blake3_update(&blake3_ctx, id_sha1, build_id_len);
 #endif
 
    /* When we switch the host the caps might change and then we might have to
     * apply different lowering. */
-   _mesa_sha1_update(&sha1_ctx, &screen->caps, sizeof(screen->caps));
+   _mesa_blake3_update(&blake3_ctx, &screen->caps, sizeof(screen->caps));
 
-   uint8_t sha1[20];
-   _mesa_sha1_final(&sha1_ctx, sha1);
-   char timestamp[41];
-   _mesa_sha1_format(timestamp, sha1);
+   uint8_t blake3[BLAKE3_KEY_LEN];
+   _mesa_blake3_final(&blake3_ctx, blake3);
+   char timestamp[BLAKE3_HEX_LEN];
+   _mesa_blake3_format(timestamp, blake3);
 
    screen->disk_cache = disk_cache_create("virgl", timestamp, 0);
 }
@@ -1068,7 +1068,6 @@ virgl_create_screen(struct virgl_winsys *vws, const struct pipe_screen_config *c
    screen->compiler_options.no_integers = screen->caps.caps.v1.glsl_level < 130;
    screen->compiler_options.lower_ffma32 = true;
    screen->compiler_options.fuse_ffma32 = false;
-   screen->compiler_options.lower_ldexp = true;
    screen->compiler_options.lower_image_offset_to_range_base = true;
    screen->compiler_options.lower_atomic_offset_to_range_base = true;
    screen->compiler_options.support_indirect_outputs = BITFIELD_BIT(MESA_SHADER_TESS_CTRL);

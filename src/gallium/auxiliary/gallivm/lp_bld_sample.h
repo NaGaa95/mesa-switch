@@ -38,8 +38,6 @@
 
 #include "pipe/p_state.h"
 #include "util/format/u_formats.h"
-#include "util/u_debug.h"
-#include "gallivm/lp_bld.h"
 #include "gallivm/lp_bld_type.h"
 #include "gallivm/lp_bld_swizzle.h"
 
@@ -864,6 +862,7 @@ lp_build_img_op_soa(const struct lp_static_texture_state *static_texture_state,
                     struct lp_sampler_dynamic_state *dynamic_state,
                     struct gallivm_state *gallivm,
                     const struct lp_img_params *params,
+                    bool is64,
                     LLVMValueRef *outdata);
 
 void
@@ -894,7 +893,8 @@ void
 lp_build_image_op_array_case(struct lp_build_img_op_array_switch *switch_info,
                              int idx,
                              const struct lp_static_texture_state *static_texture_state,
-                             struct lp_sampler_dynamic_state *dynamic_state);
+                             struct lp_sampler_dynamic_state *dynamic_state,
+                             bool is64);
 
 void
 lp_build_image_op_array_fini_soa(struct lp_build_img_op_array_switch *switch_info);

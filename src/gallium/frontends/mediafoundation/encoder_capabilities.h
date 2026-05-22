@@ -128,6 +128,7 @@ class encoder_capabilities
    bool m_bHWSupportSliceModeMB = false;
    bool m_bHWSupportSliceModeBits = false;
    bool m_bHWSupportSliceModeMBRow = false;
+   bool m_bHWSupportSliceModeAuto = false;
 
    // Two pass encode
    union pipe_enc_cap_two_pass m_TwoPassSupport = {};
@@ -140,4 +141,7 @@ class encoder_capabilities
 
    // Spatial Adaptive Quantization
    union pipe_enc_cap_spatial_adaptive_quantization m_HWSupportSpatialAdaptiveQuantization = {};
+
+   // PIPE_VIDEO_CAP_ENC_READABLE_RECONSTRUCTED_PICTURE
+   bool m_bHWSupportReadableReconstructedPicture = false;
 };

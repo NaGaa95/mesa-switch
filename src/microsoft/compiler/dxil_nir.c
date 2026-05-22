@@ -602,7 +602,7 @@ dxil_nir_lower_shared_to_var(nir_shader *nir)
       NIR_PASS(progress, nir, nir_lower_vars_to_ssa);
       NIR_PASS(progress, nir, nir_opt_constant_folding);
       NIR_PASS(progress, nir, nir_opt_algebraic);
-      NIR_PASS(progress, nir, nir_copy_prop);
+      NIR_PASS(progress, nir, nir_opt_copy_prop);
       NIR_PASS(progress, nir, nir_opt_cse);
       NIR_PASS(progress, nir, nir_opt_dce);
    } while (progress);
@@ -732,7 +732,7 @@ cast_phi(nir_builder *b, nir_phi_instr *phi, unsigned new_bit_size)
       assert(num_components == 0 || num_components == src->src.ssa->num_components);
       num_components = src->src.ssa->num_components;
 
-      b->cursor = nir_after_instr_and_phis(src->src.ssa->parent_instr);
+      b->cursor = nir_after_instr_and_phis(nir_def_instr(src->src.ssa));
 
       nir_def *cast = nir_u2uN(b, src->src.ssa, new_bit_size);
 
@@ -798,9 +798,9 @@ struct dxil_nir_split_clip_cull_distance_params {
  * 
  * This pass can deal with splitting across two axes:
  * 1. Given { float clip[5]; float cull[3]; }, split clip into clip[4] and clip1[1]. This is
- *    what's produced by nir_lower_clip_cull_distance_array_vars.
+ *    what's produced by nir_merge_clip_cull_distance_vars.
  * 2. Given { float clip[4]; float clipcull[4]; }, split clipcull into clip1[1] and cull[3].
- *    This is what's produced by the sequence of nir_lower_clip_cull_distance_array_vars, then
+ *    This is what's produced by the sequence of nir_merge_clip_cull_distance_vars, then
  *    I/O lowering, vectorization, optimization, and I/O un-lowering.
  */
 static bool
@@ -825,7 +825,7 @@ dxil_nir_split_clip_cull_distance_instr(nir_builder *b,
    nir_variable *new_var = params->new_var[new_var_idx];
 
    /* The location should only be inside clip distance, because clip
-    * and cull should've been merged by nir_lower_clip_cull_distance_array_vars()
+    * and cull should've been merged by nir_merge_clip_cull_distance_vars()
     */
    assert(var->data.location == VARYING_SLOT_CLIP_DIST0 ||
           var->data.location == VARYING_SLOT_CLIP_DIST1);
@@ -1544,7 +1544,7 @@ lower_ubo_array_one_to_static(struct nir_builder *b,
    if (nir_src_is_const(index->src[0]) && nir_src_as_uint(index->src[0]) == 0)
       return false;
 
-   if (nir_intrinsic_desc_type(index) != VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER)
+   if (nir_intrinsic_desc_type(index) != nir_descriptor_type_uniform_buffer)
       return false;
 
    b->cursor = nir_instr_remove(&index->instr);
@@ -2113,10 +2113,11 @@ lower_subgroup_scan(nir_builder *b, nir_intrinsic_instr *intr, void *data)
    nir_pop_if(b, if_active_thread);
 
    nir_store_var(b, loop_counter_var, nir_iadd_imm(b, loop_counter, 1), 1);
-   nir_jump(b, nir_jump_continue);
+
+   nir_push_else(b, nif);
+   nir_jump(b, nir_jump_break);
    nir_pop_if(b, nif);
 
-   nir_jump(b, nir_jump_break);
    nir_pop_loop(b, loop);
 
    result = nir_load_var(b, result_var);

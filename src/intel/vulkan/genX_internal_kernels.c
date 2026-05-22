@@ -20,16 +20,29 @@
 # include "intel_gfx200_shaders_binding.h"
 #elif GFX_VERx10 == 300
 # include "intel_gfx300_shaders_binding.h"
+#elif GFX_VERx10 == 350
+# include "intel_gfx350_shaders_binding.h"
 #else
 # error "Unsupported generation"
 #endif
 
 #include "genxml/gen_macros.h"
 
-#define load_param(b, bit_size, struct_name, field_name)          \
-   nir_load_uniform(b, 1, bit_size, nir_imm_int(b, 0),            \
-                    .base = offsetof(struct_name, field_name),   \
-                    .range = bit_size / 8)
+static nir_def *
+_load_param(nir_builder *b, unsigned bit_size, unsigned base, unsigned range)
+{
+   return
+      (b->shader->info.stage == MESA_SHADER_COMPUTE &&
+       GFX_VERx10 >= 125) ?
+      nir_load_shader_indirect_data_intel(
+         b, 1, bit_size, nir_load_indirect_address_intel(b),
+         .base = base, .range = range) :
+      nir_load_push_data_intel(b, 1, bit_size, nir_imm_int(b, 0),
+                               .base = base, .range = range);
+}
+
+#define load_param(b, bit_size, struct_name, field_name) \
+   _load_param(b, bit_size, offsetof(struct_name, field_name), bit_size / 8)
 
 static nir_def *
 load_fragment_index(nir_builder *b)

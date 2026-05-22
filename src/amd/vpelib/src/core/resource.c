@@ -418,7 +418,7 @@ static void calculate_recout(struct segment_ctx *segment)
     }
 }
 
-void calculate_scaling_ratios(struct scaler_data *scl_data, struct vpe_rect *src_rect,
+void vpe_calculate_scaling_ratios(struct scaler_data *scl_data, struct vpe_rect *src_rect,
     struct vpe_rect *dst_rect, enum vpe_surface_pixel_format format)
 {
     // no rotation support
@@ -605,6 +605,18 @@ static enum vpe_status calculate_inits_and_viewports(struct segment_ctx *segment
     return VPE_STATUS_OK;
 }
 
+enum lut3d_type vpe_get_stream_lut3d_type(struct stream_ctx *stream_ctx)
+{
+    enum lut3d_type lut3d;
+
+    if ((stream_ctx->stream.tm_params.UID == 0) || (!stream_ctx->stream.tm_params.enable_3dlut)) {
+        lut3d = LUT3D_TYPE_NONE;
+    } else {
+        lut3d = LUT3D_TYPE_CPU;
+    }
+    return lut3d;
+}
+
 uint16_t vpe_get_num_segments(struct vpe_priv *vpe_priv, const struct vpe_rect *src,
     const struct vpe_rect *dst, const uint32_t max_seg_width)
 {
@@ -613,7 +625,7 @@ uint16_t vpe_get_num_segments(struct vpe_priv *vpe_priv, const struct vpe_rect *
     return (uint16_t)(max(max(num_seg_src, num_seg_dst), 1));
 }
 
-bool should_generate_cmd_info(struct stream_ctx *stream_ctx)
+bool vpe_should_generate_cmd_info(struct stream_ctx *stream_ctx)
 {
     enum vpe_stream_type stream_type = stream_ctx->stream_type;
 
@@ -819,6 +831,14 @@ void vpe_backend_config_callback(
 
     vpe_priv->vpe_desc_writer.add_config_desc(
         &vpe_priv->vpe_desc_writer, cfg_base_gpu, false, (uint8_t)vpe_priv->config_writer.buf->tmz);
+}
+
+uint32_t vpe_get_recout_width_alignment(const struct vpe_build_param *params)
+{
+    uint16_t recout_alignment;
+        recout_alignment = VPE_NO_ALIGNMENT;
+
+    return recout_alignment;
 }
 
 bool vpe_rec_is_equal(struct vpe_rect rec1, struct vpe_rect rec2)

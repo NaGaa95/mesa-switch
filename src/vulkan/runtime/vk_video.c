@@ -46,6 +46,7 @@ vk_video_session_init(struct vk_device *device,
    vid->max_active_ref_pics = create_info->maxActiveReferencePictures;
    vid->luma_bit_depth = create_info->pVideoProfile->lumaBitDepth;
    vid->chroma_bit_depth = create_info->pVideoProfile->chromaBitDepth;
+   vid->chroma_subsampling = create_info->pVideoProfile->chromaSubsampling;
 
    switch (vid->op) {
    case VK_VIDEO_CODEC_OPERATION_DECODE_H264_BIT_KHR: {
@@ -107,6 +108,8 @@ vk_video_session_init(struct vk_device *device,
          vk_find_struct_const(create_info->pVideoProfile->pNext, VIDEO_ENCODE_USAGE_INFO_KHR);
       const struct VkVideoEncodeSessionIntraRefreshCreateInfoKHR *intra_refresh =
          vk_find_struct_const(create_info->pNext, VIDEO_ENCODE_SESSION_INTRA_REFRESH_CREATE_INFO_KHR);
+      const struct VkVideoEncodeProfileRgbConversionInfoVALVE *rgb_profile_info =
+         vk_find_struct_const(create_info->pVideoProfile->pNext, VIDEO_ENCODE_PROFILE_RGB_CONVERSION_INFO_VALVE);
       if (encode_usage_profile) {
          vid->enc_usage.video_usage_hints = encode_usage_profile->videoUsageHints;
          vid->enc_usage.video_content_hints = encode_usage_profile->videoContentHints;
@@ -118,6 +121,16 @@ vk_video_session_init(struct vk_device *device,
       }
       if (intra_refresh)
          vid->intra_refresh_mode = intra_refresh->intraRefreshMode;
+      if (rgb_profile_info && rgb_profile_info->performEncodeRgbConversion) {
+         const struct VkVideoEncodeSessionRgbConversionCreateInfoVALVE *rgb_info =
+            vk_find_struct_const(create_info->pNext, VIDEO_ENCODE_SESSION_RGB_CONVERSION_CREATE_INFO_VALVE);
+
+         vid->perform_rgb_conversion = true;
+         vid->rgb_conv.rgb_model = rgb_info->rgbModel;
+         vid->rgb_conv.rgb_range = rgb_info->rgbRange;
+         vid->rgb_conv.x_chroma_offset = rgb_info->xChromaOffset;
+         vid->rgb_conv.y_chroma_offset = rgb_info->yChromaOffset;
+      }
    }
 
    return VK_SUCCESS;
@@ -219,8 +232,9 @@ vk_video_deep_copy_h265_sps(struct vk_video_h265_sps *dst,
       dst->base.pScalingLists = &dst->scaling_lists;
    }
 
-   copy_or_zero_init(&dst->short_term_ref_pic_set, src->pShortTermRefPicSet, sizeof(StdVideoH265ShortTermRefPicSet));
-   dst->base.pShortTermRefPicSet = &dst->short_term_ref_pic_set;
+   copy_or_zero_init(&dst->short_term_ref_pic_set, src->pShortTermRefPicSet,
+                     sizeof(StdVideoH265ShortTermRefPicSet) * src->num_short_term_ref_pic_sets);
+   dst->base.pShortTermRefPicSet = dst->short_term_ref_pic_set;
 
    copy_or_zero_init(&dst->long_term_ref_pics_sps, src->pLongTermRefPicsSps, sizeof(StdVideoH265LongTermRefPicsSps));
    dst->base.pLongTermRefPicsSps = &dst->long_term_ref_pics_sps;

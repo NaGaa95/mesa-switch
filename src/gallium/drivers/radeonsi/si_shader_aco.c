@@ -29,19 +29,11 @@
 #include "nir.h"
 
 static void
-si_aco_compiler_debug(void *private_data, enum aco_compiler_debug_level level,
-                      const char *message)
-{
-   struct util_debug_callback *debug = private_data;
-
-   util_debug_message(debug, SHADER_INFO, "%s\n", message);
-}
-
-static void
 si_fill_aco_options(struct si_screen *screen, mesa_shader_stage stage,
                     mesa_shader_stage next_merged_stage, struct aco_compiler_options *options,
                     struct util_debug_callback *debug)
 {
+   options->compiler_info = &screen->info.compiler_info;
    options->dump_ir = si_can_dump_shader(screen, stage, SI_DUMP_ACO_IR);
    options->dump_preoptir = si_can_dump_shader(screen, stage, SI_DUMP_INIT_ACO_IR);
    options->record_asm = si_can_dump_shader(screen, stage, SI_DUMP_ASM) ||
@@ -51,14 +43,9 @@ si_fill_aco_options(struct si_screen *screen, mesa_shader_stage stage,
    options->record_ir = screen->record_llvm_ir;
    options->is_opengl = true;
 
-   options->has_ls_vgpr_init_bug = screen->info.has_ls_vgpr_init_bug;
-   options->load_grid_size_from_user_sgpr = true;
    options->family = screen->info.family;
    options->gfx_level = screen->info.gfx_level;
    options->address32_hi = screen->info.address32_hi;
-
-   options->debug.func = si_aco_compiler_debug;
-   options->debug.private_data = debug;
 }
 
 static void
@@ -307,7 +294,7 @@ si_aco_build_ps_epilog(struct aco_compiler_options *options,
       .alpha_to_one = key->ps_epilog.states.alpha_to_one,
       .alpha_to_coverage_via_mrtz = key->ps_epilog.states.alpha_to_coverage_via_mrtz,
       .clamp_color = key->ps_epilog.states.clamp_color,
-      .mrt0_is_dual_src = key->ps_epilog.states.dual_src_blend_swizzle,
+      .mrt0_is_dual_src = key->ps_epilog.states.dual_src_blend,
       /* rbplus_depth_only_opt only affects registers, not the shader */
       .kill_depth = key->ps_epilog.states.kill_z,
       .kill_stencil = key->ps_epilog.states.kill_stencil,

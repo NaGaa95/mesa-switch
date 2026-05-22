@@ -122,6 +122,11 @@ struct pipe_screen {
    const char *(*get_vendor)(struct pipe_screen *);
 
    /**
+    * Returns the ML device for this screen, or NULL if ML is not supported.
+    */
+   struct pipe_ml_device *(*get_ml_device)(struct pipe_screen *);
+
+   /**
     * Returns the device vendor.
     *
     * The returned value should return the actual device vendor/manufacturer,
@@ -162,6 +167,14 @@ struct pipe_screen {
     * wait for rendering to complete (which cannot be achieved with queries).
     */
    uint64_t (*get_timestamp)(struct pipe_screen *);
+
+   /**
+    * If the driver supports PIPE_QUERY_TIMESTAMP_RAW, this function
+    * must be implemented to convert the drivers raw timestamp to ns.
+    * If the driver does not support PIPE_QUERY_TIMESTAMP_RAW, it should
+    * not implement this function.
+    */
+   uint64_t (*convert_timestamp)(struct pipe_screen *, uint64_t raw_timestamp);
 
    /**
     * Return an equivalent canonical format which has the same component sizes
@@ -423,6 +436,12 @@ struct pipe_screen {
                                    uint64_t *fence_value);
 
    /**
+    * Retrieves the Win32 event handle from the fence.
+    */
+   void* (*fence_get_win32_event)(struct pipe_screen *screen,
+                                  struct pipe_fence_handle *fence);
+
+   /**
     * Create a fence from an Win32 handle.
     *
     * This is used for importing a foreign/external fence handle.
@@ -612,8 +631,11 @@ struct pipe_screen {
     *
     * gallium frontends should call this before passing shaders to drivers,
     * and ideally also before shader caching.
+    *
+    * \param optimize  If false, the driver doesn't have to optimize NIR.
     */
-   void (*finalize_nir)(struct pipe_screen *screen, struct nir_shader *nir);
+   void (*finalize_nir)(struct pipe_screen *screen, struct nir_shader *nir,
+                        bool optimize);
 
    /*Separated memory/resource allocations interfaces for Vulkan */
 

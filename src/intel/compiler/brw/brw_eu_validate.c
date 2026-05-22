@@ -1,24 +1,6 @@
 /*
  * Copyright © 2015-2019 Intel Corporation
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
- * IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  */
 
 /** @file
@@ -387,6 +369,8 @@ execution_type_for_type(enum brw_reg_type type)
    case BRW_TYPE_DF:
    case BRW_TYPE_F:
    case BRW_TYPE_HF:
+   case BRW_TYPE_BF8:
+   case BRW_TYPE_HF8:
       return type;
 
    case BRW_TYPE_VF:
@@ -1755,7 +1739,7 @@ special_requirements_for_handling_double_precision_data_types(
       if (devinfo->verx10 >= 125 &&
           (brw_type_is_float_or_bfloat(type) || brw_type_size_bytes(type) == 8)) {
          ERROR_IF(address_mode == BRW_ADDRESS_REGISTER_INDIRECT_REGISTER &&
-                  vstride == BRW_VERTICAL_STRIDE_ONE_DIMENSIONAL,
+                  vstride == STRIDE(BRW_VERTICAL_STRIDE_ONE_DIMENSIONAL),
                   "Vx1 and VxH indirect addressing for Float, Half-Float, "
                   "Double-Float, Quad-Word, and Bfloat16 data must not be used");
       }
@@ -1846,6 +1830,22 @@ instruction_restrictions(const struct brw_isa_info *isa,
       const enum brw_reg_type src1_type = inst->src[1].type;
       const enum brw_reg_type dst_type = inst->dst.type;
 
+      ERROR_IF(brw_type_is_float(dst_type) &&
+               (brw_type_is_int(src0_type) ||
+                brw_type_is_int(src1_type)),
+               "MUL can't mix floats and integer sources.");
+
+      /* Page 971 (page 987 of the PDF), section "Accumulator
+       * Restrictions," of the Broadwell PRM volume 7 says:
+       *
+       *    Integer source operands cannot be accumulators.
+       *
+       * The Skylake and Ice Lake PRMs contain the same text.
+       */
+      ERROR_IF((brw_type_is_int(src0_type) && src0_is_acc(inst)) ||
+               (brw_type_is_int(src1_type) && src1_is_acc(inst)),
+               "In MUL, Integer source operands cannot be accumulators.");
+
       /* Page 966 (page 982 of the PDF) of Broadwell PRM volume 2a says:
        *
        *    When multiplying a DW and any lower precision integer, the DW
@@ -1859,19 +1859,6 @@ instruction_restrictions(const struct brw_isa_info *isa,
                brw_type_size_bytes(src1_type) == 4,
                "When multiplying a DW and any lower precision integer, the "
                "DW operand must be src0.");
-
-      /* Page 971 (page 987 of the PDF), section "Accumulator
-       * Restrictions," of the Broadwell PRM volume 7 says:
-       *
-       *    Integer source operands cannot be accumulators.
-       *
-       * The Skylake and Ice Lake PRMs contain the same text.
-       */
-      ERROR_IF((src0_is_acc(inst) &&
-                brw_type_is_int(src0_type)) ||
-               (src1_is_acc(inst) &&
-                brw_type_is_int(src1_type)),
-               "Integer source operands cannot be accumulators.");
 
       /* Page 935 (page 951 of the PDF) of the Ice Lake PRM volume 2a says:
        *
@@ -1910,6 +1897,9 @@ instruction_restrictions(const struct brw_isa_info *isa,
       case BRW_MATH_FUNCTION_INT_DIV_QUOTIENT_AND_REMAINDER:
       case BRW_MATH_FUNCTION_INT_DIV_QUOTIENT:
       case BRW_MATH_FUNCTION_INT_DIV_REMAINDER: {
+         ERROR_IF(devinfo->verx10 >= 125,
+                  "INT DIV functions not supported in Gfx125+.");
+
          /* Page 442 of the Broadwell PRM Volume 2a "Extended Math Function" says:
           *    INT DIV function does not support source modifiers.
           * Bspec 6647 extends it back to Ivy Bridge.
@@ -1918,10 +1908,68 @@ instruction_restrictions(const struct brw_isa_info *isa,
          bool src1_valid = !inst->src[1].negate && !inst->src[1].abs;
          ERROR_IF(!src0_valid || !src1_valid,
                   "INT DIV function does not support source modifiers.");
+
+         ERROR_IF(inst->src[0].type != BRW_TYPE_D &&
+                  inst->src[0].type != BRW_TYPE_UD,
+                  "INT DIV function need D or UD source type.");
+         ERROR_IF(inst->src[0].type != inst->src[0].type ||
+                  inst->src[0].type != inst->dst.type,
+                  "INT DIV function need all operand types to match.");
          break;
       }
-      default:
+
+      default: {
+         ERROR_IF(devinfo->verx10 >= 125 &&
+                  (math_function == BRW_MATH_FUNCTION_POW ||
+                   math_function == BRW_MATH_FUNCTION_FDIV),
+                  "POW/FDIV not supported in Gfx125+.");
+
+         const bool ieee_macro =
+            math_function == GFX8_MATH_FUNCTION_INVM ||
+            math_function == GFX8_MATH_FUNCTION_RSQRTM;
+
+         if (ieee_macro && devinfo->ver >= 125) {
+            ERROR_IF(inst->src[0].type != BRW_TYPE_F &&
+                     inst->src[0].type != BRW_TYPE_HF &&
+                     inst->src[0].type != BRW_TYPE_DF,
+                     "MATH IEEE macros source type must be F, HF or DF (for Gfx125+).");
+         } else {
+            ERROR_IF(inst->src[0].type != BRW_TYPE_F &&
+                     inst->src[0].type != BRW_TYPE_HF,
+                     "MATH source type must be F or HF.");
+         }
+
+         const bool two_srcs =
+            math_function == GFX8_MATH_FUNCTION_INVM ||
+            math_function == BRW_MATH_FUNCTION_POW ||
+            math_function == BRW_MATH_FUNCTION_FDIV;
+
+         if (devinfo->ver >= 125) {
+            ERROR_IF(inst->src[0].type != inst->dst.type,
+                     "Math function source and destination types must match on Gfx125+.");
+            ERROR_IF(two_srcs &&
+                     inst->src[0].type != inst->src[1].type,
+                     "Math function need both source types to match on Gfx125+.");
+         } else {
+            ERROR_IF(inst->dst.type != BRW_TYPE_F &&
+                     inst->dst.type != BRW_TYPE_HF,
+                     "Math function destination must be F or HF before Gfx125.");
+            ERROR_IF(two_srcs &&
+                     inst->src[1].type != BRW_TYPE_F &&
+                     inst->src[1].type != BRW_TYPE_HF,
+                     "Math function source 1 type must be F or HF before Gfx125.");
+         }
+
+         ERROR_IF(inst->dst.file != FIXED_GRF,
+                  "The math instruction must use GRF as destination.");
+
+         ERROR_IF((devinfo->ver >= 20 || !ieee_macro) &&
+                  (src0_is_acc(inst) || (two_srcs && src1_is_acc(inst))),
+                  "Accumulator register access is only supported for Gfx125 and earlier, "
+                  "and only for IEEE macro functions (INVM/RSQRTM).");
+
          break;
+      }
       }
    }
 
@@ -2248,6 +2296,46 @@ instruction_restrictions(const struct brw_isa_info *isa,
        *    - Given any combination of datatypes in the sources of a DPAS
        *      instructions, the boundaries of a register should not be crossed.
        */
+   }
+
+   if (inst->opcode == BRW_OPCODE_AVG) {
+      ERROR_IF(!brw_type_is_int(inst->dst.type) ||
+               !brw_type_is_int(inst->src[0].type) ||
+               !brw_type_is_int(inst->src[1].type),
+               "AVG performs integer average. Float types not supported.");
+      ERROR_IF(brw_type_size_bytes(inst->dst.type) > 4 ||
+               brw_type_size_bytes(inst->src[0].type) > 4 ||
+               brw_type_size_bytes(inst->src[1].type) > 4,
+               "AVG does not support 64-bit types.");
+   }
+
+   if (inst->opcode == BRW_OPCODE_ADD) {
+      ERROR_IF(brw_type_is_int(inst->src[0].type) !=
+               brw_type_is_int(inst->src[1].type),
+               "ADD can't mix float and non-float sources.");
+   }
+
+   if (inst->opcode == BRW_OPCODE_LINE ||
+       inst->opcode == BRW_OPCODE_PLN) {
+      ERROR_IF(!src_has_scalar_region(inst, 0),
+               "LINE/PLN source 0 must be a scalar.");
+   }
+
+   if (inst->opcode == BRW_OPCODE_ROR ||
+       inst->opcode == BRW_OPCODE_ROL) {
+      ERROR_IF(inst->dst.type != BRW_TYPE_UD &&
+               inst->dst.type != BRW_TYPE_UW,
+               "ROR/ROL dst type must be either UD or UW.");
+      ERROR_IF(inst->dst.type != inst->src[0].type,
+               "ROR/ROL src0 and dst must be of same datatype precision.");
+   }
+
+   if (inst->opcode == BRW_OPCODE_LRP) {
+      ERROR_IF(inst->dst.type != BRW_TYPE_F ||
+               inst->src[0].type != BRW_TYPE_F ||
+               inst->src[1].type != BRW_TYPE_F ||
+               inst->src[2].type != BRW_TYPE_F,
+               "LRP dst and sources must be of type F.");
    }
 }
 

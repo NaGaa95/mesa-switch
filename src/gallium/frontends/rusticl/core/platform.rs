@@ -343,3 +343,17 @@ macro_rules! perf_warning {
         }
     };
 }
+
+#[macro_export]
+macro_rules! rusticl_warn_once {
+    (@PRINT $format:tt, $($arg:tt)*) => {
+        eprintln!(std::concat!("=== Rusticl warning: ", $format, " ==="), $($arg)*)
+    };
+
+    ($format:tt $(, $arg:tt)*) => {
+        static WARN_ONCE: std::sync::Once = std::sync::Once::new();
+        WARN_ONCE.call_once(|| {
+            rusticl_warn_once!(@PRINT $format, $($arg)*);
+        });
+    };
+}

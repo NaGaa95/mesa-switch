@@ -9,19 +9,19 @@
 
 #include "tu_image.h"
 
-#include "fdl/fd6_format_table.h"
-#include "common/freedreno_lrz.h"
+#include "drm-uapi/drm_fourcc.h"
 
-#include "util/u_debug.h"
 #include "util/format/u_format.h"
+#include "util/u_debug.h"
 #include "vk_android.h"
 #include "vk_debug_utils.h"
 #include "vk_util.h"
-#include "drm-uapi/drm_fourcc.h"
+#include "vk_ycbcr_conversion.h"
 #include "vulkan/vulkan_core.h"
 
+#include "common/freedreno_lrz.h"
+#include "fdl/fd6_format_table.h"
 #include "fdl/freedreno_layout.h"
-
 #include "tu_buffer.h"
 #include "tu_cs.h"
 #include "tu_descriptor_set.h"
@@ -29,6 +29,7 @@
 #include "tu_formats.h"
 #include "tu_lrz.h"
 #include "tu_rmv.h"
+#include "tu_subsampled_image.h"
 #include "tu_wsi.h"
 
 uint32_t
@@ -141,28 +142,10 @@ tu_layer_address(const struct fdl6_view *iview, uint32_t layer)
    return iview->base_addr + iview->layer_size * layer;
 }
 
-void
-tu_cs_image_ref(struct tu_cs *cs, const struct fdl6_view *iview, uint32_t layer)
+uint64_t
+tu_layer_flag_address(const struct fdl6_view *iview, uint32_t layer)
 {
-   tu_cs_emit(cs, A6XX_RB_MRT_PITCH(0, iview->pitch).value);
-   tu_cs_emit(cs, iview->layer_size >> 6);
-   tu_cs_emit_qw(cs, tu_layer_address(iview, layer));
-}
-
-void
-tu_cs_image_stencil_ref(struct tu_cs *cs, const struct tu_image_view *iview, uint32_t layer)
-{
-   tu_cs_emit(cs, A6XX_RB_STENCIL_BUFFER_PITCH(iview->stencil_pitch).value);
-   tu_cs_emit(cs, iview->stencil_layer_size >> 6);
-   tu_cs_emit_qw(cs, iview->stencil_base_addr + iview->stencil_layer_size * layer);
-}
-
-void
-tu_cs_image_depth_ref(struct tu_cs *cs, const struct tu_image_view *iview, uint32_t layer)
-{
-   tu_cs_emit(cs, A6XX_RB_DEPTH_BUFFER_PITCH(iview->depth_pitch).value);
-   tu_cs_emit(cs, iview->depth_layer_size >> 6);
-   tu_cs_emit_qw(cs, iview->depth_base_addr + iview->depth_layer_size * layer);
+   return iview->ubwc_addr + iview->ubwc_layer_size * layer;
 }
 
 template <chip CHIP>
@@ -181,15 +164,14 @@ TU_GENX(tu_cs_image_ref_2d);
 void
 tu_cs_image_flag_ref(struct tu_cs *cs, const struct fdl6_view *iview, uint32_t layer)
 {
-   tu_cs_emit_qw(cs, iview->ubwc_addr + iview->ubwc_layer_size * layer);
+   tu_cs_emit_qw(cs, tu_layer_flag_address(iview, layer));
    tu_cs_emit(cs, iview->FLAG_BUFFER_PITCH);
 }
 
-static void
+void
 tu_image_view_init(struct tu_device *device,
                    struct tu_image_view *iview,
-                   const VkImageViewCreateInfo *pCreateInfo,
-                   bool has_z24uint_s8uint)
+                   const VkImageViewCreateInfo *pCreateInfo)
 {
    VK_FROM_HANDLE(tu_image, image, pCreateInfo->image);
    const VkImageSubresourceRange *range = &pCreateInfo->subresourceRange;
@@ -199,6 +181,8 @@ tu_image_view_init(struct tu_device *device,
       vk_find_struct_const(pCreateInfo->pNext, SAMPLER_YCBCR_CONVERSION_INFO);
    const struct vk_ycbcr_conversion *conversion = ycbcr_conversion ?
       vk_ycbcr_conversion_from_handle(ycbcr_conversion->conversion) : NULL;
+   const VkImageViewSampleWeightCreateInfoQCOM *sample_weights =
+      vk_find_struct_const(pCreateInfo->pNext, IMAGE_VIEW_SAMPLE_WEIGHT_CREATE_INFO_QCOM);
 
    vk_image_view_init(&device->vk, &iview->vk, pCreateInfo);
    assert(iview->vk.format != VK_FORMAT_UNDEFINED);
@@ -287,7 +271,15 @@ tu_image_view_init(struct tu_device *device,
       args.chroma_offsets[1] = (enum fdl_chroma_location) conversion->state.chroma_offsets[1];
    }
 
-   TU_CALLX(device, fdl6_view_init)(&iview->view, layouts, &args, has_z24uint_s8uint);
+   if (sample_weights) {
+      args.filter_width = sample_weights->filterSize.width;
+      args.filter_height = sample_weights->filterSize.height;
+      args.filter_center_x = sample_weights->filterCenter.x;
+      args.filter_center_y = sample_weights->filterCenter.y;
+      args.filter_num_phases = sample_weights->numPhases;
+   }
+
+   TU_CALLX(device, fdl6_view_init)(&iview->view, layouts, &args, device->use_z24uint_s8uint);
 
    if (image->vk.format == VK_FORMAT_D32_SFLOAT_S8_UINT) {
       struct fdl_layout *layout = &image->layout[0];
@@ -333,7 +325,7 @@ ubwc_possible(struct tu_device *device,
               bool use_z24uint_s8uint)
 {
    /* TODO: enable for a702 */
-   if (info->a6xx.is_a702)
+   if (info->props.is_a702)
       return false;
 
    /* UBWC isn't possible with sparse residency, because unbound blocks may
@@ -356,10 +348,10 @@ ubwc_possible(struct tu_device *device,
     * all 1's prior to a740.  Disable UBWC for snorm.
     */
    if (vk_format_is_snorm(format) &&
-       !info->a7xx.ubwc_unorm_snorm_int_compatible)
+       !info->props.ubwc_unorm_snorm_int_compatible)
       return false;
 
-   if (!info->a6xx.has_8bpp_ubwc &&
+   if (!info->props.has_8bpp_ubwc &&
        vk_format_get_blocksizebits(format) == 8 &&
        vk_format_get_plane_count(format) == 1)
       return false;
@@ -383,7 +375,7 @@ ubwc_possible(struct tu_device *device,
     * and we can't change the descriptor so we can't do this.
     */
    if (((usage | stencil_usage) & VK_IMAGE_USAGE_STORAGE_BIT) &&
-       !info->a7xx.supports_uav_ubwc) {
+       !info->props.supports_uav_ubwc) {
       return false;
    }
 
@@ -392,7 +384,7 @@ ubwc_possible(struct tu_device *device,
     * ordinary draw calls writing read/depth. WSL blob seem to use ubwc
     * sometimes for depth/stencil.
     */
-   if (info->a6xx.broken_ds_ubwc_quirk &&
+   if (info->props.broken_ds_ubwc_quirk &&
        vk_format_is_depth_or_stencil(format))
       return false;
 
@@ -417,10 +409,14 @@ ubwc_possible(struct tu_device *device,
        (stencil_usage & (VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT)))
       return false;
 
-   if (!info->a6xx.has_z24uint_s8uint &&
+   if (!info->props.has_z24uint_s8uint &&
        (format == VK_FORMAT_D24_UNORM_S8_UINT ||
         format == VK_FORMAT_X8_D24_UNORM_PACK32) &&
        samples > VK_SAMPLE_COUNT_1_BIT) {
+      return false;
+   }
+
+   if (format == VK_FORMAT_R64_UINT || format == VK_FORMAT_R64_SINT) {
       return false;
    }
 
@@ -471,6 +467,20 @@ format_list_has_swaps(const VkImageFormatListCreateInfo *fmt_list)
          vk_format_to_pipe_format(fmt_list->pViewFormats[i]);
 
       if (tu6_format_texture(format, TILE6_LINEAR, false).swap)
+         return true;
+   }
+   return false;
+}
+
+static bool
+format_list_has_uncompressed_format(
+   const VkImageFormatListCreateInfo *fmt_list)
+{
+   if (!fmt_list || !fmt_list->viewFormatCount)
+      return true;
+
+   for (uint32_t i = 0; i < fmt_list->viewFormatCount; i++) {
+      if (!vk_format_is_compressed(fmt_list->pViewFormats[i]))
          return true;
    }
    return false;
@@ -533,6 +543,15 @@ tu_image_update_layout(struct tu_device *device, struct tu_image *image,
          /* no UBWC for separate stencil */
          image->ubwc_enabled = false;
 
+      /* Subsampled images with FDM offset require extra space for adjusting
+       * the offset to make the tiles aligned.
+       */
+      if ((image->vk.create_flags & VK_IMAGE_CREATE_SUBSAMPLED_BIT_EXT) &&
+          (image->vk.create_flags & VK_IMAGE_CREATE_FRAGMENT_DENSITY_MAP_OFFSET_BIT_EXT)) {
+         width0 += device->physical_device->info->tile_align_w;
+         height0 += device->physical_device->info->tile_align_h;
+      }
+
       struct fdl_explicit_layout plane_layout;
 
       if (plane_layouts) {
@@ -565,6 +584,8 @@ tu_image_update_layout(struct tu_device *device, struct tu_image *image,
          .is_mutable = image->is_mutable,
          .sparse = image->vk.create_flags &
             VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT,
+         .force_disable_linear_fallback = image->force_disable_linear_fallback,
+         .plane = i,
       };
 
       if (!fdl6_layout_image(layout, &device->physical_device->dev_info,
@@ -591,23 +612,33 @@ tu_image_update_layout(struct tu_device *device, struct tu_image *image,
       image->total_size = MAX2(image->total_size, layout->size);
    }
 
+   image->max_tile_w_constraint_fdm = ~0;
+   image->max_tile_h_constraint_fdm = ~0;
+
    const struct util_format_description *desc = util_format_description(image->layout[0].format);
    if (util_format_has_depth(desc) && device->use_lrz) {
       /* If FDM offset is enabled, then the LRZ image will be shifted over. We
        * have to overallocate it, but we have no idea how large the tiles it's
-       * used with will be. Try to calculate the worst-case width and height.
+       * used with will be. Try to calculate a maximum size of tile that would
+       * still let us do LRZ fast clears that we'll use to inform tiling setup
+       * later once we know the rest of the images.  We'll fall back to
+       * allocating for the device's maximum tile size if we can't ensure
+       * LRZ fast clears.
        */
-      uint32_t extra_width = 0, extra_height = 0;
+      struct fdl_lrz_fdm_extra_size extra_size = { 0, 0 };
       if (image->vk.create_flags &
           VK_IMAGE_CREATE_FRAGMENT_DENSITY_MAP_OFFSET_BIT_EXT) {
-         extra_width =
-            device->physical_device->info->tile_max_w;
-         extra_height =
-            device->physical_device->info->tile_max_h;
+         extra_size = fdl6_lrz_get_max_fdm_extra_size<CHIP>(
+            device->physical_device->info, image->layout[0].width0,
+            image->layout[0].height0, image->vk.samples,
+            image->vk.array_layers);
+
+         image->max_tile_w_constraint_fdm = extra_size.extra_width;
+         image->max_tile_h_constraint_fdm = extra_size.extra_height;
       }
 
       fdl6_lrz_layout_init<CHIP>(&image->lrz_layout, &image->layout[0],
-                                 extra_width, extra_height,
+                                 extra_size.extra_width, extra_size.extra_height,
                                  device->physical_device->info,
                                  image->total_size, image->vk.array_layers);
 
@@ -615,6 +646,12 @@ tu_image_update_layout(struct tu_device *device, struct tu_image *image,
    } else {
       image->lrz_layout.lrz_height = 0;
       image->lrz_layout.lrz_total_size = 0;
+   }
+
+   if (image->vk.create_flags & VK_IMAGE_CREATE_SUBSAMPLED_BIT_EXT) {
+      image->subsampled_metadata_offset = align64(image->total_size, 16);
+      image->total_size = image->subsampled_metadata_offset +
+         image->vk.array_layers * sizeof(struct tu_subsampled_metadata);
    }
 
    return VK_SUCCESS;
@@ -647,7 +684,7 @@ format_list_ubwc_possible(struct tu_device *dev,
    return true;
 }
 
-static VkResult
+VkResult
 tu_image_init(struct tu_device *device, struct tu_image *image,
               const VkImageCreateInfo *pCreateInfo)
 {
@@ -718,7 +755,7 @@ tu_image_init(struct tu_device *device, struct tu_image *image,
          vk_find_struct_const(pCreateInfo->pNext, IMAGE_FORMAT_LIST_CREATE_INFO);
       if (!tu6_mutable_format_list_ubwc_compatible(device->physical_device->info,
                                                    fmt_list)) {
-         bool mutable_ubwc_fc = device->physical_device->info->a7xx.ubwc_all_formats_compatible;
+         bool mutable_ubwc_fc = device->physical_device->info->props.ubwc_all_formats_compatible;
 
          /* NV12 uses a special compression scheme for the Y channel which
           * doesn't support reinterpretation. We have to fall back to linear
@@ -771,6 +808,23 @@ tu_image_init(struct tu_device *device, struct tu_image *image,
             if (!format_list_ubwc_possible(device, fmt_list, pCreateInfo))
                image->ubwc_enabled = false;
          }
+
+         /* If the threshold of the linear mipmap fallback for compressed
+          * format is reached at a different mipmap level than the
+          * size-compatible non-compressed formats the image can be viewed as,
+          * then we have to disable the fallback. Otherwise, for some levels,
+          * texels would be read from the wrong locations due to the tiling
+          * mismatch.
+          * NOTE: Prop driver falls back to LINEAR in this case.
+          */
+         if (!device->physical_device->info->props
+                 .supports_linear_mipmap_threshold_in_blocks &&
+             vk_format_is_compressed(image->vk.format) &&
+             pCreateInfo->usage &
+                VK_IMAGE_CREATE_BLOCK_TEXEL_VIEW_COMPATIBLE_BIT &&
+             format_list_has_uncompressed_format(fmt_list)) {
+            image->force_disable_linear_fallback = true;
+         }
       }
    }
 
@@ -793,20 +847,11 @@ tu_CreateImage(VkDevice _device,
 
    VK_FROM_HANDLE(tu_device, device, _device);
 
-#ifdef TU_USE_WSI_PLATFORM
-   /* Ignore swapchain creation info on Android. Since we don't have an
-    * implementation in Mesa, we're guaranteed to access an Android object
-    * incorrectly.
-    */
-   const VkImageSwapchainCreateInfoKHR *swapchain_info =
-      vk_find_struct_const(pCreateInfo->pNext, IMAGE_SWAPCHAIN_CREATE_INFO_KHR);
-   if (swapchain_info && swapchain_info->swapchain != VK_NULL_HANDLE) {
+   if (wsi_common_is_swapchain_image(pCreateInfo)) {
       return wsi_common_create_swapchain_image(device->physical_device->vk.wsi_device,
                                                pCreateInfo,
-                                               swapchain_info->swapchain,
                                                pImage);
    }
-#endif
 
    struct tu_image *image = (struct tu_image *)
       vk_image_create(&device->vk, pCreateInfo, alloc, sizeof(*image));
@@ -1382,7 +1427,7 @@ tu_CreateImageView(VkDevice _device,
    if (view == NULL)
       return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
 
-   tu_image_view_init(device, view, pCreateInfo, device->use_z24uint_s8uint);
+   tu_image_view_init(device, view, pCreateInfo);
 
    *pView = tu_image_view_to_handle(view);
 
@@ -1414,8 +1459,8 @@ tu_fragment_density_map_sample(const struct tu_image_view *fdm,
 {
    assert(fdm->image->layout[0].tile_mode == TILE6_LINEAR);
 
-   uint32_t fdm_shift_x = util_logbase2_ceil(DIV_ROUND_UP(width, fdm->vk.extent.width));
-   uint32_t fdm_shift_y = util_logbase2_ceil(DIV_ROUND_UP(height, fdm->vk.extent.height));
+   uint32_t fdm_shift_x = util_logbase2_ceil(width / fdm->vk.extent.width);
+   uint32_t fdm_shift_y = util_logbase2_ceil(height / fdm->vk.extent.height);
 
    fdm_shift_x = CLAMP(fdm_shift_x, MIN_FDM_TEXEL_SIZE_LOG2, MAX_FDM_TEXEL_SIZE_LOG2);
    fdm_shift_y = CLAMP(fdm_shift_y, MIN_FDM_TEXEL_SIZE_LOG2, MAX_FDM_TEXEL_SIZE_LOG2);

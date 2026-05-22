@@ -60,6 +60,8 @@
 #define AMDGPU_VRAM_TYPE_DDR5  10
 #define AMDGPU_VRAM_TYPE_LPDDR4 11
 #define AMDGPU_VRAM_TYPE_LPDDR5 12
+#define AMDGPU_VRAM_TYPE_HBM3E 13
+#define AMDGPU_VRAM_TYPE_HBM4 14
 
 #define AMDGPU_INFO_VIDEO_CAPS_CODEC_IDX_MPEG2 0
 #define AMDGPU_INFO_VIDEO_CAPS_CODEC_IDX_MPEG4 1
@@ -196,16 +198,36 @@ struct drm_amdgpu_info_hw_ip {
    uint32_t ip_discovery_version;
 };
 
-struct drm_amdgpu_info_uq_fw_areas_gfx {
+struct drm_amdgpu_info_uq_metadata_gfx {
+   /* shadow area size for gfx11 */
    uint32_t shadow_size;
+   /* shadow area base virtual alignment for gfx11 */
    uint32_t shadow_alignment;
+   /* context save area size for gfx11 */
    uint32_t csa_size;
+   /* context save area base virtual alignment for gfx11 */
    uint32_t csa_alignment;
 };
 
-struct drm_amdgpu_info_uq_fw_areas {
+struct drm_amdgpu_info_uq_metadata_compute {
+   /* EOP size for gfx11 */
+   uint32_t eop_size;
+   /* EOP base virtual alignment for gfx11 */
+   uint32_t eop_alignment;
+};
+
+struct drm_amdgpu_info_uq_metadata_sdma {
+   /* context save area size for sdma6 */
+   uint32_t csa_size;
+   /* context save area base virtual alignment for sdma6 */
+   uint32_t csa_alignment;
+};
+
+struct drm_amdgpu_info_uq_metadata {
    union {
-      struct drm_amdgpu_info_uq_fw_areas_gfx gfx;
+      struct drm_amdgpu_info_uq_metadata_gfx gfx;
+      struct drm_amdgpu_info_uq_metadata_compute compute;
+      struct drm_amdgpu_info_uq_metadata_sdma sdma;
    };
 };
 
@@ -303,24 +325,9 @@ extern "C" {
 
 /* All functions are static inline stubs on Windows. */
 #ifdef _WIN32
-#define PROC static inline
-#define TAIL                                                                                       \
-   {                                                                                               \
-      return -1;                                                                                   \
-   }
-#define TAILV                                                                                      \
-   {                                                                                               \
-   }
-#define TAILPTR                                                                                    \
-   {                                                                                               \
-      return NULL;                                                                                 \
-   }
-#else
-#define PROC
-#define TAIL
-#define TAILV
-#define TAILPTR
+#define __U_STUB__
 #endif
+#include "u_stub.h"
 
 struct ac_drm_device;
 typedef struct ac_drm_device ac_drm_device;
@@ -405,7 +412,7 @@ PROC int ac_drm_query_hw_ip_info(ac_drm_device *dev, unsigned type, unsigned ip_
 PROC int ac_drm_query_firmware_version(ac_drm_device *dev, unsigned fw_type, unsigned ip_instance,
                                        unsigned index, uint32_t *version, uint32_t *feature) TAIL;
 PROC int ac_drm_query_uq_fw_area_info(ac_drm_device *dev, unsigned type, unsigned ip_instance,
-                                      struct drm_amdgpu_info_uq_fw_areas *info) TAIL;
+                                      struct drm_amdgpu_info_uq_metadata *info) TAIL;
 PROC int ac_drm_query_gpu_info(ac_drm_device *dev, struct amdgpu_gpu_info *info) TAIL;
 PROC int ac_drm_query_heap_info(ac_drm_device *dev, uint32_t heap, uint32_t flags,
                                 struct amdgpu_heap_info *info) TAIL;
@@ -446,6 +453,7 @@ PROC int ac_drm_userq_signal(ac_drm_device *dev, struct drm_amdgpu_userq_signal 
 PROC int ac_drm_userq_wait(ac_drm_device *dev, struct drm_amdgpu_userq_wait *wait_data) TAIL;
 
 PROC int ac_drm_query_pci_bus_info(ac_drm_device *dev, struct radeon_info *info) TAIL;
+PROC void ac_drm_query_has_vm_always_valid(ac_drm_device *dev, struct radeon_info *info) TAILV;
 
 #ifdef __cplusplus
 }

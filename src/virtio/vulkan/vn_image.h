@@ -26,7 +26,7 @@ struct vn_image_memory_requirements {
 struct vn_image_reqs_cache_entry {
    struct vn_image_memory_requirements requirements[4];
    uint8_t plane_count;
-   uint8_t key[SHA1_DIGEST_LENGTH];
+   uint8_t key[BLAKE3_KEY_LEN];
    struct list_head head;
 };
 
@@ -64,10 +64,11 @@ struct vn_image {
    struct {
       bool is_prime_blit_src;
 
-      struct vn_device_memory *memory;
+      /* memory backing the prime blit dst buffer */
+      struct vn_device_memory *blit_mem;
 
       /* For VK_ANDROID_native_buffer, the WSI image owns the memory. */
-      bool memory_owned;
+      struct vn_device_memory *anb_mem;
    } wsi;
 };
 VK_DEFINE_NONDISP_HANDLE_CASTS(vn_image,

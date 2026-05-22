@@ -150,9 +150,7 @@ void ac_llvm_set_target_features(LLVMValueRef F, struct ac_llvm_context *ctx, bo
 {
    char features[2048];
 
-   snprintf(features, sizeof(features), "+DumpCode%s%s%s",
-            /* GFX9 has broken VGPR indexing, so always promote alloca to scratch. */
-            ctx->gfx_level == GFX9 ? ",-promote-alloca" : "",
+   snprintf(features, sizeof(features), "+DumpCode%s%s",
             /* Wave32 is the default. */
             ctx->gfx_level >= GFX10 && ctx->wave_size == 64 ?
                ",+wavefrontsize64,-wavefrontsize32" : "",

@@ -28,7 +28,7 @@ ir3_context_init(struct ir3_compiler *compiler, struct ir3_shader *shader,
          ctx->astc_srgb = so->key.vastc_srgb;
          memcpy(ctx->sampler_swizzles, so->key.vsampler_swizzles, sizeof(ctx->sampler_swizzles));
       } else if (so->type == MESA_SHADER_FRAGMENT ||
-            so->type == MESA_SHADER_COMPUTE) {
+            ir3_shader_compute(so)) {
          ctx->astc_srgb = so->key.fastc_srgb;
          memcpy(ctx->sampler_swizzles, so->key.fsampler_swizzles, sizeof(ctx->sampler_swizzles));
       }
@@ -90,6 +90,7 @@ ir3_context_init(struct ir3_compiler *compiler, struct ir3_shader *shader,
    /* nir_opt_algebraic() above would have unfused our ffmas, re-fuse them. */
    if (needs_late_alg) {
       NIR_PASS(progress, ctx->s, nir_opt_algebraic_late);
+      NIR_PASS(progress, ctx->s, ir3_nir_opt_algebraic_late);
       NIR_PASS(progress, ctx->s, nir_opt_dce);
    }
 
@@ -109,7 +110,7 @@ ir3_context_init(struct ir3_compiler *compiler, struct ir3_shader *shader,
    /* Enable the texture pre-fetch feature only a4xx onwards.  But
     * only enable it on generations that have been tested:
     */
-   if ((so->type == MESA_SHADER_FRAGMENT) && compiler->has_fs_tex_prefetch) {
+   if ((so->type == MESA_SHADER_FRAGMENT) && compiler->info->props.has_fs_tex_prefetch) {
       NIR_PASS(_, ctx->s, ir3_nir_lower_tex_prefetch, &so->prefetch_bary_type);
    }
 
@@ -119,7 +120,7 @@ ir3_context_init(struct ir3_compiler *compiler, struct ir3_shader *shader,
 
    if (vectorized) {
       NIR_PASS(_, ctx->s, nir_opt_undef);
-      NIR_PASS(_, ctx->s, nir_copy_prop);
+      NIR_PASS(_, ctx->s, nir_opt_copy_prop);
       NIR_PASS(_, ctx->s, nir_opt_dce);
 
       /* nir_opt_vectorize could replace swizzled movs with vectorized movs in a
@@ -190,21 +191,6 @@ ir3_context_init(struct ir3_compiler *compiler, struct ir3_shader *shader,
    }
 
    ir3_ibo_mapping_init(&so->image_mapping, ctx->s->info.num_textures);
-
-   /* Implement the "dual_color_blend_by_location" workaround for Unigine Heaven
-    * and Unigine Valley, by remapping FRAG_RESULT_DATA1 to be the 2nd color
-    * channel of FRAG_RESULT_DATA0.
-    */
-   if ((so->type == MESA_SHADER_FRAGMENT) && so->key.force_dual_color_blend) {
-      nir_variable *var = nir_find_variable_with_location(
-         ctx->s, nir_var_shader_out, FRAG_RESULT_DATA1);
-      if (var) {
-         var->data.location = FRAG_RESULT_DATA0;
-         var->data.index = 1;
-         nir_shader_gather_info(ctx->s, nir_shader_get_entrypoint(ctx->s));
-         so->dual_src_blend = true;
-      }
-   }
 
    return ctx;
 }
@@ -374,6 +360,11 @@ create_addr0(struct ir3_builder *build, struct ir3_instruction *src, int align)
       immed = create_immed_typed_shared(build, 2, TYPE_S16, shared);
       instr = ir3_SHL_B(build, instr, 0, immed, 0);
       break;
+   case 8:
+      /* src *= 8 => src <<= 3: */
+      immed = create_immed_typed_shared(build, 3, TYPE_S16, shared);
+      instr = ir3_SHL_B(build, instr, 0, immed, 0);
+      break;
    default:
       UNREACHABLE("bad align");
       return NULL;
@@ -445,12 +436,22 @@ ir3_get_predicate(struct ir3_context *ctx, struct ir3_instruction *src)
    if (cond->dsts[0]->flags & IR3_REG_SHARED) {
       cond->dsts[0]->flags &= ~IR3_REG_SHARED;
 
-      if (ctx->compiler->has_scalar_predicates) {
+      if (ctx->compiler->info->props.has_scalar_predicates) {
          cond->dsts[0]->flags |= IR3_REG_UNIFORM;
       }
    }
 
    _mesa_hash_table_insert(ctx->predicate_conversions, src, cond);
+
+   /* If we are currently emitting instructions after src, update the context
+    * builder to point after the predicate conversion. Otherwise, we will insert
+    * its uses before its def.
+    */
+   if (ctx->build.cursor.option == IR3_CURSOR_AFTER_INSTR &&
+       ctx->build.cursor.instr == src) {
+      ctx->build = b;
+   }
+
    return cond;
 }
 

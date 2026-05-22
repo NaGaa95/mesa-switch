@@ -1246,7 +1246,7 @@ anv_h264_encode_video(struct anv_cmd_buffer *cmd, const VkVideoEncodeInfoKHR *en
 
       slice_header_data_len_in_bits -= 8;
 
-      length_in_dw = ALIGN(slice_header_data_len_in_bits, 32) >> 5;
+      length_in_dw = align((uint32_t)slice_header_data_len_in_bits, 32) >> 5;
       data_bits_in_last_dw = slice_header_data_len_in_bits & 0x1f;
 
       dw = anv_batch_emitn(&cmd->batch, length_in_dw + 2, GENX(MFX_PAK_INSERT_OBJECT),
@@ -1286,6 +1286,63 @@ anv_h264_encode_video(struct anv_cmd_buffer *cmd, const VkVideoEncodeInfoKHR *en
    };
 
 }
+
+#if GFX_VER >= 12
+static const uint8_t hcp_transform_skip_coeffs_tbl[4][2][2][2][2] =
+{
+   { { { { 42, 37 },{ 32, 40 } },{ { 40, 40 },{ 32, 45 } } },
+     { { { 29, 48 },{ 26, 53 } },{ { 26, 56 },{ 24, 62 } } } },
+   { { { { 42, 40 },{ 32, 45 } },{ { 40, 46 },{ 32, 48 } } },
+     { { { 26, 53 },{ 24, 58 } },{ { 32, 53 },{ 26, 64 } } } },
+   { { { { 38, 42 },{ 32, 51 } },{ { 43, 43 },{ 35, 46 } } },
+     { { { 26, 56 },{ 24, 64 } },{ { 35, 50 },{ 32, 57 } } } },
+   { { { { 35, 46 },{ 32, 52 } },{ { 51, 42 },{ 38, 53 } } },
+     { { { 29, 56 },{ 29, 70 } },{ { 38, 47 },{ 37, 64 } } } },
+};
+
+static const uint16_t hcp_transform_skip_lambda_tbl[52] =
+{
+   149, 149, 149, 149, 149, 149, 149, 149,
+   149, 149, 149, 149, 149, 149, 149, 149,
+   149, 149, 149, 149, 149, 149, 149, 149,
+   149, 162, 174, 186, 199, 211, 224, 236,
+   249, 261, 273, 286, 298, 298, 298, 298,
+   298, 298, 298, 298, 298, 298, 298, 298,
+   298, 298, 298, 298
+};
+
+static const uint32_t hevc_sad_qp_lambda_tbl[3][42] =
+{
+   /* I-frame: QP 10-51 */
+   {
+      0x30002, 0x30002, 0x30002, 0x30003, 0x40004, 0x40005, 0x50006,
+      0x60008, 0x6000a, 0x7000c, 0x8000f, 0x90013, 0xa0018, 0xb001e,
+      0xc0026, 0xe0030, 0x10003d, 0x12004d, 0x140061, 0x16007a, 0x19009a,
+      0x1c00c2, 0x1f00f4, 0x230133, 0x270183, 0x2c01e8, 0x320266, 0x380306,
+      0x3e03cf, 0x4604cd, 0x4f060c, 0x58079f, 0x63099a, 0x6f0c18, 0x7d0f3d,
+      0x8c1333, 0x9d1831, 0xb11e7a, 0xc62666, 0xdf3062, 0xfa3cf5, 0x1184ccd
+   },
+   /* P-frame: QP 10-51 */
+   {
+      0x30003, 0x30003, 0x30003, 0x40003, 0x40004, 0x50005, 0x50007,
+      0x60008, 0x6000a, 0x7000d, 0x80011, 0x90015, 0xa001a, 0xb0021,
+      0xd002a, 0xe0034, 0x100042, 0x120053, 0x140069, 0x170084, 0x1a00a6,
+      0x1d00d2, 0x210108, 0x24014d, 0x2901a3, 0x2e0210, 0x34029a, 0x3a0347,
+      0x410421, 0x490533, 0x52068d, 0x5c0841, 0x670a66, 0x740d1a, 0x821082,
+      0x9214cd, 0xa41a35, 0xb82105, 0xce299a, 0xe8346a, 0x1044209, 0x1245333
+   },
+   /* B-frame: QP 10-51 */
+   {
+      0x30003, 0x30003, 0x30003, 0x40003, 0x40004, 0x50005, 0x50007,
+      0x60008, 0x6000a, 0x7000d, 0x80011, 0x90015, 0xa001a, 0xb0021,
+      0xd002a, 0xe0034, 0x100042, 0x120053, 0x140069, 0x170084, 0x1a00a6,
+      0x1d00d2, 0x210108, 0x24014d, 0x2901a3, 0x2e0210, 0x34029a, 0x3a0347,
+      0x410421, 0x490533, 0x52068d, 0x5c0841, 0x670a66, 0x740d1a, 0x821082,
+      0x9214cd, 0xa41a35, 0xb82105, 0xce299a, 0xe8346a, 0x1044209, 0x1245333
+   }
+};
+
+#endif // GFX_VER >= 12
 
 static uint8_t
 anv_h265_get_ref_poc(const VkVideoEncodeInfoKHR *enc_info,
@@ -1409,7 +1466,8 @@ anv_h265_encode_video(struct anv_cmd_buffer *cmd, const VkVideoEncodeInfoKHR *en
    const StdVideoH265VideoParameterSet *vps = vk_video_find_h265_enc_std_vps(params, frame_info->pStdPictureInfo->sps_video_parameter_set_id);
    const StdVideoH265SequenceParameterSet *sps = vk_video_find_h265_enc_std_sps(params, frame_info->pStdPictureInfo->pps_seq_parameter_set_id);
    const StdVideoH265PictureParameterSet *pps = vk_video_find_h265_enc_std_pps(params, frame_info->pStdPictureInfo->pps_pic_parameter_set_id);
-   const StdVideoEncodeH265ReferenceListsInfo *ref_list_info = frame_info->pStdPictureInfo->pRefLists;
+   StdVideoEncodeH265ReferenceListsInfo* ref_lists =
+      (struct StdVideoEncodeH265ReferenceListsInfo *)frame_info->pStdPictureInfo->pRefLists;
 
    const struct anv_image_view *iv = anv_image_view_from_handle(enc_info->srcPictureResource.imageViewBinding);
    const struct anv_image *src_img = iv->image;
@@ -2080,7 +2138,7 @@ anv_h265_encode_video(struct anv_cmd_buffer *cmd, const VkVideoEncodeInfoKHR *en
       cmd2.Values21 &= 0xfffffff;
       cmd2.Values22 = 0x1f001102;
       cmd2.Values23 = 0xaaaa1f00;
-      cmd2.Values27 = (cmd2.Values27 & 0xffff0000) | 0x1a1a;
+      cmd2.QpPrimeYAc = pps->init_qp_minus26 + 26;
 
       cmd2.FrameWidthInPixelsMinusOne = width_in_pix - 1;
       cmd2.FrameHeightInPixelsMinusOne = height_in_pix - 1;
@@ -2089,11 +2147,6 @@ anv_h265_encode_video(struct anv_cmd_buffer *cmd, const VkVideoEncodeInfoKHR *en
             anv_vdenc_h265_picture_type(frame_info->pStdPictureInfo->pic_type) == 0 ?
             0 : sps->flags.sps_temporal_mvp_enabled_flag;
       cmd2.TransformSkip = pps->flags.transform_skip_enabled_flag;
-
-      if (anv_vdenc_h265_picture_type(frame_info->pStdPictureInfo->pic_type) != 0) {
-         cmd2.NumRefIdxL0MinusOne = ref_list_info->num_ref_idx_l0_active_minus1;
-         cmd2.NumRefIdxL1MinusOne = ref_list_info->num_ref_idx_l1_active_minus1;
-      }
 
       cmd2.Values5 = (cmd2.Values5 & 0xff83ffff) | 0x400000;
       cmd2.Values14 = (cmd2.Values14 & 0xffff) | 0x7d00000;
@@ -2105,15 +2158,17 @@ anv_h265_encode_video(struct anv_cmd_buffer *cmd, const VkVideoEncodeInfoKHR *en
       cmd2.TilingEnable = pps->flags.tiles_enabled_flag;
 
       if (anv_vdenc_h265_picture_type(frame_info->pStdPictureInfo->pic_type) != 0) {
-         StdVideoEncodeH265ReferenceListsInfo* ref_lists =
-            (struct StdVideoEncodeH265ReferenceListsInfo *)frame_info->pStdPictureInfo->pRefLists;
-
+         /* Handle GPB(Generalized P and B frames) */
          if (frame_info->pStdPictureInfo->pic_type == STD_VIDEO_H265_PICTURE_TYPE_P) {
+            ref_lists->num_ref_idx_l1_active_minus1 = ref_lists->num_ref_idx_l0_active_minus1;
             for (int i = 0; i< STD_VIDEO_H265_MAX_NUM_LIST_REF; i++) {
                ref_lists->RefPicList1[i] = ref_lists->RefPicList0[i];
                ref_lists->list_entry_l1[i] = ref_lists->list_entry_l0[i];
             }
          }
+
+         cmd2.NumRefIdxL0MinusOne = ref_lists->num_ref_idx_l0_active_minus1;
+         cmd2.NumRefIdxL1MinusOne = ref_lists->num_ref_idx_l1_active_minus1;
 
          bool long_term = false;
          uint8_t ref_slot = ref_lists->RefPicList0[0];
@@ -2146,9 +2201,13 @@ anv_h265_encode_video(struct anv_cmd_buffer *cmd, const VkVideoEncodeInfoKHR *en
          cmd2.POCNumberForRefid0InL1 = CLAMP(diff_poc, -16, 16);
          cmd2.LongTermReferenceFlagsL1 |= long_term;
 
-         cmd2.POCNumberForRefid1InL1 = cmd2.POCNumberForRefid2InL1 = cmd2.POCNumberForRefid0InL1;
+         cmd2.POCNumberForRefid1InL1 = cmd2.POCNumberForRefid1InL0;
+         cmd2.POCNumberForRefid2InL1 = cmd2.POCNumberForRefid2InL0;
          cmd2.SubPelMode = 3;
       }
+
+      int tbl_idx = anv_vdenc_h265_picture_type(frame_info->pStdPictureInfo->pic_type);
+      cmd2.Values26 = hevc_sad_qp_lambda_tbl[tbl_idx][pps->init_qp_minus26 + 26 - 10];
    }
 
    for (uint32_t slice_id = 0; slice_id < frame_info->naluSliceSegmentEntryCount; slice_id++) {
@@ -2176,11 +2235,16 @@ anv_h265_encode_video(struct anv_cmd_buffer *cmd, const VkVideoEncodeInfoKHR *en
          next_slice_header = slice_header + 1;
 
       if (slice_type != STD_VIDEO_H265_SLICE_TYPE_I) {
+         if (pps->num_ref_idx_l0_default_active_minus1 != ref_lists->num_ref_idx_l0_active_minus1 ||
+             pps->num_ref_idx_l1_default_active_minus1 != ref_lists->num_ref_idx_l1_active_minus1) {
+            slice_header->flags.num_ref_idx_active_override_flag = true;
+         }
+
          anv_batch_emit(&cmd->batch, GENX(HCP_REF_IDX_STATE), ref) {
             ref.ReferencePictureListSelect = 0;
-            ref.NumberofReferenceIndexesActive = ref_list_info->num_ref_idx_l0_active_minus1;
+            ref.NumberofReferenceIndexesActive = ref_lists->num_ref_idx_l0_active_minus1;
 
-            for (uint32_t i = 0; i < ref_list_info->num_ref_idx_l0_active_minus1 + 1; i++) {
+            for (uint32_t i = 0; i < ref_lists->num_ref_idx_l0_active_minus1 + 1; i++) {
                const VkVideoReferenceSlotInfoKHR ref_slot = enc_info->pReferenceSlots[i];
                const VkVideoEncodeH265DpbSlotInfoKHR *dpb =
                      vk_find_struct_const(ref_slot.pNext, VIDEO_ENCODE_H265_DPB_SLOT_INFO_KHR);
@@ -2200,9 +2264,9 @@ anv_h265_encode_video(struct anv_cmd_buffer *cmd, const VkVideoEncodeInfoKHR *en
       if (slice_type == STD_VIDEO_H265_SLICE_TYPE_B) {
          anv_batch_emit(&cmd->batch, GENX(HCP_REF_IDX_STATE), ref) {
             ref.ReferencePictureListSelect = 1;
-            ref.NumberofReferenceIndexesActive = ref_list_info->num_ref_idx_l1_active_minus1;
+            ref.NumberofReferenceIndexesActive = ref_lists->num_ref_idx_l1_active_minus1;
 
-            for (uint32_t i = 0; i < ref_list_info->num_ref_idx_l1_active_minus1 + 1; i++) {
+            for (uint32_t i = 0; i < ref_lists->num_ref_idx_l1_active_minus1 + 1; i++) {
                const VkVideoReferenceSlotInfoKHR ref_slot = enc_info->pReferenceSlots[i];
 
                const VkVideoEncodeH265DpbSlotInfoKHR *dpb =
@@ -2341,11 +2405,30 @@ anv_h265_encode_video(struct anv_cmd_buffer *cmd, const VkVideoEncodeInfoKHR *en
          slice.HeaderInsertionPresent = true;
 
          slice.IndirectPAKBSEDataStartOffset = 0;
-         slice.TransformSkipLambda = 162;
-         slice.TransformSkipNumberofZeroCoeffsFactor0 = 42;
-         slice.TransformSkipNumberofNonZeroCoeffsFactor0 = 72;
-         slice.TransformSkipNumberofZeroCoeffsFactor1 = 32;
-         slice.TransformSkipNumberofNonZeroCoeffsFactor1 = 77;
+         slice.TransformSkipLambda = hcp_transform_skip_lambda_tbl[slice_qp];
+
+         int qp_idx = 0;
+         if (slice_qp <= 22) {
+            qp_idx = 0;
+         } else if (slice_qp <= 27) {
+            qp_idx = 1;
+         } else if (slice_qp <= 32) {
+            qp_idx = 2;
+         } else {
+            qp_idx = 3;
+         }
+
+         if (anv_vdenc_h265_picture_type(frame_info->pStdPictureInfo->pic_type) == 0) {
+            slice.TransformSkipNumberofZeroCoeffsFactor0 = hcp_transform_skip_coeffs_tbl[qp_idx][0][0][0][0];
+            slice.TransformSkipNumberofZeroCoeffsFactor1 = hcp_transform_skip_coeffs_tbl[qp_idx][0][0][1][0];
+            slice.TransformSkipNumberofNonZeroCoeffsFactor0 = hcp_transform_skip_coeffs_tbl[qp_idx][0][0][0][1] + 32;
+            slice.TransformSkipNumberofNonZeroCoeffsFactor1 = hcp_transform_skip_coeffs_tbl[qp_idx][0][0][1][1] + 32;
+         } else {
+            slice.TransformSkipNumberofZeroCoeffsFactor0 = hcp_transform_skip_coeffs_tbl[qp_idx][1][0][0][0];
+            slice.TransformSkipNumberofZeroCoeffsFactor1 = hcp_transform_skip_coeffs_tbl[qp_idx][1][0][1][0];
+            slice.TransformSkipNumberofNonZeroCoeffsFactor0 = hcp_transform_skip_coeffs_tbl[qp_idx][1][0][0][1] + 32;
+            slice.TransformSkipNumberofNonZeroCoeffsFactor1 = hcp_transform_skip_coeffs_tbl[qp_idx][1][0][1][1] + 32;
+         }
 
          slice.OriginalSliceStartCtbX = slice_header->slice_segment_address % ctb_w;
          slice.OriginalSliceStartCtbY = slice_header->slice_segment_address / ctb_w;
@@ -2355,7 +2438,7 @@ anv_h265_encode_video(struct anv_cmd_buffer *cmd, const VkVideoEncodeInfoKHR *en
       uint32_t length_in_dw;
       uint32_t data_bits_in_last_dw;
 
-      length_in_dw = ALIGN(slice_header_data_len_in_bits, 32) >> 5;
+      length_in_dw = align((uint32_t)slice_header_data_len_in_bits, 32) >> 5;
       data_bits_in_last_dw = slice_header_data_len_in_bits & 0x1f;
 
       dw = anv_batch_emitn(&cmd->batch, length_in_dw + 2, GENX(HCP_PAK_INSERT_OBJECT),

@@ -21,9 +21,11 @@
  * IN THE SOFTWARE.
  */
 
-#include "v3dv_private.h"
-#include "broadcom/common/v3d_macros.h"
-#include "broadcom/cle/v3dx_pack.h"
+#include "v3dv_device.h"
+#include "v3dv_image.h"
+#include "v3dv_version_dispatch.h"
+#include "v3dv_format_table.h"
+#include "v3dvx_format_table.h"
 
 #include "util/format/u_format.h"
 #include "vk_enum_to_str.h"
@@ -121,6 +123,9 @@ static const struct v3dv_format format_table[] = {
    /* Color, 4 channels */
    FORMAT(B8G8R8A8_SRGB,           SRGB8_ALPHA8, RGBA8,         SWIZ_ZYXW, 16, true),
    FORMAT(B8G8R8A8_UNORM,          RGBA8,        RGBA8,         SWIZ_ZYXW, 16, true),
+   FORMAT(B8G8R8A8_SNORM,          NO,           RGBA8_SNORM,   SWIZ_ZYXW, 16, true),
+   FORMAT(B8G8R8A8_SINT,           RGBA8I,       RGBA8I,        SWIZ_ZYXW, 16, false),
+   FORMAT(B8G8R8A8_UINT,           RGBA8UI,      RGBA8UI,       SWIZ_ZYXW, 16, false),
 
    FORMAT(R8G8B8A8_SRGB,           SRGB8_ALPHA8, RGBA8,         SWIZ_XYZW, 16, true),
    FORMAT(R8G8B8A8_UNORM,          RGBA8,        RGBA8,         SWIZ_XYZW, 16, true),
@@ -189,6 +194,7 @@ static const struct v3dv_format format_table[] = {
    FORMAT(A2B10G10R10_UNORM_PACK32,RGB10_A2,     RGB10_A2,      SWIZ_XYZW, 16, true),
    FORMAT(A2B10G10R10_UINT_PACK32, RGB10_A2UI,   RGB10_A2UI,    SWIZ_XYZW, 16, false),
    FORMAT(A2R10G10B10_UNORM_PACK32,RGB10_A2,     RGB10_A2,      SWIZ_ZYXW, 16, true),
+   FORMAT(A2R10G10B10_UINT_PACK32, RGB10_A2UI,   RGB10_A2UI,    SWIZ_ZYXW, 16, false),
    FORMAT(E5B9G9R9_UFLOAT_PACK32,  NO,           RGB9_E5,       SWIZ_XYZ1, 16, true),
    FORMAT(B10G11R11_UFLOAT_PACK32, R11F_G11F_B10F,R11F_G11F_B10F, SWIZ_XYZ1, 16, true),
 
@@ -327,7 +333,7 @@ v3dX(get_format)(VkFormat format)
 }
 
 void
-v3dX(get_internal_type_bpp_for_output_format)(uint32_t format,
+v3dX(get_internal_type_bpp_for_output_format)(enum V3DX(Output_Image_Format) format,
                                               uint32_t *type,
                                               uint32_t *bpp)
 {
@@ -497,7 +503,7 @@ v3dX(format_supports_blending)(const struct v3dv_format *format)
 }
 
 bool
-v3dX(tfu_supports_tex_format)(uint32_t tex_format)
+v3dX(tfu_supports_tex_format)(enum V3DX(Texture_Data_Formats) tex_format)
 {
    switch (tex_format) {
    case TEXTURE_DATA_FORMAT_R8:
@@ -538,7 +544,7 @@ v3dX(tfu_supports_tex_format)(uint32_t tex_format)
    }
 }
 
-uint8_t
+enum V3DX(Internal_Depth_Type)
 v3dX(get_internal_depth_type)(VkFormat format)
 {
    switch (format) {

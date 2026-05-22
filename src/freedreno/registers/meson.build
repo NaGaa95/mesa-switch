@@ -27,18 +27,20 @@ foreach f : xml_files
   )
 endforeach
 
-foreach f : install_files
-  _gzname = f + '.gz'
-  custom_target(
-    _gzname,
-    input: f,
-    output: _gzname,
-    command: [prog_gzip, '-kc', '@INPUT@'],
-    capture: true,
-    install_dir: rnn_install_path,
-    install: install_fd_decode_tools,
-    build_by_default: install_fd_decode_tools,
-  )
-endforeach
+if install_fd_decode_tools
+  foreach f : install_files
+    _gzname = f + '.gz'
+    custom_target(
+      _gzname,
+      input: f,
+      output: _gzname,
+      command: [prog_gzip, '-kc', '@INPUT@'],
+      capture: true,
+      install_dir: rnn_install_path,
+      install: install_fd_decode_tools,
+      build_by_default: install_fd_decode_tools,
+    )
+  endforeach
+endif
 
 subdir('adreno')

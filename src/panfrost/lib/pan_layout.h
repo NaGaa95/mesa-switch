@@ -3,7 +3,6 @@
  * Copyright (C) 2014 Broadcom
  * Copyright (C) 2018-2019 Alyssa Rosenzweig
  * Copyright (C) 2019-2020 Collabora, Ltd.
- *
  * SPDX-License-Identifier: MIT
  */
 
@@ -242,6 +241,22 @@ pan_u_interleaved_tile_size_el(enum pipe_format format)
          .width = 16 / util_format_get_blockwidth(format),
          .height = 16 / util_format_get_blockheight(format),
       };
+   }
+}
+
+/* Given a format, determine the tile size used for interleaved 64k. */
+static inline struct pan_image_block_size
+pan_interleaved_64k_tile_size_el(enum pipe_format format)
+{
+   switch (util_format_get_blocksize(format)) {
+   case 1: return (struct pan_image_block_size){256, 256};
+   case 2: return (struct pan_image_block_size){256, 128};
+   case 4: return (struct pan_image_block_size){128, 128};
+   case 8: return (struct pan_image_block_size){128, 64};
+   case 16: return (struct pan_image_block_size){64, 64};
+   default:
+      UNREACHABLE("unsupported format");
+      return (struct pan_image_block_size){0, 0};
    }
 }
 

@@ -17,6 +17,7 @@ program@execute@vstore@vstore_half-float-private,Crash
 program@execute@vector-conversion,Fail
 
 # Piglit CL bug
+api@clgetmemobjectinfo,Fail
 program@execute@builtin@builtin-float-nextafter-1.0.generated,Fail
 program@execute@builtin@builtin-float-nextafter-1.0.generated@nextafter float1,Fail
 program@execute@builtin@builtin-float-nextafter-1.0.generated@nextafter float16,Fail

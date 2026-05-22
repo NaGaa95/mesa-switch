@@ -25,10 +25,10 @@
  * The swizzles must be set exactly like their non-swapped counterparts,
  * because byte-swapping is what reverses the component order, not swizzling.
  *
- * This function returns the format that must be used to program CB and TX
- * swizzles.
+ * This function returns the format that must be used to handle component order
+ * for r300 byte-swapped array formats.
  */
-static enum pipe_format r300_unbyteswap_array_format(enum pipe_format format)
+enum pipe_format r300_unbyteswap_array_format(enum pipe_format format)
 {
     /* FIXME: Disabled on little endian because of a reported regression:
      * https://bugs.freedesktop.org/show_bug.cgi?id=98869 */
@@ -1178,7 +1178,6 @@ struct pipe_surface* r300_create_surface_custom(struct pipe_context * ctx,
 
         pipe_reference_init(&surface->base.reference, 1);
         pipe_resource_reference(&surface->base.texture, texture);
-        surface->base.context = ctx;
         surface->base.format = surf_tmpl->format;
         surface->base.level = level;
         surface->base.first_layer = surf_tmpl->first_layer;

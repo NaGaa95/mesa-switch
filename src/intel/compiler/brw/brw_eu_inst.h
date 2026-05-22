@@ -1,24 +1,6 @@
 /*
  * Copyright © 2014 Intel Corporation
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
- * IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  */
 
 /**
@@ -421,7 +403,6 @@ F(3src_debug_control,       /* 9+ */ 30, 30,   /* 12+ */ 30, 30)
 F(3src_cmpt_control,        /* 9+ */ 29, 29,   /* 12+ */ 29, 29)
 FC(3src_acc_wr_control,     /* 9+ */ 28, 28,   /* 12+ */ 33, 33, devinfo->ver < 20)
 F(3src_cond_modifier,       /* 9+ */ 27, 24,   /* 12+ */ 95, 92)
-F(3src_exec_size,           /* 9+ */ 23, 21,   /* 12+ */ 18, 16)
 F(3src_pred_inv,            /* 9+ */ 20, 20,   /* 12+ */ 28, 28)
 F20(3src_pred_control,      /* 9+ */ 19, 16,   /* 12+ */ 27, 24, /* 20+ */ 27, 26)
 F(3src_thread_control,      /* 9+ */ 15, 14,   /* 12+ */ -1, -1)
@@ -674,43 +655,6 @@ REG_TYPE(src0)
 REG_TYPE(src1)
 REG_TYPE(src2)
 #undef REG_TYPE
-
-/**
- * Flow control instruction bits:
- *  @{
- */
-static inline void
-brw_eu_inst_set_uip(const struct intel_device_info *devinfo,
-                 brw_eu_inst *inst, int32_t value)
-{
-   if (devinfo->ver >= 12)
-      brw_eu_inst_set_src1_is_imm(devinfo, inst, 1);
-
-   brw_eu_inst_set_bits(inst, 95, 64, (uint32_t)value);
-}
-
-static inline int32_t
-brw_eu_inst_uip(const struct intel_device_info *devinfo, const brw_eu_inst *inst)
-{
-   return brw_eu_inst_bits(inst, 95, 64);
-}
-
-static inline void
-brw_eu_inst_set_jip(const struct intel_device_info *devinfo,
-                 brw_eu_inst *inst, int32_t value)
-{
-   if (devinfo->ver >= 12)
-      brw_eu_inst_set_src0_is_imm(devinfo, inst, 1);
-
-   brw_eu_inst_set_bits(inst, 127, 96, (uint32_t)value);
-}
-
-static inline int32_t
-brw_eu_inst_jip(const struct intel_device_info *devinfo, const brw_eu_inst *inst)
-{
-   return brw_eu_inst_bits(inst, 127, 96);
-}
-/** @} */
 
 /**
  * SEND instructions:
@@ -1124,6 +1068,66 @@ REG_TYPE(dst)
 REG_TYPE(src0)
 REG_TYPE(src1)
 #undef REG_TYPE
+
+
+/**
+ * Flow control instruction bits:
+ *  @{
+ */
+static inline void
+brw_eu_inst_set_uip(const struct intel_device_info *devinfo,
+                    brw_eu_inst *inst, int32_t value)
+{
+   if (devinfo->ver >= 12)
+      brw_eu_inst_set_src1_is_imm(devinfo, inst, 1);
+   else
+      brw_eu_inst_set_src1_file_type(devinfo, inst, IMM, BRW_TYPE_D);
+
+   brw_eu_inst_set_bits(inst, 95, 64, (uint32_t)value);
+}
+
+static inline int32_t
+brw_eu_inst_uip(const struct intel_device_info *devinfo, const brw_eu_inst *inst)
+{
+   return brw_eu_inst_bits(inst, 95, 64);
+}
+
+static inline void
+brw_eu_inst_set_unused_uip(const struct intel_device_info *devinfo,
+                           brw_eu_inst *inst)
+{
+   if (devinfo->ver < 12) {
+      /* When Src1 is not used, old versions required its file to be ARF and
+       * its type to match Src0 type.  See "Non-present Operands" in PRM for
+       * SKL, vol 7 "3D-Media-GPGPU".
+       *
+       * Note: in BRW we only use immediate sources for the branching
+       * instructions.
+       */
+      brw_eu_inst_set_src1_file_type(devinfo, inst, ARF, BRW_TYPE_D);
+      assert(brw_eu_inst_src0_reg_hw_type(devinfo, inst) ==
+             brw_eu_inst_src1_reg_hw_type(devinfo, inst));
+   }
+}
+
+static inline void
+brw_eu_inst_set_jip(const struct intel_device_info *devinfo,
+                    brw_eu_inst *inst, int32_t value)
+{
+   if (devinfo->ver >= 12)
+      brw_eu_inst_set_src0_is_imm(devinfo, inst, 1);
+   else
+      brw_eu_inst_set_src0_file_type(devinfo, inst, IMM, BRW_TYPE_D);
+
+   brw_eu_inst_set_bits(inst, 127, 96, (uint32_t)value);
+}
+
+static inline int32_t
+brw_eu_inst_jip(const struct intel_device_info *devinfo, const brw_eu_inst *inst)
+{
+   return brw_eu_inst_bits(inst, 127, 96);
+}
+/** @} */
 
 
 /* The AddrImm fields are split into two discontiguous sections on Gfx9+ */

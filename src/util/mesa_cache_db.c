@@ -25,7 +25,7 @@
 #include "crc32.h"
 #include "disk_cache.h"
 #include "hash_table.h"
-#include "mesa-sha1.h"
+#include "mesa-blake3.h"
 #include "mesa_cache_db.h"
 #include "os_time.h"
 #include "ralloc.h"

@@ -140,14 +140,6 @@ struct nak_xfb_info
 nak_xfb_from_nir(const struct nak_compiler *nak,
                  const struct nir_xfb_info *nir_xfb);
 
-struct nak_io_addr_offset {
-   nir_scalar base;
-   int32_t offset;
-};
-
-struct nak_io_addr_offset
-nak_get_io_addr_offset(nir_def *addr, uint8_t imm_bits);
-
 enum nak_nir_tex_ref_type {
    /** Indicates that this is a bindless texture */
    NAK_NIR_TEX_REF_TYPE_BINDLESS,
@@ -189,7 +181,8 @@ struct nak_nir_tex_flags {
    bool has_z_cmpr:1;
    bool is_sparse:1;
    bool nodep:1;
-   uint32_t pad:22;
+   bool scalar:1;
+   uint32_t pad:21;
 };
 PRAGMA_DIAGNOSTIC_POP
 static_assert(sizeof(struct nak_nir_tex_flags) == 4,
@@ -265,6 +258,21 @@ struct nak_nir_imadsp_flags {
 
 bool nak_nir_lower_vtg_io(nir_shader *nir, const struct nak_compiler *nak);
 
+enum nak_isbe_access {
+   NAK_ISBE_ACCESS_MAP,
+   NAK_ISBE_ACCESS_PATCH,
+   NAK_ISBE_ACCESS_PRIM,
+   NAK_ISBE_ACCESS_ATTR,
+};
+
+struct nak_nir_isbe_flags {
+   enum nak_isbe_access access : 2;
+   bool output : 1;
+   bool skew : 1;
+   bool per_primitive : 1;
+   uint32_t pad : 27;
+};
+
 enum nak_interp_mode {
    NAK_INTERP_MODE_PERSPECTIVE,
    NAK_INTERP_MODE_SCREEN_LINEAR,
@@ -335,6 +343,16 @@ enum nak_fs_out {
 };
 
 #define NAK_FS_OUT_COLOR(n) (NAK_FS_OUT_COLOR0 + (n) * 16)
+
+static inline const struct nak_constant_offset_info*
+nak_const_offsets(const struct nak_compiler* nak, bool is_graphics)
+{
+   if (nak->sm >= 75 && is_graphics) {
+      return &nak_const_offsets_turing_graphics;
+   } else {
+      return &nak_const_offsets_base;
+   }
+}
 
 bool nak_nir_rematerialize_load_const(nir_shader *nir);
 bool nak_nir_mark_lcssa_invariants(nir_shader *nir);

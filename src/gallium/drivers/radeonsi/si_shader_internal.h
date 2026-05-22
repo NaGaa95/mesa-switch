@@ -16,6 +16,7 @@
    S_0286D0_LINEAR_SAMPLE_ENA(1) |              \
    S_0286D0_LINEAR_CENTER_ENA(1) |              \
    S_0286D0_LINEAR_CENTROID_ENA(1) |            \
+   S_0286D0_LINE_STIPPLE_TEX_ENA(1) |           \
    S_0286D0_FRONT_FACE_ENA(1) |                 \
    S_0286D0_ANCILLARY_ENA(1) |                  \
    S_0286D0_SAMPLE_COVERAGE_ENA(1) |            \
@@ -57,6 +58,9 @@ struct si_shader_args {
    struct ac_arg cs_user_data[2];
    struct ac_arg cs_shaderbuf[3];
    struct ac_arg cs_image[3];
+   /* TS and MS */
+   struct ac_arg task_ring_addr;
+   struct ac_arg mesh_scratch_ring_addr;
 };
 
 struct si_nir_shader_ctx {
@@ -92,7 +96,6 @@ typedef struct nir_shader nir_shader;
 /* si_shader.c */
 bool si_is_multi_part_shader(struct si_shader *shader);
 bool si_is_merged_shader(struct si_shader *shader);
-unsigned si_get_max_workgroup_size(const struct si_shader *shader);
 enum ac_hw_stage si_select_hw_stage(const mesa_shader_stage stage, const union si_shader_key *const key,
                                     const enum amd_gfx_level gfx_level);
 bool gfx10_ngg_export_prim_early(struct si_shader *shader);
@@ -121,10 +124,9 @@ nir_def *si_nir_load_internal_binding(struct si_screen *sscreen, nir_builder *b,
                                       struct si_shader_args *args, unsigned slot,
                                       unsigned num_components);
 bool si_nir_lower_abi(nir_shader *nir, struct si_shader *shader, struct si_shader_args *args);
-bool si_nir_lower_color_inputs_to_sysvals(nir_shader *nir);
+bool si_nir_lower_intrinsics_early(nir_shader *nir);
 bool si_nir_lower_polygon_stipple(nir_shader *nir);
-bool si_nir_lower_ps_color_inputs(nir_shader *nir, const union si_shader_key *key,
-                                  const struct si_shader_info *info);
+bool si_nir_lower_color_flatshade_twoside(nir_shader *nir, struct si_shader *shader);
 bool si_nir_lower_resource(nir_shader *nir, struct si_shader *shader,
                            struct si_shader_args *args);
 bool si_nir_lower_vs_inputs(nir_shader *nir, struct si_shader *shader,
@@ -157,5 +159,6 @@ void si_get_late_shader_variant_info(struct si_shader *shader, struct si_shader_
                                      nir_shader *nir);
 void si_set_spi_ps_input_config_for_separate_prolog(struct si_shader *shader);
 void si_fixup_spi_ps_input_config(struct si_shader *shader);
+void si_shader_update_spi_shader_formats(struct si_shader *shader, nir_shader *nir);
 
 #endif

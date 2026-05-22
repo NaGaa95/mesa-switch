@@ -1,17 +1,57 @@
 # Copyright © 2017-2019 Intel Corporation
 # SPDX-License-Identifier: MIT
 
-libva_version = dep_va.version().split('.')
+libva_files = files(
+    'buffer.c', 'config.c', 'context.c', 'display.c',
+    'picture.c', 'surface.c', 'decode.c',
+    'image.c', 'postproc.c', 'subpicture.c'
+)
+
+if _codecs.contains('jpegdec')
+  libva_files += files('picture_mjpeg.c')
+endif
+if _codecs.contains('mpeg12dec')
+  libva_files += files('picture_mpeg12.c')
+endif
+if _codecs.contains('mpeg4dec')
+  libva_files += files('picture_mpeg4.c')
+endif
+if _codecs.contains('vc1dec')
+  libva_files += files('picture_vc1.c')
+endif
+if _codecs.contains('vp9dec')
+  libva_files += files('picture_vp9.c')
+endif
+if _codecs.contains('h264dec')
+  libva_files += files('picture_h264.c')
+endif
+if _codecs.contains('h265dec')
+  libva_files += files('picture_hevc.c')
+endif
+if _codecs.contains('av1dec')
+  libva_files += files('picture_av1.c')
+endif
+
+has_encode = false
+if _codecs.contains('h264enc')
+  libva_files += files('picture_h264_enc.c')
+  has_encode = true
+endif
+if _codecs.contains('h265enc')
+  libva_files += files('picture_hevc_enc.c')
+  has_encode = true
+endif
+if _codecs.contains('av1enc')
+  libva_files += files('picture_av1_enc.c')
+  has_encode = true
+endif
+if has_encode
+  libva_files += files('encode.c')
+endif
 
 libva_st = static_library(
   'va_st',
-  files(
-    'buffer.c', 'config.c', 'context.c', 'display.c', 'image.c', 'picture.c',
-    'picture_mpeg12.c', 'picture_mpeg4.c', 'picture_h264.c', 'picture_hevc.c',
-    'picture_vc1.c', 'picture_mjpeg.c', 'picture_vp9.c','picture_av1.c','postproc.c',
-    'subpicture.c', 'surface.c', 'picture_h264_enc.c', 'picture_hevc_enc.c',
-    'picture_av1_enc.c',
-  ),
+  libva_files,
   c_args : [
     '-DVA_DRIVER_INIT_FUNC=__vaDriverInit_@0@_@1@'.format(
       libva_version[0], libva_version[1]

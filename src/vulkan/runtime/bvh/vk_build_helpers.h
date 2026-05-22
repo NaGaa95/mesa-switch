@@ -180,6 +180,7 @@
 
 #define INFINITY (1.0 / 0.0)
 #define NAN      (0.0 / 0.0)
+#define NAN_F16  (0.0hf / 0.0hf)
 
 #define INDEX(type, ptr, index) REF(type)(OFFSET(ptr, (index)*SIZEOF(type)))
 

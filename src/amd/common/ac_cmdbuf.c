@@ -218,23 +218,21 @@ ac_write_harvested_raster_configs(const struct radeon_info *info, struct ac_pm4_
 }
 
 static void
-ac_set_raster_config(const struct radeon_info *info, struct ac_pm4_state *pm4)
+ac_emit_raster_config(const struct radeon_info *info, struct ac_pm4_state *pm4)
 {
    const unsigned num_rb = MIN2(info->max_render_backends, 16);
    const uint64_t rb_mask = info->enabled_rb_mask;
-   unsigned raster_config, raster_config_1;
-
-   ac_get_raster_config(info, &raster_config, &raster_config_1, NULL);
 
    if (!rb_mask || util_bitcount64(rb_mask) >= num_rb) {
       /* Always use the default config when all backends are enabled
        * (or when we failed to determine the enabled backends).
        */
-      ac_pm4_set_reg(pm4, R_028350_PA_SC_RASTER_CONFIG, raster_config);
+      ac_pm4_set_reg(pm4, R_028350_PA_SC_RASTER_CONFIG, info->pa_sc_raster_config);
       if (info->gfx_level >= GFX7)
-         ac_pm4_set_reg(pm4, R_028354_PA_SC_RASTER_CONFIG_1, raster_config_1);
+         ac_pm4_set_reg(pm4, R_028354_PA_SC_RASTER_CONFIG_1, info->pa_sc_raster_config_1);
    } else {
-      ac_write_harvested_raster_configs(info, pm4, raster_config, raster_config_1);
+      ac_write_harvested_raster_configs(info, pm4, info->pa_sc_raster_config,
+                                        info->pa_sc_raster_config_1);
    }
 }
 
@@ -301,7 +299,7 @@ gfx6_init_graphics_preamble_state(const struct ac_preamble_state *state,
    }
 
    if (info->gfx_level <= GFX8) {
-      ac_set_raster_config(info, pm4);
+      ac_emit_raster_config(info, pm4);
 
       /* FIXME calculate these values somehow ??? */
       ac_pm4_set_reg(pm4, R_028A54_VGT_GS_PER_ES, SI_GS_PER_ES);
@@ -771,6 +769,7 @@ gfx12_init_graphics_preamble_state(const struct ac_preamble_state *state,
                   S_028B50_ACCUM_QUAD(128) |
                   S_028B50_DONUT_SPLIT_GFX9(24) |
                   S_028B50_TRAP_SPLIT(6));
+   ac_pm4_set_reg(pm4, R_028B98_PA_SC_HIS_INFO, S_028B98_SURFACE_ENABLE(0));
    ac_pm4_set_reg(pm4, R_028BC0_PA_SC_HISZ_RENDER_OVERRIDE, 0);
 
    ac_pm4_set_reg(pm4, R_028C40_PA_SC_BINNER_OUTPUT_TIMEOUT_COUNTER, 0x800);
@@ -861,213 +860,190 @@ ac_init_graphics_preamble_state(const struct ac_preamble_state *state,
 }
 
 void
-ac_emit_cond_exec(struct ac_cmdbuf *cs, enum amd_gfx_level gfx_level,
-                  uint64_t va, uint32_t count)
+ac_set_tracked_regs_to_clear_state(struct ac_tracked_regs *tracked_regs,
+                                   const struct radeon_info *info)
 {
-   ac_cmdbuf_begin(cs);
-   if (gfx_level >= GFX7) {
-      ac_cmdbuf_emit(PKT3(PKT3_COND_EXEC, 3, 0));
-      ac_cmdbuf_emit(va);
-      ac_cmdbuf_emit(va >> 32);
-      ac_cmdbuf_emit(0);
-      ac_cmdbuf_emit(count);
+   assert(info->gfx_level < GFX12);
+   STATIC_ASSERT(AC_NUM_ALL_TRACKED_REGS <= sizeof(tracked_regs->reg_saved_mask) * 8);
+
+   tracked_regs->reg_value[AC_TRACKED_DB_RENDER_CONTROL] = 0;
+   tracked_regs->reg_value[AC_TRACKED_DB_COUNT_CONTROL] = 0;
+
+   tracked_regs->reg_value[AC_TRACKED_DB_DEPTH_CONTROL] = 0;
+   tracked_regs->reg_value[AC_TRACKED_DB_STENCIL_CONTROL] = 0;
+   tracked_regs->reg_value[AC_TRACKED_DB_DEPTH_BOUNDS_MIN] = 0;
+   tracked_regs->reg_value[AC_TRACKED_DB_DEPTH_BOUNDS_MAX] = 0;
+   tracked_regs->reg_value[AC_TRACKED_DB_ALPHA_TO_MASK] = 0;
+
+   if (info->gfx_level >= GFX9) {
+      tracked_regs->reg_value[AC_TRACKED_DB_STENCILREFMASK] = 0x01000000;
+      tracked_regs->reg_value[AC_TRACKED_DB_STENCILREFMASK_BF] = 0x01000000;
    } else {
-      ac_cmdbuf_emit(PKT3(PKT3_COND_EXEC, 2, 0));
-      ac_cmdbuf_emit(va);
-      ac_cmdbuf_emit(va >> 32);
-      ac_cmdbuf_emit(count);
+      tracked_regs->reg_value[AC_TRACKED_DB_STENCILREFMASK] = 0;
+      tracked_regs->reg_value[AC_TRACKED_DB_STENCILREFMASK_BF] = 0;
    }
-   ac_cmdbuf_end();
+
+   tracked_regs->reg_value[AC_TRACKED_SPI_INTERP_CONTROL_0] = 0;
+   tracked_regs->reg_value[AC_TRACKED_PA_SU_POINT_SIZE] = 0;
+   tracked_regs->reg_value[AC_TRACKED_PA_SU_POINT_MINMAX] = 0;
+   tracked_regs->reg_value[AC_TRACKED_PA_SU_LINE_CNTL] = 0;
+   tracked_regs->reg_value[AC_TRACKED_PA_SC_MODE_CNTL_0] = 0;
+   tracked_regs->reg_value[AC_TRACKED_PA_SU_SC_MODE_CNTL] = 0x4;
+   tracked_regs->reg_value[AC_TRACKED_PA_SC_EDGERULE] = 0xaa99aaaa;
+
+   if (info->gfx_level >= GFX10) {
+      tracked_regs->reg_value[AC_TRACKED_PA_SC_CONSERVATIVE_RASTERIZATION_CNTL] = 0x00100000;
+   } else {
+      tracked_regs->reg_value[AC_TRACKED_PA_SC_CONSERVATIVE_RASTERIZATION_CNTL] = 0;
+   }
+
+   tracked_regs->reg_value[AC_TRACKED_PA_SC_SHADER_CONTROL] = 0;
+
+   tracked_regs->reg_value[AC_TRACKED_PA_SU_POLY_OFFSET_DB_FMT_CNTL] = 0;
+   tracked_regs->reg_value[AC_TRACKED_PA_SU_POLY_OFFSET_CLAMP] = 0;
+   tracked_regs->reg_value[AC_TRACKED_PA_SU_POLY_OFFSET_FRONT_SCALE] = 0;
+   tracked_regs->reg_value[AC_TRACKED_PA_SU_POLY_OFFSET_FRONT_OFFSET] = 0;
+   tracked_regs->reg_value[AC_TRACKED_PA_SU_POLY_OFFSET_BACK_SCALE] = 0;
+   tracked_regs->reg_value[AC_TRACKED_PA_SU_POLY_OFFSET_BACK_OFFSET] = 0;
+
+   tracked_regs->reg_value[AC_TRACKED_PA_SC_LINE_CNTL] = 0x1000;
+   tracked_regs->reg_value[AC_TRACKED_PA_SC_AA_CONFIG] = 0;
+   tracked_regs->reg_value[AC_TRACKED_PA_SC_AA_MASK_X0Y0_X1Y0] = 0xffffffff;
+   tracked_regs->reg_value[AC_TRACKED_PA_SC_AA_MASK_X0Y1_X1Y1] = 0xffffffff;
+
+   tracked_regs->reg_value[AC_TRACKED_PA_SU_VTX_CNTL] = 0x5;
+   tracked_regs->reg_value[AC_TRACKED_PA_CL_GB_VERT_CLIP_ADJ] = 0x3f800000;
+   tracked_regs->reg_value[AC_TRACKED_PA_CL_GB_VERT_DISC_ADJ] = 0x3f800000;
+   tracked_regs->reg_value[AC_TRACKED_PA_CL_GB_HORZ_CLIP_ADJ] = 0x3f800000;
+   tracked_regs->reg_value[AC_TRACKED_PA_CL_GB_HORZ_DISC_ADJ] = 0x3f800000;
+   tracked_regs->reg_value[AC_TRACKED_PA_CL_VRS_CNTL] = 0;
+
+   tracked_regs->reg_value[AC_TRACKED_SPI_SHADER_IDX_FORMAT] = 0;
+   tracked_regs->reg_value[AC_TRACKED_SPI_SHADER_POS_FORMAT] = 0;
+
+   tracked_regs->reg_value[AC_TRACKED_SPI_SHADER_Z_FORMAT] = 0;
+   tracked_regs->reg_value[AC_TRACKED_SPI_SHADER_COL_FORMAT] = 0;
+   tracked_regs->reg_value[AC_TRACKED_SPI_PS_INPUT_ENA] = 0;
+   tracked_regs->reg_value[AC_TRACKED_SPI_PS_INPUT_ADDR] = 0;
+
+   tracked_regs->reg_value[AC_TRACKED_DB_EQAA] = 0;
+   tracked_regs->reg_value[AC_TRACKED_DB_RENDER_OVERRIDE2] = 0;
+   tracked_regs->reg_value[AC_TRACKED_DB_SHADER_CONTROL] = 0;
+   tracked_regs->reg_value[AC_TRACKED_CB_SHADER_MASK] = 0xffffffff;
+   tracked_regs->reg_value[AC_TRACKED_CB_TARGET_MASK] = 0xffffffff;
+   tracked_regs->reg_value[AC_TRACKED_PA_CL_CLIP_CNTL] = 0x90000;
+   tracked_regs->reg_value[AC_TRACKED_PA_CL_VS_OUT_CNTL] = 0;
+   tracked_regs->reg_value[AC_TRACKED_PA_CL_VTE_CNTL] = 0;
+   tracked_regs->reg_value[AC_TRACKED_PA_SC_CLIPRECT_RULE] = 0xffff;
+   tracked_regs->reg_value[AC_TRACKED_PA_SC_LINE_STIPPLE] = 0;
+   tracked_regs->reg_value[AC_TRACKED_PA_SC_MODE_CNTL_1] = 0;
+   tracked_regs->reg_value[AC_TRACKED_PA_SU_HARDWARE_SCREEN_OFFSET] = 0;
+   tracked_regs->reg_value[AC_TRACKED_SPI_PS_IN_CONTROL] = 0x2;
+   tracked_regs->reg_value[AC_TRACKED_VGT_GS_INSTANCE_CNT] = 0;
+   tracked_regs->reg_value[AC_TRACKED_VGT_GS_MAX_VERT_OUT] = 0;
+   tracked_regs->reg_value[AC_TRACKED_VGT_SHADER_STAGES_EN] = 0;
+   tracked_regs->reg_value[AC_TRACKED_VGT_LS_HS_CONFIG] = 0;
+   tracked_regs->reg_value[AC_TRACKED_VGT_TF_PARAM] = 0;
+   tracked_regs->reg_value[AC_TRACKED_PA_SU_SMALL_PRIM_FILTER_CNTL] = 0;
+   tracked_regs->reg_value[AC_TRACKED_PA_SC_BINNER_CNTL_0] = 0x3;
+   tracked_regs->reg_value[AC_TRACKED_GE_MAX_OUTPUT_PER_SUBGROUP] = 0;
+   tracked_regs->reg_value[AC_TRACKED_GE_NGG_SUBGRP_CNTL] = 0;
+   tracked_regs->reg_value[AC_TRACKED_PA_CL_NGG_CNTL] = 0;
+   tracked_regs->reg_value[AC_TRACKED_DB_PA_SC_VRS_OVERRIDE_CNTL] = 0;
+
+   tracked_regs->reg_value[AC_TRACKED_SX_PS_DOWNCONVERT] = 0;
+   tracked_regs->reg_value[AC_TRACKED_SX_BLEND_OPT_EPSILON] = 0;
+   tracked_regs->reg_value[AC_TRACKED_SX_BLEND_OPT_CONTROL] = 0;
+
+   tracked_regs->reg_value[AC_TRACKED_VGT_ESGS_RING_ITEMSIZE] = 0;
+   tracked_regs->reg_value[AC_TRACKED_VGT_REUSE_OFF] = 0;
+   tracked_regs->reg_value[AC_TRACKED_IA_MULTI_VGT_PARAM] = 0xff;
+
+   tracked_regs->reg_value[AC_TRACKED_VGT_GS_MAX_PRIMS_PER_SUBGROUP] = 0;
+   tracked_regs->reg_value[AC_TRACKED_VGT_GS_ONCHIP_CNTL] = 0;
+
+   tracked_regs->reg_value[AC_TRACKED_VGT_GSVS_RING_ITEMSIZE] = 0;
+   tracked_regs->reg_value[AC_TRACKED_VGT_GS_MODE] = 0;
+   tracked_regs->reg_value[AC_TRACKED_VGT_VERTEX_REUSE_BLOCK_CNTL] = 0x1e;
+   tracked_regs->reg_value[AC_TRACKED_VGT_GS_OUT_PRIM_TYPE] = 0;
+
+   tracked_regs->reg_value[AC_TRACKED_VGT_GSVS_RING_OFFSET_1] = 0;
+   tracked_regs->reg_value[AC_TRACKED_VGT_GSVS_RING_OFFSET_2] = 0;
+   tracked_regs->reg_value[AC_TRACKED_VGT_GSVS_RING_OFFSET_3] = 0;
+
+   tracked_regs->reg_value[AC_TRACKED_VGT_GS_VERT_ITEMSIZE] = 0;
+   tracked_regs->reg_value[AC_TRACKED_VGT_GS_VERT_ITEMSIZE_1] = 0;
+   tracked_regs->reg_value[AC_TRACKED_VGT_GS_VERT_ITEMSIZE_2] = 0;
+   tracked_regs->reg_value[AC_TRACKED_VGT_GS_VERT_ITEMSIZE_3] = 0;
+
+   tracked_regs->reg_value[AC_TRACKED_SPI_VS_OUT_CONFIG] = 0;
+
+   tracked_regs->reg_value[AC_TRACKED_VGT_PRIMITIVEID_EN] = 0;
+   tracked_regs->reg_value[AC_TRACKED_VGT_DRAW_PAYLOAD_CNTL] = 0;
+   tracked_regs->reg_value[AC_TRACKED_VGT_MULTI_PRIM_IB_RESET_INDX] = 0;
+
+   tracked_regs->reg_value[AC_TRACKED_CB_DCC_CONTROL] = 0;
+   tracked_regs->reg_value[AC_TRACKED_CB_COLOR_CONTROL] = 0;
+
+   tracked_regs->reg_value[AC_TRACKED_DB_PA_SC_VRS_OVERRIDE_CNTL] = 0;
+
+   /* Set all cleared context registers to saved. */
+   BITSET_SET_COUNT(tracked_regs->reg_saved_mask, 0, AC_NUM_TRACKED_CONTEXT_REGS);
 }
 
 void
-ac_emit_write_data_imm(struct ac_cmdbuf *cs, unsigned engine_sel, uint64_t va, uint32_t value)
+ac_init_tracked_regs(struct ac_tracked_regs *tracked_regs,
+                     const struct radeon_info *info, bool init_to_clear_state)
 {
-   ac_cmdbuf_begin(cs);
-   ac_cmdbuf_emit(PKT3(PKT3_WRITE_DATA, 3, 0));
-   ac_cmdbuf_emit(S_370_DST_SEL(V_370_MEM) | S_370_WR_CONFIRM(1) | S_370_ENGINE_SEL(engine_sel));
-   ac_cmdbuf_emit(va);
-   ac_cmdbuf_emit(va >> 32);
-   ac_cmdbuf_emit(value);
-   ac_cmdbuf_end();
+   /* Set all register values to unknown. */
+   memset(tracked_regs->reg_value, 0, AC_NUM_ALL_TRACKED_REGS * sizeof(uint32_t));
+   BITSET_ZERO(tracked_regs->reg_saved_mask);
+
+   if (info->has_clear_state && init_to_clear_state)
+      ac_set_tracked_regs_to_clear_state(tracked_regs, info);
+
+   /* 0xffffffff is an impossible value for these registers */
+   memset(tracked_regs->spi_ps_input_cntl, 0xff, sizeof(uint32_t) * 32);
+   memset(tracked_regs->cb_blend_control, 0xff, sizeof(uint32_t) * 8);
+   memset(tracked_regs->sx_mrt_blend_opt, 0xff, sizeof(uint32_t) * 8);
 }
 
 void
-ac_emit_cp_wait_mem(struct ac_cmdbuf *cs, uint64_t va, uint32_t ref,
-                    uint32_t mask, unsigned flags)
+ac_cmdbuf_flush_vgt_streamout(struct ac_cmdbuf *cs, enum amd_gfx_level gfx_level)
 {
+   uint32_t reg_strmout_cntl;
+
    ac_cmdbuf_begin(cs);
+
+   /* The register is at different places on different ASICs. */
+   if (gfx_level >= GFX9) {
+      reg_strmout_cntl = R_0300FC_CP_STRMOUT_CNTL;
+
+      ac_cmdbuf_emit(PKT3(PKT3_WRITE_DATA, 3, 0));
+      ac_cmdbuf_emit(S_371_DST_SEL(V_371_MEM_MAPPED_REGISTER) |
+                     S_371_ENGINE_SEL(V_371_MICRO_ENGINE));
+      ac_cmdbuf_emit(R_0300FC_CP_STRMOUT_CNTL >> 2);
+      ac_cmdbuf_emit(0);
+      ac_cmdbuf_emit(0);
+   } else if (gfx_level >= GFX7) {
+      reg_strmout_cntl = R_0300FC_CP_STRMOUT_CNTL;
+
+      ac_cmdbuf_set_ucfg_reg(reg_strmout_cntl, 0);
+   } else {
+      reg_strmout_cntl = R_0084FC_CP_STRMOUT_CNTL;
+
+      ac_cmdbuf_set_cfg_reg(reg_strmout_cntl, 0);
+   }
+
+   ac_cmdbuf_event_write(V_028A90_SO_VGTSTREAMOUT_FLUSH);
+
    ac_cmdbuf_emit(PKT3(PKT3_WAIT_REG_MEM, 5, 0));
-   ac_cmdbuf_emit(WAIT_REG_MEM_MEM_SPACE(1) | flags);
-   ac_cmdbuf_emit(va);
-   ac_cmdbuf_emit(va >> 32);
-   ac_cmdbuf_emit(ref);  /* reference value */
-   ac_cmdbuf_emit(mask); /* mask */
-   ac_cmdbuf_emit(4);    /* poll interval */
-   ac_cmdbuf_end();
-}
-
-static bool
-is_ts_event(unsigned event_type)
-{
-   return event_type == V_028A90_CACHE_FLUSH_TS ||
-          event_type == V_028A90_CACHE_FLUSH_AND_INV_TS_EVENT ||
-          event_type == V_028A90_BOTTOM_OF_PIPE_TS ||
-          event_type == V_028A90_FLUSH_AND_INV_DB_DATA_TS ||
-          event_type == V_028A90_FLUSH_AND_INV_CB_DATA_TS;
-}
-
-/* This will wait or insert into the pipeline a wait for a previous
- * RELEASE_MEM PWS event.
- *
- * "event_type" must be the same as the RELEASE_MEM PWS event.
- *
- * "stage_sel" determines when the waiting happens. It can be CP_PFP, CP_ME,
- * PRE_SHADER, PRE_DEPTH, or PRE_PIX_SHADER, allowing to wait later in the
- * pipeline instead of completely idling the hw at the frontend.
- *
- * "gcr_cntl" must be 0 if not waiting in PFP or ME. When waiting later in the
- * pipeline, any cache flushes must be part of RELEASE_MEM, not ACQUIRE_MEM.
- *
- * "distance" determines how many RELEASE_MEM PWS events ago it should wait
- * for, minus one (starting from 0). There are 3 event types: PS_DONE,
- * CS_DONE, and TS events. The distance counter increments separately for each
- * type, so 0 with PS_DONE means wait for the last PS_DONE event, while 0 with
- * *_TS means wait for the last TS event (even if it's a different TS event
- * because all TS events share the same counter).
- *
- * PRE_SHADER waits before the first shader that has IMAGE_OP=1, while
- * PRE_PIX_SHADER waits before PS if it has IMAGE_OP=1 (IMAGE_OP should really
- * be called SYNC_ENABLE) PRE_DEPTH waits before depth/stencil tests.
- *
- * PRE_COLOR also exists but shouldn't be used because it can hang. It's
- * recommended to use PRE_PIX_SHADER instead, which means all PS that have
- * color exports with enabled color buffers, non-zero colormask, and non-zero
- * sample mask must have IMAGE_OP=1 to enable the sync before PS.
- *
- * Waiting for a PWS fence that was generated by a previous IB is valid, but
- * if there is an IB from another process in between and that IB also inserted
- * a PWS fence, the hw will wait for the newer fence instead because the PWS
- * counter was incremented.
- */
-void
-ac_emit_cp_acquire_mem_pws(struct ac_cmdbuf *cs, ASSERTED enum amd_gfx_level gfx_level,
-                           ASSERTED enum amd_ip_type ip_type, uint32_t event_type,
-                           uint32_t stage_sel, uint32_t count,
-                           uint32_t gcr_cntl)
-{
-   assert(gfx_level >= GFX11 && ip_type == AMD_IP_GFX);
-
-   const bool ts = is_ts_event(event_type);
-   const bool ps_done = event_type == V_028A90_PS_DONE;
-   const bool cs_done = event_type == V_028A90_CS_DONE;
-   const uint32_t counter_sel = ts ? V_580_TS_SELECT : ps_done ? V_580_PS_SELECT : V_580_CS_SELECT;
-
-   assert((int)ts + (int)cs_done + (int)ps_done == 1);
-   assert(!gcr_cntl || stage_sel == V_580_CP_PFP || stage_sel == V_580_CP_ME);
-   assert(stage_sel != V_580_PRE_COLOR);
-
-   ac_cmdbuf_begin(cs);
-   ac_cmdbuf_emit(PKT3(PKT3_ACQUIRE_MEM, 6, 0));
-   ac_cmdbuf_emit(S_580_PWS_STAGE_SEL(stage_sel) |
-                  S_580_PWS_COUNTER_SEL(counter_sel) |
-                  S_580_PWS_ENA2(1) |
-                  S_580_PWS_COUNT(count));
-   ac_cmdbuf_emit(0xffffffff); /* GCR_SIZE */
-   ac_cmdbuf_emit(0x01ffffff); /* GCR_SIZE_HI */
-   ac_cmdbuf_emit(0);          /* GCR_BASE_LO */
-   ac_cmdbuf_emit(0);          /* GCR_BASE_HI */
-   ac_cmdbuf_emit(S_585_PWS_ENA(1));
-   ac_cmdbuf_emit(gcr_cntl); /* GCR_CNTL (this has no effect if PWS_STAGE_SEL isn't PFP or ME) */
-   ac_cmdbuf_end();
-}
-
-/* Insert CS_DONE, PS_DONE, or a *_TS event into the pipeline, which will
- * signal after the work indicated by the event is complete, which optionally
- * includes flushing caches using "gcr_cntl" after the completion of the work.
- * *_TS events are always signaled at the end of the pipeline, while CS_DONE
- * and PS_DONE are signaled when those shaders finish. This call only inserts
- * the event into the pipeline. It doesn't wait for anything and it doesn't
- * execute anything immediately. The only way to wait for the event completion
- * is to call si_cp_acquire_mem_pws with the same "event_type".
- */
-void
-ac_emit_cp_release_mem_pws(struct ac_cmdbuf *cs, ASSERTED enum amd_gfx_level gfx_level,
-                           ASSERTED enum amd_ip_type ip_type, uint32_t event_type,
-                           uint32_t gcr_cntl)
-{
-   assert(gfx_level >= GFX11 && ip_type == AMD_IP_GFX);
-
-   /* Extract GCR_CNTL fields because the encoding is different in RELEASE_MEM. */
-   assert(G_586_GLI_INV(gcr_cntl) == 0);
-   assert(G_586_GL1_RANGE(gcr_cntl) == 0);
-   const uint32_t glm_wb = G_586_GLM_WB(gcr_cntl);
-   const uint32_t glm_inv = G_586_GLM_INV(gcr_cntl);
-   const uint32_t glk_wb = G_586_GLK_WB(gcr_cntl);
-   const uint32_t glk_inv = G_586_GLK_INV(gcr_cntl);
-   const uint32_t glv_inv = G_586_GLV_INV(gcr_cntl);
-   const uint32_t gl1_inv = G_586_GL1_INV(gcr_cntl);
-   assert(G_586_GL2_US(gcr_cntl) == 0);
-   assert(G_586_GL2_RANGE(gcr_cntl) == 0);
-   assert(G_586_GL2_DISCARD(gcr_cntl) == 0);
-   const uint32_t gl2_inv = G_586_GL2_INV(gcr_cntl);
-   const uint32_t gl2_wb = G_586_GL2_WB(gcr_cntl);
-   const uint32_t gcr_seq = G_586_SEQ(gcr_cntl);
-   const bool ts = is_ts_event(event_type);
-
-   ac_cmdbuf_begin(cs);
-   ac_cmdbuf_emit(PKT3(PKT3_RELEASE_MEM, 6, 0));
-   ac_cmdbuf_emit(S_490_EVENT_TYPE(event_type) |
-                   S_490_EVENT_INDEX(ts ? 5 : 6) |
-                   S_490_GLM_WB(glm_wb) |
-                   S_490_GLM_INV(glm_inv) |
-                   S_490_GLV_INV(glv_inv) |
-                   S_490_GL1_INV(gl1_inv) |
-                   S_490_GL2_INV(gl2_inv) |
-                   S_490_GL2_WB(gl2_wb) |
-                   S_490_SEQ(gcr_seq) |
-                   S_490_GLK_WB(glk_wb) |
-                   S_490_GLK_INV(glk_inv) |
-                   S_490_PWS_ENABLE(1));
-   ac_cmdbuf_emit(0); /* DST_SEL, INT_SEL, DATA_SEL */
-   ac_cmdbuf_emit(0); /* ADDRESS_LO */
-   ac_cmdbuf_emit(0); /* ADDRESS_HI */
-   ac_cmdbuf_emit(0); /* DATA_LO */
-   ac_cmdbuf_emit(0); /* DATA_HI */
-   ac_cmdbuf_emit(0); /* INT_CTXID */
-   ac_cmdbuf_end();
-}
-
-void
-ac_emit_cp_copy_data(struct ac_cmdbuf *cs, uint32_t src_sel, uint32_t dst_sel,
-                     uint64_t src_va, uint64_t dst_va,
-                     enum ac_cp_copy_data_flags flags)
-{
-   uint32_t dword0 = COPY_DATA_SRC_SEL(src_sel) |
-                     COPY_DATA_DST_SEL(dst_sel);
-
-   if (flags & AC_CP_COPY_DATA_WR_CONFIRM)
-      dword0 |= COPY_DATA_WR_CONFIRM;
-   if (flags & AC_CP_COPY_DATA_COUNT_SEL)
-      dword0 |= COPY_DATA_COUNT_SEL;
-   if (flags & AC_CP_COPY_DATA_ENGINE_PFP)
-      dword0 |= COPY_DATA_ENGINE_PFP;
-
-   ac_cmdbuf_begin(cs);
-   ac_cmdbuf_emit(PKT3(PKT3_COPY_DATA, 4, 0));
-   ac_cmdbuf_emit(dword0);
-   ac_cmdbuf_emit(src_va);
-   ac_cmdbuf_emit(src_va >> 32);
-   ac_cmdbuf_emit(dst_va);
-   ac_cmdbuf_emit(dst_va >> 32);
-   ac_cmdbuf_end();
-}
-
-void
-ac_emit_cp_pfp_sync_me(struct ac_cmdbuf *cs)
-{
-   ac_cmdbuf_begin(cs);
-   ac_cmdbuf_emit(PKT3(PKT3_PFP_SYNC_ME, 0, 0));
+   ac_cmdbuf_emit(WAIT_REG_MEM_EQUAL);             /* wait until the register is equal to the reference value */
+   ac_cmdbuf_emit(reg_strmout_cntl >> 2);          /* register */
    ac_cmdbuf_emit(0);
+   ac_cmdbuf_emit(S_0084FC_OFFSET_UPDATE_DONE(1)); /* reference value */
+   ac_cmdbuf_emit(S_0084FC_OFFSET_UPDATE_DONE(1)); /* mask */
+   ac_cmdbuf_emit(4);                              /* poll interval */
+
    ac_cmdbuf_end();
 }

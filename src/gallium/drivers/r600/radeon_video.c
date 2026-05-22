@@ -228,9 +228,6 @@ int rvid_get_video_param(struct pipe_screen *screen,
 			/* no support for MPEG2 on older hw */
 			return profile != PIPE_VIDEO_PROFILE_MPEG1 &&
 				rscreen->family >= CHIP_PALM;
-		case PIPE_VIDEO_FORMAT_MPEG4:
-			/* no support for MPEG4 on older hw */
-			return rscreen->family >= CHIP_PALM;
 		case PIPE_VIDEO_FORMAT_MPEG4_AVC:
 			return true;
 		case PIPE_VIDEO_FORMAT_VC1:
@@ -260,10 +257,6 @@ int rvid_get_video_param(struct pipe_screen *screen,
 		case PIPE_VIDEO_PROFILE_MPEG2_SIMPLE:
 		case PIPE_VIDEO_PROFILE_MPEG2_MAIN:
 			return 3;
-		case PIPE_VIDEO_PROFILE_MPEG4_SIMPLE:
-			return 3;
-		case PIPE_VIDEO_PROFILE_MPEG4_ADVANCED_SIMPLE:
-			return 5;
 		case PIPE_VIDEO_PROFILE_VC1_SIMPLE:
 			return 1;
 		case PIPE_VIDEO_PROFILE_VC1_MAIN:

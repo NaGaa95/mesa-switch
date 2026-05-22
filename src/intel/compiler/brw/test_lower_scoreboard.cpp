@@ -1215,3 +1215,74 @@ TEST_F(scoreboard_test, math_inv_with_mul_dependency)
 
    EXPECT_SHADERS_MATCH(bld, exp);
 }
+
+TEST_F(scoreboard_test, implicit_dependency_unordered_dst_then_src)
+{
+   brw_builder bld = make_shader();
+   brw_builder exp = make_shader();
+
+   brw_reg *g = vgrf_array(bld, exp, BRW_TYPE_D, 6);
+   brw_reg desc = brw_imm_ud(0);
+
+   emit_SEND(bld, g[1], desc, g[2]);
+   bld.MOV(g[3], g[1]);
+   bld.MOV(g[4], g[2]);
+
+   EXPECT_PROGRESS(brw_lower_scoreboard, bld);
+
+   emit_SEND(exp, g[1], desc, g[2])->sched = SWSB("$0");
+   exp.MOV(g[3], g[1])->sched = SWSB("$0.dst");
+   exp.MOV(g[4], g[2]);
+
+   EXPECT_SHADERS_MATCH(bld, exp);
+}
+
+TEST_F(scoreboard_test, no_implicit_dependency_unordered_src_then_dst)
+{
+   brw_builder bld = make_shader();
+   brw_builder exp = make_shader();
+
+   brw_reg *g = vgrf_array(bld, exp, BRW_TYPE_D, 6);
+   brw_reg desc = brw_imm_ud(0);
+
+   emit_SEND(bld, g[1], desc, g[2]);
+   bld.MOV(g[3], g[2]);
+   bld.MOV(g[4], g[1]);
+
+   EXPECT_PROGRESS(brw_lower_scoreboard, bld);
+
+   emit_SEND(exp, g[1], desc, g[2])->sched = SWSB("$0");
+   exp.MOV(g[3], g[2])->sched = SWSB("$0.src");
+   exp.MOV(g[4], g[1])->sched = SWSB("$0.dst");
+
+   EXPECT_SHADERS_MATCH(bld, exp);
+}
+
+TEST_F(scoreboard_test, implicit_dependency_inside_if)
+{
+   brw_builder bld = make_shader();
+   brw_builder exp = make_shader();
+
+   brw_reg *g = vgrf_array(bld, exp, BRW_TYPE_D, 6);
+   brw_reg desc = brw_imm_ud(0);
+
+   bld.IF();
+   emit_SEND(bld, g[1], desc, g[2]);
+   bld.MOV(g[3], g[1]);
+   bld.MOV(g[4], g[2]);
+   bld.ELSE();
+   bld.NOP();
+   bld.ENDIF();
+
+   EXPECT_PROGRESS(brw_lower_scoreboard, bld);
+
+   exp.IF();
+   emit_SEND(exp, g[1], desc, g[2])->sched = SWSB("$0");
+   exp.MOV(g[3], g[1])->sched = SWSB("$0.dst");
+   exp.MOV(g[4], g[2]);
+   exp.ELSE();
+   exp.NOP();
+   exp.ENDIF();
+
+   EXPECT_SHADERS_MATCH(bld, exp);
+}

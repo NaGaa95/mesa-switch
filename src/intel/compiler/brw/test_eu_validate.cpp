@@ -1,24 +1,6 @@
 /*
  * Copyright © 2016 Intel Corporation
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
- * IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  */
 
 #include <gtest/gtest.h>
@@ -436,16 +418,18 @@ TEST_P(validation_test, invalid_type_encoding_3src_a1)
       bool expected_result;
    } test_case[] = {
 #define E(x) ((unsigned)BRW_ALIGN1_3SRC_EXEC_TYPE_##x)
-      { BRW_TYPE_DF, E(FLOAT), devinfo.has_64bit_float },
-      { BRW_TYPE_F,  E(FLOAT), true  },
-      { BRW_TYPE_HF, E(FLOAT), true  },
-      { BRW_TYPE_Q,  E(INT),   devinfo.has_64bit_int },
-      { BRW_TYPE_UQ, E(INT),   devinfo.has_64bit_int },
-      { BRW_TYPE_D,  E(INT),   true  },
-      { BRW_TYPE_UD, E(INT),   true  },
-      { BRW_TYPE_W,  E(INT),   true  },
-      { BRW_TYPE_UW, E(INT),   true  },
-      { BRW_TYPE_BF, E(FLOAT), devinfo.has_bfloat16 },
+      { BRW_TYPE_DF,  E(FLOAT), devinfo.has_64bit_float },
+      { BRW_TYPE_F,   E(FLOAT), true  },
+      { BRW_TYPE_HF,  E(FLOAT), true  },
+      { BRW_TYPE_Q,   E(INT),   devinfo.has_64bit_int },
+      { BRW_TYPE_UQ,  E(INT),   devinfo.has_64bit_int },
+      { BRW_TYPE_D,   E(INT),   true  },
+      { BRW_TYPE_UD,  E(INT),   true  },
+      { BRW_TYPE_W,   E(INT),   true  },
+      { BRW_TYPE_UW,  E(INT),   true  },
+      { BRW_TYPE_BF,  E(FLOAT), devinfo.has_bfloat16 },
+      { BRW_TYPE_BF8, E(FLOAT), devinfo.has_fp8 },
+      { BRW_TYPE_HF8, E(FLOAT), devinfo.has_fp8 },
 
       /* There are no ternary instructions that can operate on B-type sources
        * on Gfx11-12. Src1/Src2 cannot be B-typed either.
@@ -3871,11 +3855,7 @@ TEST_P(validation_test, bfloat_restrictions)
          UNREACHABLE("unexpected opcode in tests");
       }
 
-      if (tests[i].opcode == BRW_OPCODE_MAD) {
-         brw_eu_inst_set_3src_exec_size(&devinfo, last_inst, cvt(t.exec_size) - 1);
-      } else {
-         brw_eu_inst_set_exec_size(&devinfo, last_inst, cvt(t.exec_size) - 1);
-      }
+      brw_eu_inst_set_exec_size(&devinfo, last_inst, cvt(t.exec_size) - 1);
 
       /* TODO: Expand this test logic to check validation error to other
        * tests.
@@ -3933,6 +3913,56 @@ TEST_P(validation_test, srnd_type_and_immediate_restrictions)
       dst,
       retype(g0, BRW_TYPE_F),
       retype(g0, BRW_TYPE_UW));
+   EXPECT_FALSE(validate(p));
+   clear_instructions(p);
+}
+
+TEST_P(validation_test, mul_dont_mix_floats_and_ints)
+{
+   brw_reg a = brw_ud8_grf(10, 0);
+   brw_reg b = brw_ud8_grf(20, 0);
+   brw_reg c = brw_ud8_grf(30, 0);
+
+   brw_MUL(p, retype(a, BRW_TYPE_F),
+              retype(b, BRW_TYPE_UD),
+              retype(c, BRW_TYPE_UD));
+   EXPECT_FALSE(validate(p));
+   clear_instructions(p);
+
+   brw_MUL(p, retype(a, BRW_TYPE_F),
+              retype(b, BRW_TYPE_F),
+              retype(c, BRW_TYPE_UD));
+   EXPECT_FALSE(validate(p));
+   clear_instructions(p);
+
+   brw_MUL(p, retype(a, BRW_TYPE_F),
+              retype(b, BRW_TYPE_UD),
+              brw_imm_vf(0));
+   EXPECT_FALSE(validate(p));
+   clear_instructions(p);
+}
+
+TEST_P(validation_test, mul_dont_accept_int_accumulator_src)
+{
+   brw_reg a = brw_ud8_grf(10, 0);
+   brw_reg c = brw_ud8_grf(30, 0);
+
+   brw_MUL(p, retype(a,    BRW_TYPE_UD),
+              retype(acc0, BRW_TYPE_UD),
+              retype(c,    BRW_TYPE_UD));
+   EXPECT_FALSE(validate(p));
+   clear_instructions(p);
+}
+
+TEST_P(validation_test, add_dont_mix_integer_and_float_sources)
+{
+   brw_reg a = brw_ud8_grf(10, 0);
+   brw_reg b = brw_ud8_grf(20, 0);
+   brw_reg c = brw_ud8_grf(30, 0);
+
+   brw_ADD(p, retype(a, BRW_TYPE_F),
+              retype(b, BRW_TYPE_F),
+              retype(c, BRW_TYPE_UD));
    EXPECT_FALSE(validate(p));
    clear_instructions(p);
 }

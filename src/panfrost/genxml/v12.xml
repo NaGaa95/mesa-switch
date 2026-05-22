@@ -1,3 +1,8 @@
+<!--
+  Copyright (C) 2025 Collabora Ltd.
+  SPDX-License-Identifier: MIT
+-->
+
 <panxml arch="12">
   <enum name="Attribute Type">
     <value name="1D" value="1"/>
@@ -228,7 +233,7 @@
     <value name="RGBA8 UNORM" value="187"/>
     <value name="RGBA16 UNORM" value="188"/>
     <value name="RGBA32 UNORM" value="189"/>
-    <!-- 190 reserved -->
+    <value name="R10X6G10X6B10X6A10X6 UNORM" value="190"/>
     <value name="RGBA32F" value="191"/>
     <!-- 192-194 reserved -->
     <value name="R8I" value="195"/>
@@ -367,6 +372,7 @@
     <!--- 16x16 block u-interleaved -->
     <value name="Tiled U-Interleaved" value="1"/>
     <value name="Linear" value="2"/>
+    <value name="Interleaved 64k" value="8"/>
     <value name="AFBC" value="12"/>
     <value name="AFBC Tiled" value="13"/>
   </enum>
@@ -831,7 +837,7 @@
 
   <struct name="CS RUN_COMPUTE_INDIRECT" size="2">
     <field name="Workgroups Per Task" size="16" start="0" type="uint"/>
-    <field name="Endpoint Limit" size="8" start="16" type="uint"/>
+    <field name="Ep Limit" size="8" start="16" type="uint"/>
     <field name="Progress Increment" size="1" start="32" type="CS Progress Increment" default="No Increment"/>
     <field name="SRT Select" size="2" start="40" type="uint"/>
     <field name="SPD Select" size="2" start="42" type="uint"/>
@@ -1177,7 +1183,7 @@
     <field name="Divisor R" size="5" start="1:24" type="uint"/>
     <field name="Divisor E" size="1" start="1:29" type="uint"/>
     <field name="Offset" size="32" start="2:0" type="int"/>
-    <field name="Buffer index" size="32" start="3:0" type="uint"/> 
+    <field name="Buffer index" size="32" start="3:0" type="uint"/>
     <field name="Stride" size="32" start="4:0" type="uint"/>
 
     <!-- Vertex packet buffer only -->
@@ -1185,24 +1191,6 @@
     <field name="Packet stride" size="16" start="4:16" type="uint"/>
 
     <field name="Divisor D" size="32" start="5:0" type="uint"/>
-  </struct>
-
-  <struct name="Buffer" size="8" align="32">
-    <field name="Type" size="4" start="0:0" type="Descriptor Type" default="Buffer"/>
-    <field name="Buffer type" size="4" start="0:4" type="Buffer Type" default="Simple"/>
-    <field name="Size" size="32" start="1:0" type="uint"/>
-    <field name="Address" size="64" start="2:0" type="address"/>
-
-    <!-- Not for Tiler heap -->
-    <field name="Size hi" size="32" start="5:0" type="uint"/>
-
-    <!-- Structured buffer only -->
-    <field name="Stride" size="32" start="4:0" type="uint"/>
-
-    <!-- Vertex packet buffer only -->
-    <field name="Packet stride" size="16" start="4:0" type="uint" modifier="shr(6)"/>
-    <field name="Attribute stride" size="16" start="4:16" type="uint"/>
-
   </struct>
 
   <enum name="Blend Operand A">
@@ -1267,7 +1255,6 @@
   <struct name="Internal Conversion" size="1" align="4">
     <field name="Memory Format" size="22" start="0" type="Pixel Format"/>
     <field name="Raw" size="1" start="22" type="bool"/>
-    <field name="Register Format" size="3" start="24" type="Register File Format"/>
   </struct>
 
   <struct name="Blend Fixed-Function" size="2">
@@ -1284,7 +1271,7 @@
     <field name="Fixed-Function" size="64" start="0:0" type="Blend Fixed-Function"/>
   </struct>
 
-  <struct name="Blend" size="4" align="16">
+  <struct name="Blend" size="4" align="64">
     <field name="Load Destination" size="1" start="0:0" type="bool" default="false"/>
     <field name="Alpha To One" size="1" start="0:8" type="bool"/>
     <field name="Enable" size="1" start="0:9" type="bool" default="true"/>
@@ -1293,6 +1280,26 @@
     <field name="Blend Constant" size="16" start="0:16" type="uint"/>
     <field name="Equation" size="32" start="1:0" type="Blend Equation"/>
     <field name="Internal" size="64" start="2:0" type="Internal Blend"/>
+  </struct>
+
+  <struct name="Buffer" size="8" align="32">
+    <field name="Type" size="4" start="0:0" type="Descriptor Type" default="Buffer"/>
+    <field name="Buffer type" size="4" start="0:4" type="Buffer Type" default="Simple"/>
+    <field name="Size" size="32" start="1:0" type="uint"/>
+    <field name="Address" size="64" start="2:0" type="address"/>
+
+    <!-- Structured buffer only -->
+    <field name="Stride" size="32" start="4:0" type="uint"/>
+
+    <!-- Vertex packet buffer only -->
+    <field name="Packet stride" size="16" start="4:0" type="uint" modifier="shr(6)"/>
+    <field name="Attribute stride" size="16" start="4:16" type="uint"/>
+
+    <!-- Not for Tiler heap -->
+    <field name="Size hi" size="32" start="5:0" type="uint"/>
+
+    <!-- Texel buffer only, this is not interpreted by HW -->
+    <field name="Conversion" size="32" start="7:0" type="Internal Conversion"/>
   </struct>
 
   <enum name="Point Size Array Format">
@@ -1312,7 +1319,7 @@
     <field name="Index type" size="3" start="0:8" type="Index Type" default="None"/>
     <field name="Point size array format" size="2" start="0:11" type="Point Size Array Format"/>
     <field name="Primitive Index Enable" size="1" start="0:13" type="bool"/>
-    <field name="Primitive Index Writeback" size="1" start="0:14" type="bool"/>
+    <field name="Primitive Index Override" size="1" start="0:14" type="bool"/>
     <field name="Allow rotating primitives" size="1" start="0:15" type="bool"/>
     <field name="Low Depth Cull" size="1" start="0:16" type="bool" default="true"/>
     <field name="High Depth Cull" size="1" start="0:17" type="bool" default="true"/>
@@ -1354,7 +1361,7 @@
     <field name="Draw mode" size="8" start="0:0" type="Draw Mode" default="None"/>
     <field name="Index type" size="3" start="0:8" type="Index Type" default="None"/>
     <field name="Primitive Index Enable" size="1" start="0:13" type="bool"/>
-    <field name="Primitive Index Writeback" size="1" start="0:14" type="bool"/>
+    <field name="Primitive Index Override" size="1" start="0:14" type="bool"/>
     <field name="Allow rotating primitives" size="1" start="0:15" type="bool"/>
     <field name="Low Depth Cull" size="1" start="0:16" type="bool" default="true"/>
     <field name="High Depth Cull" size="1" start="0:17" type="bool" default="true"/>
@@ -1418,6 +1425,7 @@
   <enum name="Clump Ordering">
     <value name="Tiled U-Interleaved" value="1"/>
     <value name="Linear" value="2"/>
+    <value name="Interleaved 64k" value="8"/>
   </enum>
 
   <enum name="Clump Format">
@@ -1486,16 +1494,20 @@
 
   <enum name="AFBC Compression Mode">
     <value name="R8" value="0"/>
+    <value name="R16" value="1"/>
     <value name="R8G8" value="3"/>
     <value name="R5G6B5" value="4"/>
     <value name="R4G4B4A4" value="5"/>
     <value name="R5G5B5A1" value="6"/>
+    <value name="R16G16" value="8"/>
     <value name="R8G8B8" value="9"/>
     <value name="R8G8B8A8" value="10"/>
     <value name="R10G10B10A2" value="11"/>
     <value name="R11G11B10" value="12"/>
     <value name="S8" value="14"/>
     <value name="X24S8" value="15"/>
+    <value name="R16G16B16" value="16"/>
+    <value name="R16G16B16A16" value="17"/>
 
     <value name="YUV420 6c8" value="32"/>
     <value name="YUV420 2c8" value="34"/>
@@ -1781,6 +1793,10 @@
     <value name="R4G4B4A4" value="4"/>
     <value name="R5G6B5A0" value="5"/>
     <value name="R5G5B5A1" value="6"/>
+    <value name="R16F" value="16"/>
+    <value name="RG16F" value="17"/>
+    <value name="RGBA16F" value="18"/>
+    <value name="RG11F_B10F" value="20"/>
     <value name="RAW8" value="32"/>
     <value name="RAW16" value="33"/>
     <value name="RAW32" value="34"/>
@@ -1817,6 +1833,22 @@
     <value name="R5G5B5A1" value="28"/>
     <value name="A1B5G5R5" value="29"/>
     <value name="NATIVE" value="31"/>
+  </enum>
+
+  <enum name="Float Color Format">
+    <value name="RAW8" value="0"/>
+    <value name="RAW16" value="1"/>
+    <value name="RAW24" value="2"/>
+    <value name="RAW32" value="3"/>
+    <value name="RAW48" value="4"/>
+    <value name="RAW64" value="5"/>
+    <value name="RAW96" value="6"/>
+    <value name="RAW128" value="7"/>
+    <value name="R16F" value="16"/>
+    <value name="RG16F" value="17"/>
+    <value name="RGB16F" value="18"/>
+    <value name="RGBA16F" value="19"/>
+    <value name="RG11F_B10F" value="20"/>
   </enum>
 
   <enum name="Downsampling Accumulation Mode">
@@ -1966,7 +1998,7 @@
     <field name="Write Format" size="4" start="0:0" type="ZS Format"/>
     <field name="Block Format" size="4" start="0:4" type="Block Format"/>
     <field name="MSAA" size="2" start="0:8" default="Single" type="MSAA"/>
-    <field name="Clean Pixel Write Enable" size="1" start="0:31" type="bool"/>
+    <field name="Clean Tile Write Enable" size="1" start="0:31" type="bool"/>
 
     <field name="Base" size="64" start="8:0" type="address"/>
     <field name="Row Stride" size="27" start="10:0" type="uint"/>
@@ -1982,7 +2014,7 @@
     <field name="Reverse Issue Order" size="1" start="0:30" type="bool"/>
     <!-- Must be set if either one of the effective tile size dimension is
          smaller than the AFBC superblock dimension. -->
-    <field name="Clean Pixel Write Enable" size="1" start="0:31" type="bool"/>
+    <field name="Clean Tile Write Enable" size="1" start="0:31" type="bool"/>
 
     <field name="Header" size="64" start="8:0" type="address"/>
     <!-- Header clumps per row (different than Bifrost's AFBC line stride) -->
@@ -1994,7 +2026,7 @@
     <field name="Write Format" size="4" start="0:16" type="S Format"/>
     <field name="Block Format" size="4" start="0:20" type="Block Format"/>
     <field name="MSAA" size="2" start="0:24" default="Single" type="MSAA"/>
-    <field name="Clean Pixel Write Enable" size="1" start="0:31" type="bool"/>
+    <field name="Clean Tile Write Enable" size="1" start="0:31" type="bool"/>
 
     <field name="Base" size="64" start="12:0" type="address"/>
     <field name="Row Stride" size="27" start="14:0" type="uint"/>
@@ -2010,7 +2042,7 @@
     <field name="Reverse Issue Order" size="1" start="0:30" type="bool"/>
     <!-- Must be set if either one of the effective tile size dimension is
          smaller than the AFBC superblock dimension. -->
-    <field name="Clean Pixel Write Enable" size="1" start="0:31" type="bool"/>
+    <field name="Clean Tile Write Enable" size="1" start="0:31" type="bool"/>
 
     <field name="Header" size="64" start="12:0" type="address"/>
     <field name="Header Row Stride" size="27" start="14:0" type="uint"/>
@@ -2057,12 +2089,13 @@
     <field name="Internal Format" size="6" start="0:26" type="Color Buffer Internal Format"/>
     <field name="Write Enable" size="1" start="1:0" type="bool"/>
     <field name="Writeback Format" size="5" start="1:3" type="Color Format"/>
+    <field name="Writeback Float Format" size="5" start="1:3" type="Float Color Format"/>
     <field name="Writeback Block Format" size="4" start="1:8" type="Block Format"/>
     <field name="Writeback MSAA" size="2" start="1:12" type="MSAA"/>
     <field name="sRGB" size="1" start="1:14" type="bool"/>
     <field name="Dithering Enable" size="1" start="1:15" type="bool"/>
     <field name="Swizzle" size="12" start="1:16" type="Component Swizzle"/>
-    <field name="Clean Pixel Write Enable" size="1" start="1:31" type="bool"/>
+    <field name="Clean Tile Write Enable" size="1" start="1:31" type="bool"/>
     <field name="Writeback buffer" size="128" start="8:0" type="RT Buffer"/>
     <field name="Clear" size="128" start="12:0" type="RT Clear"/>
   </struct>
@@ -2080,7 +2113,7 @@
     <field name="sRGB" size="1" start="1:14" type="bool"/>
     <field name="Dithering Enable" size="1" start="1:15" type="bool"/>
     <field name="Swizzle" size="12" start="1:16" type="Component Swizzle"/>
-    <field name="Clean Pixel Write Enable" size="1" start="1:31" type="bool"/>
+    <field name="Clean Tile Write Enable" size="1" start="1:31" type="bool"/>
     <field name="YUV Swizzle" size="3" start="2:16" type="YUV Swizzle"/>
     <field name="Full Range" size="1" start="2:20" type="bool"/>
     <field name="Conversion Mode" size="4" start="2:21" type="YUV Conversion Mode"/>
@@ -2102,6 +2135,7 @@
     <field name="Internal Format" size="6" start="0:26" type="Color Buffer Internal Format"/>
     <field name="Write Enable" size="1" start="1:0" type="bool"/>
     <field name="Writeback Format" size="5" start="1:3" type="Color Format"/>
+    <field name="Writeback Float Format" size="5" start="1:3" type="Float Color Format"/>
     <field name="Writeback Block Format" size="4" start="1:8" type="Block Format"/>
     <field name="Writeback MSAA" size="2" start="1:12" type="MSAA"/>
     <field name="sRGB" size="1" start="1:14" type="bool"/>
@@ -2109,7 +2143,7 @@
     <field name="Swizzle" size="12" start="1:16" type="Component Swizzle"/>
     <!-- Must be set if either one of the effective tile size dimension is
          smaller than the AFBC superblock dimension. -->
-    <field name="Clean Pixel Write Enable" size="1" start="1:31" type="bool"/>
+    <field name="Clean Tile Write Enable" size="1" start="1:31" type="bool"/>
     <field name="YUV Transform" size="1" start="2:0" type="bool"/>
     <field name="Split block" size="1" start="2:1" type="bool"/>
     <field name="Wide block" size="1" start="2:2" type="bool"/>
@@ -2137,7 +2171,7 @@
     <field name="sRGB" size="1" start="1:14" type="bool"/>
     <field name="Dithering Enable" size="1" start="1:15" type="bool"/>
     <field name="Swizzle" size="12" start="1:16" type="Component Swizzle"/>
-    <field name="Clean Pixel Write Enable" size="1" start="1:31" type="bool"/>
+    <field name="Clean Tile Write Enable" size="1" start="1:31" type="bool"/>
     <field name="YUV Transform" size="1" start="2:0" type="bool" default="false"/>
     <field name="Split block" size="1" start="2:1" type="bool"/>
     <field name="Wide block" size="1" start="2:2" type="bool"/>
@@ -2160,7 +2194,6 @@
   <struct name="AFRC RGB Render Target" align="64">
     <field name="Writeback Mode" size="4" start="0:0" type="Writeback Mode" default="AFRC RGB"/>
     <field name="Internal Buffer Offset" size="12" start="0:4" type="uint" modifier="shr(4)"/>
-    <field name="YUV Enable" size="1" start="0:24" type="bool" default="true"/>
     <field name="Dithered Clear" size="1" start="0:25" type="bool"/>
     <field name="Internal Format" size="6" start="0:26" type="Color Buffer Internal Format"/>
     <field name="Writeback Format" size="8" start="1:0" type="Color Format"/>
@@ -2168,7 +2201,7 @@
     <field name="sRGB" size="1" start="1:14" type="bool"/>
     <field name="Dithering Enable" size="1" start="1:15" type="bool"/>
     <field name="Swizzle" size="12" start="1:16" type="Component Swizzle"/>
-    <field name="Clean Pixel Write Enable" size="1" start="1:31" type="bool"/>
+    <field name="Clean Tile Write Enable" size="1" start="1:31" type="bool"/>
     <field name="AFRC Block Size" size="4" start="2:4" type="AFRC Block Size"/>
     <field name="AFRC Format" size="8" start="2:8" type="AFRC Format"/>
     <field name="AFRC Codec args" size="8" start="3:0" type="uint"/>
@@ -2179,7 +2212,6 @@
   <struct name="AFRC YUV Render Target" align="64">
     <field name="Writeback Mode" size="4" start="0:0" type="Writeback Mode" default="AFRC YUV"/>
     <field name="Internal Buffer Offset" size="12" start="0:4" type="uint" modifier="shr(4)"/>
-    <field name="YUV Enable" size="1" start="0:24" type="bool" default="true"/>
     <field name="Dithered Clear" size="1" start="0:25" type="bool"/>
     <field name="Internal Format" size="6" start="0:26" type="Color Buffer Internal Format"/>
     <field name="Writeback Format" size="8" start="1:0" type="Color Format"/>
@@ -2187,7 +2219,7 @@
     <field name="sRGB" size="1" start="1:14" type="bool"/>
     <field name="Dithering Enable" size="1" start="1:15" type="bool"/>
     <field name="Swizzle" size="12" start="1:16" type="Component Swizzle"/>
-    <field name="Clean Pixel Write Enable" size="1" start="1:31" type="bool"/>
+    <field name="Clean Tile Write Enable" size="1" start="1:31" type="bool"/>
     <field name="AFRC Luma Block Size" size="4" start="2:4" type="AFRC Block Size"/>
     <field name="AFRC Luma Format" size="8" start="2:8" type="AFRC Format"/>
     <field name="YUV Swizzle" size="3" start="2:16" type="YUV Swizzle"/>
@@ -2216,26 +2248,10 @@
     <field name="AFRC YUV" size="512" start="0:0" type="AFRC YUV Render Target"/>
   </struct>
 
-  <enum name="Chunk Size">
-    <value name="256 KiB" value="0"/>
-    <value name="512 KiB" value="1"/>
-    <value name="1 MiB" value="2"/>
-    <value name="2 MiB" value="3"/>
-  </enum>
-
-  <enum name="Chunk Partition">
-    <value name="Dynamic" value="0"/>
-    <value name="Static 25%" value="1"/>
-    <value name="Static 50%" value="2"/>
-    <value name="Static 75%" value="3"/>
-  </enum>
-
   <!-- Actually a buffer descriptor, split out for backwards compatibility.-->
   <struct name="Tiler Heap" align="32">
     <field name="Type" size="4" start="0:0" type="Descriptor Type" default="Buffer"/>
     <field name="Buffer type" size="4" start="0:4" type="Buffer Type" default="Tiler heap"/>
-    <field name="Chunk size" size="2" start="0:8" type="Chunk Size" default="256 KiB"/>
-    <field name="Partitioning" size="2" start="0:10" type="Chunk Partition" default="Dynamic"/>
     <field name="Size" size="32" start="1:0" type="uint" modifier="align(4096)"/>
     <field name="Base" size="64" start="2:0" type="address"/>
     <field name="Bottom" size="64" start="4:0" type="address"/>

@@ -10,7 +10,7 @@ tu_entrypoints = custom_target(
     '--out-h', '@OUTPUT0@', '--out-c', '@OUTPUT1@', '--prefix', 'tu',
     '--include', 'adreno_common.xml.h',
     '--tmpl-prefix', 'tu', '--tmpl-param', 'chip CHIP',
-    '--tmpl-variants', '<A6XX>', '<A7XX>',
+    '--tmpl-variants', '<A6XX>', '<A7XX>', '<A8XX>',
     '--beta', with_vulkan_beta.to_string(),
     '--device-prefix', 'tu_rmv',
   ],
@@ -38,6 +38,7 @@ libtu_files = files(
   'tu_image.cc',
   'tu_knl.cc',
   'tu_lrz.cc',
+  'tu_nir_lower_demote_samples.cc',
   'tu_nir_lower_multiview.cc',
   'tu_nir_lower_ray_query.cc',
   'tu_pass.cc',
@@ -48,7 +49,35 @@ libtu_files = files(
   'tu_rmv.cc',
   'tu_shader.cc',
   'tu_suballoc.cc',
+  'tu_subsampled_image.cc',
+  'tu_tile_config.cc',
   'tu_util.cc',
+)
+
+libtu_files += custom_target(
+  'float32_spv.h',
+  input : float32_glsl_file,
+  output : 'float32_spv.h',
+  command : [
+    prog_glslang, '--no-link', '-V', '-S', 'comp', '-x', '-o', '@OUTPUT@', '@INPUT@',
+    glslang_quiet, glslang_depfile,
+  ],
+  depfile : 'float32_spv.h.d',
+)
+
+libtu_files += custom_target(
+  'float64_spv.h',
+  input : [glsl2spirv, float64_glsl_file],
+  output : 'float64_spv.h',
+  command : [
+    prog_python, '@INPUT@', '@OUTPUT@',
+    prog_glslang,
+    '--vn', 'float64_spv_source',
+    '--glsl-version', '450',
+    '-Olib',
+    glslang_depfile,
+  ],
+  depfile : 'float64_spv.h.d',
 )
 
 subdir('bvh')
@@ -108,9 +137,6 @@ if freedreno_kmds.contains('virtio')
   tu_link_with += libvdrm
   tu_deps += dep_libdrm
 endif
-
-# Temporarily quiet deprecated warnings until turnip is converted:
-tu_flags += '-DFD_NO_DEPRECATED_PACK'
 
 tu_tracepoints = custom_target(
   'tu_tracepoints.[ch]',
@@ -202,12 +228,13 @@ icd_file_name = libname_prefix + 'vulkan_freedreno.' + libname_suffix
 freedreno_icd = custom_target(
   'freedreno_icd',
   input : [vk_icd_gen, vk_api_xml],
-  output : 'freedreno_icd.@0@.json'.format(host_machine.cpu()),
+  output : 'freedreno_icd.' + vulkan_manifest_suffix,
   command : [
     prog_python, '@INPUT0@',
     '--api-version', '1.4', '--xml', '@INPUT1@',
     '--sizeof-pointer', sizeof_pointer,
-    '--lib-path', vulkan_icd_lib_path / icd_file_name,
+    '--icd-lib-path', vulkan_icd_lib_path,
+    '--icd-filename', icd_file_name,
     '--out', '@OUTPUT@',
   ],
   build_by_default : true,
@@ -225,12 +252,11 @@ _dev_icd = custom_target(
     prog_python, '@INPUT0@',
     '--api-version', '1.4', '--xml', '@INPUT1@',
     '--sizeof-pointer', sizeof_pointer,
-    '--lib-path', meson.current_build_dir() / icd_file_name,
+    '--icd-lib-path', meson.current_build_dir(),
+    '--icd-filename', icd_file_name,
     '--out', '@OUTPUT@',
   ],
   build_by_default : true,
 )
 
 devenv.append('VK_DRIVER_FILES', _dev_icd.full_path())
-# Deprecated: replaced by VK_DRIVER_FILES above
-devenv.append('VK_ICD_FILENAMES', _dev_icd.full_path())

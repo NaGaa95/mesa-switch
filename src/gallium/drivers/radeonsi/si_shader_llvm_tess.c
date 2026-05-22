@@ -29,7 +29,7 @@ static LLVMValueRef si_nir_load_tcs_varyings(struct ac_shader_abi *abi, LLVMType
       value[i] = LLVMBuildBitCast(ctx->ac.builder, value[i], type, "");
    }
 
-   return ac_build_varying_gather_values(&ctx->ac, value, num_components, component);
+   return ac_build_gather_values(&ctx->ac, value + component, num_components);
 }
 
 void si_llvm_ls_build_end(struct si_shader_context *ctx)

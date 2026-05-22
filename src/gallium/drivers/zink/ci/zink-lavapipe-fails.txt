@@ -106,9 +106,12 @@ spec@arb_sample_shading@samplemask 8 all@noms mask_in_one,Fail
 spec@arb_sample_shading@samplemask 8 all@noms partition,Fail
 spec@arb_sample_shading@samplemask 8 all@sample mask_in_one,Fail
 spec@arb_shader_texture_lod@execution@arb_shader_texture_lod-texgrad,Fail
-spec@arb_shader_texture_lod@execution@arb_shader_texture_lod-texgradcube,Fail
 
-spec@egl 1.4@egl-ext_egl_image_storage,Fail
+# https://gitlab.freedesktop.org/mesa/mesa/-/issues/14988
+spec@egl 1.4@eglcreatepbuffersurface and then glclear,Crash
+spec@egl 1.4@largest possible eglcreatepbuffersurface and then glclear,Crash
+spec@egl_nok_texture_from_pixmap@basic,Crash
+
 spec@egl 1.4@eglterminate then unbind context,Fail
 spec@egl_khr_gl_image@egl_khr_gl_renderbuffer_image-clear-shared-image gl_depth_component24,Fail
 spec@egl_khr_surfaceless_context@viewport,Fail
@@ -161,7 +164,6 @@ spec@ext_transform_feedback@tessellation quads wireframe,Fail
 spec@ext_transform_feedback@tessellation quad_strip wireframe,Fail
 
 # uprev Piglit in Mea
-spec@ext_image_dma_buf_import@ext_image_dma_buf_import-export-tex,Fail
 spec@khr_texture_compression_astc@sliced-3d-miptree-gles srgb-fp,Fail
 spec@khr_texture_compression_astc@sliced-3d-miptree-gles srgb-fp@sRGB decode full precision,Fail
 

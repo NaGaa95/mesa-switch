@@ -1,24 +1,6 @@
 /*
  * Copyright © 2012 Intel Corporation
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
- * IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  */
 
 #define XXH_INLINE_ALL
@@ -94,7 +76,6 @@ is_expression(const brw_shader *v, const brw_inst *const inst)
    case SHADER_OPCODE_CLUSTER_BROADCAST:
    case SHADER_OPCODE_MOV_INDIRECT:
    case SHADER_OPCODE_SAMPLER:
-   case SHADER_OPCODE_GET_BUFFER_SIZE:
    case FS_OPCODE_PACK:
    case FS_OPCODE_PACK_HALF_2x16_SPLIT:
    case SHADER_OPCODE_RCP:
@@ -232,12 +213,16 @@ static bool
 tex_inst_match(brw_tex_inst *a, brw_tex_inst *b)
 {
    return a->sampler_opcode == b->sampler_opcode &&
-          a->offset == b->offset &&
           a->surface_bindless == b->surface_bindless &&
           a->sampler_bindless == b->sampler_bindless &&
+          a->residency == b->residency &&
+          a->required_params == b->required_params &&
           a->coord_components == b->coord_components &&
-          a->grad_components == b->grad_components &&
-          a->residency == b->residency;
+          a->gather_component == b->gather_component &&
+          a->has_const_offsets == b->has_const_offsets &&
+          a->const_offsets[0] == b->const_offsets[0] &&
+          a->const_offsets[1] == b->const_offsets[1] &&
+          a->const_offsets[2] == b->const_offsets[2];
 }
 
 static bool
@@ -382,12 +367,13 @@ hash_inst(const void *v)
    case BRW_KIND_TEX: {
       const brw_tex_inst *tex = inst->as_tex();
       const uint8_t tex_u8data[] = {
-         tex->coord_components,
-         tex->grad_components,
-         tex->bits,
+         tex->sampler_opcode,
+         (uint8_t)tex->const_offsets[0],
+         (uint8_t)tex->const_offsets[1],
+         (uint8_t)tex->const_offsets[2],
       };
       const uint32_t tex_u32data[] = {
-         tex->sampler_opcode,
+         tex->bits,
       };
       hash = HASH(hash, tex_u8data);
       hash = HASH(hash, tex_u32data);
@@ -462,6 +448,9 @@ hash_inst(const void *v)
    case BRW_KIND_BASE:
       /* Nothing else to do. */
       break;
+
+   case BRW_KIND_SCRATCH:
+      UNREACHABLE("Spill and fills should not exist yet.");
    }
 
    if (inst->opcode == BRW_OPCODE_MAD) {

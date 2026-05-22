@@ -1,10 +1,6 @@
 /*
  * Copyright (C) 2023 Collabora, Ltd.
- *
  * SPDX-License-Identifier: MIT
- *
- * Authors:
- *   Louis-Francis Ratté-Boulianne <lfrb@collabora.com>
  */
 
 #ifndef __PAN_AFRC_H

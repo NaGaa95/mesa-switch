@@ -3,26 +3,7 @@
  * Copyright (C) 2014 Broadcom
  * Copyright (C) 2018-2019 Alyssa Rosenzweig
  * Copyright (C) 2019-2020 Collabora, Ltd.
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
- *
+ * SPDX-License-Identifier: MIT
  */
 
 #ifndef __PAN_FORMAT_H
@@ -63,6 +44,10 @@
       DRM_FORMAT_MOD_ARM_AFBC(AFBC_FORMAT_MOD_BLOCK_SIZE_16x16 |               \
                               AFBC_FORMAT_MOD_SPARSE),                         \
                                                                                \
+      DRM_FORMAT_MOD_ARM_AFBC(AFBC_FORMAT_MOD_BLOCK_SIZE_16x16 |               \
+                              AFBC_FORMAT_MOD_SPARSE | AFBC_FORMAT_MOD_SPLIT), \
+                                                                               \
+      DRM_FORMAT_MOD_ARM_INTERLEAVED_64K,                                      \
       DRM_FORMAT_MOD_ARM_16X16_BLOCK_U_INTERLEAVED,                            \
       DRM_FORMAT_MOD_LINEAR,                                                   \
                                                                                \
@@ -129,6 +114,21 @@ pan_format_get_plane_blocksize(enum pipe_format format, unsigned plane_idx)
    }
 }
 
+static inline unsigned
+pan_format_tib_size(enum pipe_format format, bool internal)
+{
+   if (internal && !util_format_is_float(format)) {
+      /* Blendable UNORM and sRGB formats are always 32-bits in the tile
+       * buffer, extra bits are used as padding or to dither */
+      return 4;
+   } else {
+      /* Non-blendable and float formats are raw, rounded up to the nearest
+       * power-of-two size */
+      unsigned bytes = util_format_get_blocksize(format);
+      return util_next_power_of_two(bytes);
+   }
+}
+
 typedef uint32_t mali_pixel_format;
 
 /* pan bind flags */
@@ -137,11 +137,12 @@ typedef uint32_t mali_pixel_format;
 #define PAN_BIND_SAMPLER_VIEW  BITFIELD_BIT(2)
 #define PAN_BIND_VERTEX_BUFFER BITFIELD_BIT(3)
 #define PAN_BIND_STORAGE_IMAGE BITFIELD_BIT(4)
+#define PAN_BIND_TEXEL_BUFFER  BITFIELD_BIT(5)
 
 struct pan_format {
-   uint32_t hw : 22;
+   uint32_t hw          : 21;
    uint32_t texfeat_bit : 5;
-   uint32_t bind        : 5;
+   uint32_t bind        : 6;
 };
 
 struct pan_blendable_format {
@@ -338,6 +339,25 @@ GENX(pan_dithered_format_from_pipe_format)(enum pipe_format f, bool dithered)
    return pixfmt ?: GENX(pan_format_from_pipe_format)(f)->hw;
 }
 #endif
+
+static inline bool
+GENX(pan_format_supports_hw_blend)(enum pipe_format format)
+{
+   return GENX(pan_blendable_format_from_pipe_format)(format)->internal;
+}
+
+static inline bool
+GENX(pan_format_supports_msaa_average)(enum pipe_format format)
+{
+   if (!GENX(pan_format_supports_hw_blend)(format))
+      return false;
+
+   /* F16 formats are blendable on v10 but don't support averaging until v11 */
+   if (util_format_is_float16(format) && PAN_ARCH < 11)
+      return false;
+
+   return true;
+}
 #endif
 
 #endif

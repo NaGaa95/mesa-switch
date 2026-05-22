@@ -216,12 +216,6 @@ translate_texture_filter(unsigned filter)
    }
 }
 
-static inline int
-translate_rb_src_dst_swap(enum pipe_format src, enum pipe_format dst)
-{
-   return translate_pe_format_rb_swap(src) ^ translate_pe_format_rb_swap(dst);
-}
-
 static inline uint32_t
 translate_depth_format(enum pipe_format fmt)
 {
@@ -341,6 +335,10 @@ translate_blt_format(enum pipe_format fmt)
       return BLT_FORMAT_L8;
    case PIPE_FORMAT_L8A8_UNORM:
       return BLT_FORMAT_A8L8;
+   case PIPE_FORMAT_S8_UINT_Z24_UNORM:
+      return BLT_FORMAT_X24S8;
+   case PIPE_FORMAT_Z16_UNORM:
+      return BLT_FORMAT_D16;
    default:
       return ETNA_NO_MATCH;
    }

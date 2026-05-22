@@ -894,6 +894,8 @@ static void virgl_bind_fs_state(struct pipe_context *ctx,
 
 static void virgl_clear(struct pipe_context *ctx,
                                 unsigned buffers,
+                                uint32_t color_clear_mask,
+                                uint8_t stencil_clear_mask,
                                 const struct pipe_scissor_state *scissor_state,
                                 const union pipe_color_union *color,
                                 double depth, unsigned stencil)
@@ -1849,7 +1851,7 @@ struct pipe_context *virgl_context_create(struct pipe_screen *pscreen,
    virgl_encoder_set_sub_ctx(vctx, vctx->hw_sub_ctx_id);
 
    if (rs->caps.caps.v2.capability_bits & VIRGL_CAP_GUEST_MAY_INIT_LOG) {
-      host_debug_flagstring = getenv("VIRGL_HOST_DEBUG");
+      host_debug_flagstring = os_get_option("VIRGL_HOST_DEBUG");
       if (host_debug_flagstring)
          virgl_encode_host_debug_flagstring(vctx, host_debug_flagstring);
    }

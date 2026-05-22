@@ -320,7 +320,7 @@ get_wait_counter_info(Program* program, aco_ptr<Instruction>& instr)
    } else if (instr->isVMEM() && instr->definitions.empty() && program->gfx_level >= GFX10) {
       info[wait_type_vs] = 320;
    } else if (instr->isVMEM()) {
-      uint8_t vm_type = get_vmem_type(program->gfx_level, program->family, instr.get());
+      uint8_t vm_type = get_vmem_type(instr.get(), program->dev.has_point_sample_accel);
       wait_type type = wait_type_vm;
       if (program->gfx_level >= GFX12 && vm_type == vmem_bvh)
          type = wait_type_bvh;
@@ -441,14 +441,7 @@ BlockCycleEstimator::add(aco_ptr<Instruction>& instr)
          mem_ops[i].push_back(cur_cycle + wait_info[i]);
    }
 
-   /* This is inaccurate but shouldn't affect anything after waitcnt insertion.
-    * Before waitcnt insertion, this is necessary to consider memory operations.
-    */
-   unsigned latency = 0;
-   for (unsigned i = 0; i < wait_type_num; i++)
-      latency = MAX2(latency, i == wait_type_vs ? 0 : wait_info[i]);
-   int32_t result_available = start + MAX2(perf.latency, (int32_t)latency);
-
+   int32_t result_available = start + perf.latency;
    for (Definition& def : instr->definitions) {
       int32_t* available = &reg_available[def.physReg().reg()];
       for (unsigned i = 0; i < def.size(); i++)

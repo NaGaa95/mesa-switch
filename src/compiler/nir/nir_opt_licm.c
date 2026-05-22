@@ -32,6 +32,7 @@ is_instr_loop_invariant(nir_instr *instr, unsigned loop_preheader_idx)
 
    case nir_instr_type_phi:
    case nir_instr_type_call:
+   case nir_instr_type_cmat_call:
    case nir_instr_type_jump:
    default:
       return false;
@@ -57,7 +58,7 @@ static bool
 should_optimize_loop(nir_loop *loop)
 {
    /* Ignore loops without back-edge */
-   if (nir_loop_first_block(loop)->predecessors.entries == 1)
+   if (!nir_loop_has_back_edge(loop))
       return false;
 
    nir_foreach_block_in_cf_node(block, &loop->cf_node) {

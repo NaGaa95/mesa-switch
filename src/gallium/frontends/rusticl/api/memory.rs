@@ -14,6 +14,7 @@ use crate::core::format::*;
 use crate::core::gl::*;
 use crate::core::memory::*;
 use crate::core::queue::*;
+use crate::rusticl_warn_once;
 
 use mesa_rust_gen::pipe_fd_type;
 use mesa_rust_util::properties::Properties;
@@ -48,7 +49,8 @@ fn validate_mem_flags(flags: cl_mem_flags, validation: MemFlagValidationType) ->
             | CL_MEM_WRITE_ONLY
             | CL_MEM_READ_ONLY
             | CL_MEM_KERNEL_READ_AND_WRITE
-            | CL_MEM_IMMUTABLE_EXT,
+            | CL_MEM_IMMUTABLE_EXT
+            | CL_MEM_ALLOW_UNRESTRICTED_SIZE_INTEL,
     );
 
     if validation != MemFlagValidationType::Imported {
@@ -64,6 +66,12 @@ fn validate_mem_flags(flags: cl_mem_flags, validation: MemFlagValidationType) ->
 
     if flags & !valid_flags != 0 {
         return Err(CL_INVALID_VALUE);
+    }
+
+    if flags & cl_bitfield::from(CL_MEM_ALLOW_UNRESTRICTED_SIZE_INTEL) != 0 {
+        rusticl_warn_once!(
+            "Use of CL_MEM_ALLOW_UNRESTRICTED_SIZE_INTEL detected. This flag is ignored and applications shouldn't use them with rusticl."
+        );
     }
 
     Ok(())
@@ -444,10 +452,19 @@ fn create_sub_buffer(
         _ => return Err(CL_INVALID_VALUE),
     };
 
-    Ok(MemBase::new_sub_buffer(b, flags, offset, size).into_cl())
+    // CL_MISALIGNED_SUB_BUFFER_OFFSET if there are no devices in context associated with buffer for
+    // which offset is aligned to CL_DEVICE_MEM_BASE_ADDR_ALIGN.
+    let is_aligned_for_any_dev = b
+        .context
+        .devs
+        .iter()
+        .any(|&dev| offset % dev.mem_base_addr_align_bytes() == 0);
 
-    // TODO
-    // CL_MISALIGNED_SUB_BUFFER_OFFSET if there are no devices in context associated with buffer for which the origin field of the cl_buffer_region structure passed in buffer_create_info is aligned to the CL_DEVICE_MEM_BASE_ADDR_ALIGN value.
+    if !is_aligned_for_any_dev {
+        return Err(CL_MISALIGNED_SUB_BUFFER_OFFSET);
+    }
+
+    Ok(MemBase::new_sub_buffer(b, flags, offset, size).into_cl())
 }
 
 #[cl_entrypoint(clSetMemObjectDestructorCallback)]

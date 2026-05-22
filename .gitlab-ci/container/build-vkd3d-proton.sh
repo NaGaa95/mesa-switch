@@ -11,11 +11,10 @@ section_start vkd3d-proton "Building vkd3d-proton"
 # setting up the environment variables locally
 ci_tag_build_time_check "VKD3D_PROTON_TAG"
 
-VKD3D_PROTON_COMMIT="0845d1b69c6b474debe39d25f0137bf108a42b92"
+VKD3D_PROTON_COMMIT="a83811bf228ec4e7fc09727388521c725126d868"
 
 VKD3D_PROTON_DST_DIR="/vkd3d-proton-tests"
 VKD3D_PROTON_SRC_DIR="/vkd3d-proton-src"
-VKD3D_PROTON_BUILD_DIR="/vkd3d-proton-build"
 VKD3D_PROTON_WINE_DIR="/vkd3d-proton-wine64"
 VKD3D_PROTON_S3_ARTIFACT="vkd3d-proton.tar.zst"
 
@@ -24,30 +23,29 @@ if [ ! -d "$VKD3D_PROTON_WINE_DIR" ]; then
   exit 1
 fi
 
-git clone https://github.com/HansKristian-Work/vkd3d-proton.git --single-branch -b master --no-checkout "$VKD3D_PROTON_SRC_DIR"
+mkdir -p "$VKD3D_PROTON_SRC_DIR"
 pushd "$VKD3D_PROTON_SRC_DIR"
-git checkout "$VKD3D_PROTON_COMMIT"
+git init
+git remote add origin https://github.com/HansKristian-Work/vkd3d-proton.git
+git fetch --depth 1 origin "$VKD3D_PROTON_COMMIT"
+git checkout FETCH_HEAD
 git submodule update --init --recursive
-git submodule update --recursive
 
-meson setup                                           \
-      -D c_args=-Wno-error=incompatible-pointer-types \
-      -D enable_tests=true                            \
-      --buildtype release                             \
-      --prefix "$VKD3D_PROTON_DST_DIR"                \
-      --strip                                         \
-      --libdir "lib"                                  \
-      "$VKD3D_PROTON_BUILD_DIR/build"
+meson setup build --buildtype release -D enable_tests=true \
+      -D c_args=-Wno-error=incompatible-pointer-types
+# Build and install specifically the bits we want; gets rid of 24MB of
+# unwanted files, keeping only 7.6MB of the three useful files.
+for file in \
+  libs/d3d12/libvkd3d-proton-d3d12.so \
+  libs/d3d12core/libvkd3d-proton-d3d12core.so \
+  tests/d3d12 \
+; do
+  ninja -C build "$file"
+  strip build/"$file"
+  install -Dm755 -t "${VKD3D_PROTON_DST_DIR}/$(dirname "$file")" build/"$file"
+done
 
-ninja -C "$VKD3D_PROTON_BUILD_DIR/build" install
-
-install -m755 -t "${VKD3D_PROTON_DST_DIR}/" "$VKD3D_PROTON_BUILD_DIR/build/tests/d3d12"
-
-mkdir "$VKD3D_PROTON_DST_DIR/tests"
-cp \
-  "tests/test-runner.sh" \
-  "tests/d3d12_tests.h" \
-  "$VKD3D_PROTON_DST_DIR/tests/"
+install -m755 -t "${VKD3D_PROTON_DST_DIR}/tests" tests/test-runner.sh
 popd
 
 # Archive and upload vkd3d-proton for use as a LAVA overlay, if the archive doesn't exist yet
@@ -62,7 +60,6 @@ else
   rm "$VKD3D_PROTON_S3_ARTIFACT"
 fi
 
-rm -rf "$VKD3D_PROTON_BUILD_DIR"
 rm -rf "$VKD3D_PROTON_SRC_DIR"
 
 section_end vkd3d-proton

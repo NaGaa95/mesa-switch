@@ -465,14 +465,6 @@ tc_drop_resource_reference(struct pipe_resource *dst)
 
 /* Unreference dst but don't touch the dst pointer. */
 static inline void
-tc_drop_surface_reference(struct pipe_surface *dst)
-{
-   if (pipe_reference(&dst->reference, NULL)) /* only decrement refcount */
-      dst->context->surface_destroy(dst->context, dst);
-}
-
-/* Unreference dst but don't touch the dst pointer. */
-static inline void
 tc_drop_so_target_reference(struct pipe_stream_output_target *dst)
 {
    if (pipe_reference(&dst->reference, NULL)) /* only decrement refcount */
@@ -1009,10 +1001,10 @@ tc_rebind_buffer(struct threaded_context *tc, uint32_t old_id, uint32_t new_id, 
 }
 
 static bool
-tc_is_buffer_bound_with_mask(uint32_t id, uint32_t *bindings, unsigned binding_mask)
+tc_is_buffer_bound_with_mask(uint32_t id, uint32_t *bindings, uint64_t binding_mask)
 {
    while (binding_mask) {
-      if (bindings[u_bit_scan(&binding_mask)] == id)
+      if (bindings[u_bit_scan64(&binding_mask)] == id)
          return true;
    }
    return false;
@@ -2043,7 +2035,7 @@ tc_set_shader_images(struct pipe_context *_pipe,
    struct tc_shader_images *p =
       tc_add_slot_based_call(tc, TC_CALL_set_shader_images, tc_shader_images,
                              images ? count : 0);
-   unsigned writable_buffers = 0;
+   uint64_t writable_buffers = 0;
 
    p->shader = shader;
    p->start = start;
@@ -2070,7 +2062,7 @@ tc_set_shader_images(struct pipe_context *_pipe,
                   util_range_add(&tres->b, &tres->valid_buffer_range,
                                  images[i].u.buf.offset,
                                  images[i].u.buf.offset + images[i].u.buf.size);
-                  writable_buffers |= BITFIELD_BIT(start + i);
+                  writable_buffers |= BITFIELD64_BIT(start + i);
                }
             } else {
                tc_set_resource_batch_usage(tc, resource);
@@ -2092,7 +2084,7 @@ tc_set_shader_images(struct pipe_context *_pipe,
                         count + unbind_num_trailing_slots);
    }
 
-   tc->image_buffers_writeable_mask[shader] &= ~BITFIELD_RANGE(start, count);
+   tc->image_buffers_writeable_mask[shader] &= ~BITFIELD64_RANGE(start, count);
    tc->image_buffers_writeable_mask[shader] |= writable_buffers;
 }
 
@@ -4825,6 +4817,8 @@ struct tc_clear {
    bool scissor_state_set;
    uint8_t stencil;
    uint16_t buffers;
+   uint32_t color_clear_mask;
+   uint8_t stencil_clear_mask;
    float depth;
    struct pipe_scissor_state scissor_state;
    union pipe_color_union color;
@@ -4835,12 +4829,14 @@ tc_call_clear(struct pipe_context *pipe, void *call)
 {
    struct tc_clear *p = to_call(call, tc_clear);
 
-   pipe->clear(pipe, p->buffers, p->scissor_state_set ? &p->scissor_state : NULL, &p->color, p->depth, p->stencil);
+   pipe->clear(pipe, p->buffers, p->color_clear_mask, p->stencil_clear_mask, p->scissor_state_set ? &p->scissor_state : NULL, &p->color, p->depth, p->stencil);
    return call_size(tc_clear);
 }
 
 static void
-tc_clear(struct pipe_context *_pipe, unsigned buffers, const struct pipe_scissor_state *scissor_state,
+tc_clear(struct pipe_context *_pipe, unsigned buffers,
+         uint32_t color_clear_mask, uint8_t stencil_clear_mask,
+         const struct pipe_scissor_state *scissor_state,
          const union pipe_color_union *color, double depth,
          unsigned stencil)
 {
@@ -4848,6 +4844,8 @@ tc_clear(struct pipe_context *_pipe, unsigned buffers, const struct pipe_scissor
    struct tc_clear *p = tc_add_call(tc, TC_CALL_clear, tc_clear);
 
    p->buffers = buffers;
+   p->color_clear_mask = color_clear_mask;
+   p->stencil_clear_mask = stencil_clear_mask;
    tc->seen_fb_state = true;
    if (scissor_state) {
       p->scissor_state = *scissor_state;
@@ -5560,7 +5558,7 @@ threaded_context_create(struct pipe_context *pipe,
       util_queue_fence_init(&tc->batch_slots[i].fence);
       tc->batch_slots[i].renderpass_info_idx = -1;
       if (tc->options.parse_renderpass_info) {
-         util_dynarray_init(&tc->batch_slots[i].renderpass_infos, NULL);
+         tc->batch_slots[i].renderpass_infos = UTIL_DYNARRAY_INIT;
          tc_batch_renderpass_infos_resize(tc, &tc->batch_slots[i]);
       }
    }

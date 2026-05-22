@@ -25,19 +25,6 @@ lower(nir_builder *b, nir_intrinsic_instr *intr, void *data)
    b->cursor = nir_before_instr(&intr->instr);
 
    switch (intr->intrinsic) {
-   case nir_intrinsic_vote_any: {
-      /* We don't have vote instructions, but we have efficient ballots */
-      nir_def *ballot = nir_ballot(b, 1, 32, intr->src[0].ssa);
-      nir_def_rewrite_uses(&intr->def, nir_ine_imm(b, ballot, 0));
-      return true;
-   }
-
-   case nir_intrinsic_vote_all: {
-      nir_def *ballot = nir_ballot(b, 1, 32, nir_inot(b, intr->src[0].ssa));
-      nir_def_rewrite_uses(&intr->def, nir_ieq_imm(b, ballot, 0));
-      return true;
-   }
-
    case nir_intrinsic_quad_vote_any: {
       nir_def *ballot = nir_quad_ballot_agx(b, 16, intr->src[0].ssa);
       nir_def_rewrite_uses(&intr->def, nir_ine_imm(b, ballot, 0));
@@ -234,6 +221,7 @@ agx_nir_lower_subgroups(nir_shader *s)
       .lower_rotate_to_shuffle = true,
       .lower_subgroup_masks = true,
       .lower_reduce = true,
+      .lower_vote = true,
       .ballot_components = 1,
       .ballot_bit_size = 32,
       .subgroup_size = 32,

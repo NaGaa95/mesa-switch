@@ -1086,6 +1086,12 @@ util_format_get_component_shift(enum pipe_format format,
    }
 }
 
+static inline unsigned
+util_format_get_depth_bits(enum pipe_format format)
+{
+   return util_format_get_component_bits(format, UTIL_FORMAT_COLORSPACE_ZS, 0);
+}
+
 /**
  * Given a linear RGB colorspace format, return the corresponding SRGB
  * format, or PIPE_FORMAT_NONE if none.
@@ -1345,6 +1351,17 @@ util_format_is_unorm8(const struct util_format_description *desc)
       return false;
 
    return desc->is_unorm && desc->is_array && desc->channel[c].size == 8;
+}
+
+static inline bool
+util_format_is_unorm16(const struct util_format_description *desc)
+{
+   int c = util_format_get_first_non_void_channel(desc->format);
+
+   if (c == -1)
+      return false;
+
+   return desc->is_unorm && desc->is_array && desc->channel[c].size == 16;
 }
 
 static inline bool

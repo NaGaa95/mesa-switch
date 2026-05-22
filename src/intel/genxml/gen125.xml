@@ -530,12 +530,16 @@
     <field name="3D Scoreboard Hashing Mode" dword="1" bits="4:4" type="bool" />
     <field name="Subslice Hashing Table Enable" dword="1" bits="5:5" type="bool" />
     <field name="Slice Hashing Table Enable" dword="1" bits="6:6" type="bool" />
+    <field name="DX10 OGL Border Mode for YCRCB" dword="1" bits="10:10" type="bool" />
     <field name="Cross Slice Hashing Mode Mask" dword="1" bits="17:16" type="int" />
     <field name="3D Scoreboard Hashing Mode Mask" dword="1" bits="20:20" type="bool" />
     <field name="Subslice Hashing Table Enable Mask" dword="1" bits="21:21" type="bool" />
     <field name="Slice Hashing Table Enable Mask" dword="1" bits="22:22" type="bool" />
+    <field name="DX10 OGL Border Mode for YCRCB Mask" dword="1" bits="26:26" type="bool" />
     <field name="Fast Clear Optimization Enable" dword="3" bits="10:10" type="bool" />
+    <field name="RCC RHWO Optimization Disable" dword="3" bits="15:15" type="bool" />
     <field name="Fast Clear Optimization Enable Mask" dword="3" bits="26:26" type="bool" />
+    <field name="RCC RHWO Optimization Disable Mask" dword="3" bits="31:31" type="bool" />
   </instruction>
   <instruction name="3DSTATE_BINDING_TABLE_POINTERS_DS" bias="2" length="2" engine="render">
     <field name="DWord Length" dword="0" bits="7:0" type="uint" default="0" />
@@ -1575,6 +1579,7 @@
     <field name="3D Command Opcode" dword="0" bits="26:24" type="uint" default="0" />
     <field name="Command SubType" dword="0" bits="28:27" type="uint" default="3" />
     <field name="Command Type" dword="0" bits="31:29" type="uint" default="3" />
+    <field name="Depth Buffer Partial Resolve Enable" dword="1" bits="9:9" type="bool" />
     <field name="Number of Multisamples" dword="1" bits="15:13" type="uint" />
     <field name="Stencil Clear Value" dword="1" bits="23:16" type="uint" />
     <field name="Stencil Buffer Resolve Enable" dword="1" bits="24:24" type="bool" />

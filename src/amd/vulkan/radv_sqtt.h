@@ -59,18 +59,29 @@ enum rgp_barrier_reason {
    RGP_BARRIER_INTERNAL_PRE_COPY_QUERY_POOL_RESULTS_SYNC = RGP_BARRIER_INTERNAL_BASE + 3
 };
 
+enum radv_sqtt_userdata_flags {
+   RADV_SQTT_USERDATA_MAIN_CS = 1u << 0,
+   RADV_SQTT_USERDATA_GANG_CS = 1u << 1,
+};
+
+struct radv_sqtt_gpu_timestamp {
+   struct radeon_winsys_bo *bo;
+   uint32_t offset;
+   void *ptr;
+};
+
 bool radv_is_instruction_timing_enabled(void);
 
 bool radv_sqtt_queue_events_enabled(void);
 
-void radv_emit_sqtt_userdata(const struct radv_cmd_buffer *cmd_buffer, const void *data, uint32_t num_dwords);
+void radv_emit_sqtt_userdata(const struct radv_cmd_buffer *cmd_buffer, const void *data, uint32_t num_dwords,
+                             enum radv_sqtt_userdata_flags flags);
 
-void radv_emit_spi_config_cntl(const struct radv_device *device, struct radv_cmd_stream *cs, bool enable);
+VkResult radv_sqtt_acquire_gpu_timestamp(struct radv_device *device, struct radv_sqtt_gpu_timestamp *timestamp);
 
-void radv_emit_inhibit_clockgating(const struct radv_device *device, struct radv_cmd_stream *cs, bool inhibit);
-
-VkResult radv_sqtt_acquire_gpu_timestamp(struct radv_device *device, struct radeon_winsys_bo **gpu_timestamp_bo,
-                                         uint32_t *gpu_timestamp_offset, void **gpu_timestamp_ptr);
+void radv_sqtt_write_gpu_timestamp(struct radv_cmd_buffer *cmd_buffer,
+                                   const struct radv_sqtt_gpu_timestamp *gpu_timestamp,
+                                   VkPipelineStageFlags2 timestamp_stage);
 
 bool radv_sqtt_init(struct radv_device *device);
 
@@ -86,9 +97,15 @@ void radv_reset_sqtt_trace(struct radv_device *device);
 
 bool radv_sqtt_sample_clocks(struct radv_device *device);
 
-VkResult radv_sqtt_get_timed_cmdbuf(struct radv_queue *queue, struct radeon_winsys_bo *timestamp_bo,
-                                    uint32_t timestamp_offset, VkPipelineStageFlags2 timestamp_stage,
-                                    VkCommandBuffer *pcmdbuf);
+VkResult radv_sqtt_allocate_cmdbuf(struct radv_device *device, enum radv_queue_family queue_family,
+                                   VkCommandBuffer *pcmdbuf);
+
+void radv_sqtt_free_cmdbuf(struct radv_device *device, enum radv_queue_family queue_family, VkCommandBuffer cmdbuf);
+
+VkResult radv_sqtt_allocate_buffer(VkDevice device, uint64_t size, uint32_t memory_type_index, VkBuffer *buffer,
+                                   VkDeviceMemory *memory);
+
+void radv_sqtt_destroy_buffer(VkDevice device, VkBuffer buffer, VkDeviceMemory memory);
 
 void radv_sqtt_emit_relocated_shaders(struct radv_cmd_buffer *cmd_buffer, struct radv_graphics_pipeline *pipeline);
 
@@ -99,7 +116,7 @@ void radv_describe_begin_cmd_buffer(struct radv_cmd_buffer *cmd_buffer);
 
 void radv_describe_end_cmd_buffer(struct radv_cmd_buffer *cmd_buffer);
 
-void radv_describe_draw(struct radv_cmd_buffer *cmd_buffer, const struct radv_draw_info *draw_info);
+void radv_describe_draw(struct radv_cmd_buffer *cmd_buffer, const struct radv_draw_info *draw_info, bool use_gang_cs);
 
 void radv_describe_dispatch(struct radv_cmd_buffer *cmd_buffer, const struct radv_dispatch_info *info);
 

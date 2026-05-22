@@ -87,14 +87,6 @@ radv_amdgpu_winsys_read_registers(struct radeon_winsys *rws, unsigned reg_offset
    return ac_drm_read_mm_registers(ws->dev, reg_offset / 4, num_registers, 0xffffffff, 0, out) == 0;
 }
 
-static const char *
-radv_amdgpu_winsys_get_chip_name(struct radeon_winsys *rws)
-{
-   ac_drm_device *dev = ((struct radv_amdgpu_winsys *)rws)->dev;
-
-   return ac_drm_get_marketing_name(dev);
-}
-
 static bool
 radv_amdgpu_winsys_query_gpuvm_fault(struct radeon_winsys *rws, struct radv_winsys_gpuvm_fault_info *fault_info)
 {
@@ -147,6 +139,9 @@ radv_amdgpu_winsys_destroy(struct radeon_winsys *rws)
 
    u_rwlock_destroy(&ws->global_bo_list.lock);
    free(ws->global_bo_list.bos);
+
+   ac_drm_cs_destroy_syncobj(ws->dev, ws->vm_timeline_syncobj);
+   simple_mtx_destroy(&ws->vm_ioctl_lock);
 
    if (ws->bo_history_logfile)
       fclose(ws->bo_history_logfile);
@@ -247,7 +242,8 @@ radv_amdgpu_winsys_create(int fd, uint64_t debug_flags, uint64_t perftest_flags,
       /* Check that options don't differ from the existing winsys. */
       if (((debug_flags & RADV_DEBUG_ALL_BOS) && !ws->debug_all_bos) ||
           ((debug_flags & RADV_DEBUG_HANG) && !ws->debug_log_bos) ||
-          ((debug_flags & RADV_DEBUG_NO_IB_CHAINING) && ws->chain_ib) || (perftest_flags != ws->perftest)) {
+          ((debug_flags & RADV_DEBUG_NO_IB_CHAINING) && ws->chain_ib) ||
+          ((debug_flags & RADV_DEBUG_VM) && !ws->debug_vm) || (perftest_flags != ws->perftest)) {
          fprintf(stderr, "radv/amdgpu: Found options that differ from the existing winsys.\n");
          return VK_ERROR_INITIALIZATION_FAILED;
       }
@@ -297,6 +293,7 @@ radv_amdgpu_winsys_create(int fd, uint64_t debug_flags, uint64_t perftest_flags,
    ws->chain_ib = !(debug_flags & RADV_DEBUG_NO_IB_CHAINING);
    ws->debug_all_bos = !!(debug_flags & RADV_DEBUG_ALL_BOS);
    ws->debug_log_bos = debug_flags & RADV_DEBUG_HANG;
+   ws->dump_ibs = !!(debug_flags & RADV_DEBUG_DUMP_IBS);
 
    if (debug_flags & RADV_DEBUG_DUMP_BO_HISTORY) {
       ws->bo_history_logfile = fopen("/tmp/radv_bo_history.log", "w+");
@@ -325,15 +322,20 @@ radv_amdgpu_winsys_create(int fd, uint64_t debug_flags, uint64_t perftest_flags,
    ws->sync_types[num_sync_types++] = NULL;
    assert(num_sync_types <= ARRAY_SIZE(ws->sync_types));
 
+   if (ac_drm_cs_create_syncobj2(ws->dev, 0, &ws->vm_timeline_syncobj))
+      goto winsys_fail;
+
+   simple_mtx_init(&ws->vm_ioctl_lock, mtx_plain);
+
    ws->perftest = perftest_flags;
    ws->zero_all_vram_allocs = debug_flags & RADV_DEBUG_ZERO_VRAM;
+   ws->debug_vm = debug_flags & RADV_DEBUG_VM;
    u_rwlock_init(&ws->global_bo_list.lock);
    list_inithead(&ws->log_bo_list);
    u_rwlock_init(&ws->log_bo_list_lock);
    ws->base.query_info = radv_amdgpu_winsys_query_info;
    ws->base.query_value = radv_amdgpu_winsys_query_value;
    ws->base.read_registers = radv_amdgpu_winsys_read_registers;
-   ws->base.get_chip_name = radv_amdgpu_winsys_get_chip_name;
    ws->base.query_gpuvm_fault = radv_amdgpu_winsys_query_gpuvm_fault;
    ws->base.destroy = radv_amdgpu_winsys_destroy;
    ws->base.get_fd = radv_amdgpu_winsys_get_fd;

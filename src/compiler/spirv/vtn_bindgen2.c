@@ -90,7 +90,7 @@ optimize(nir_shader *nir)
 
       NIR_PASS(progress, nir, nir_lower_vars_to_ssa);
 
-      NIR_PASS(progress, nir, nir_copy_prop);
+      NIR_PASS(progress, nir, nir_opt_copy_prop);
       NIR_PASS(progress, nir, nir_opt_remove_phis);
       NIR_PASS(progress, nir, nir_lower_all_phis_to_scalar);
       NIR_PASS(progress, nir, nir_opt_dce);
@@ -98,8 +98,7 @@ optimize(nir_shader *nir)
       NIR_PASS(progress, nir, nir_opt_cse);
 
       nir_opt_peephole_select_options peephole_select_options = {
-         .limit = 64,
-         .expensive_alu_ok = true,
+         .limit = 0,
       };
       NIR_PASS(progress, nir, nir_opt_peephole_select, &peephole_select_options);
       NIR_PASS(progress, nir, nir_opt_phi_precision);
@@ -158,7 +157,7 @@ compile(void *memctx, const uint32_t *spirv, size_t spirv_size)
    NIR_PASS(_, nir, nir_lower_returns);
    NIR_PASS(_, nir, nir_inline_functions);
    nir_remove_non_exported(nir);
-   NIR_PASS(_, nir, nir_copy_prop);
+   NIR_PASS(_, nir, nir_opt_copy_prop);
    NIR_PASS(_, nir, nir_opt_deref);
 
    /* We can't deal with constant data, get rid of it */
@@ -237,7 +236,8 @@ compile(void *memctx, const uint32_t *spirv, size_t spirv_size)
    bool scratch_lowered = false;
    NIR_PASS(scratch_lowered, nir, nir_lower_scratch_to_var);
    if (scratch_lowered) {
-      NIR_PASS(_, nir, nir_lower_indirect_derefs, nir_var_function_temp, ~0);
+      NIR_PASS(_, nir, nir_lower_indirect_derefs_to_if_else_trees,
+               nir_var_function_temp, ~0);
    }
 
    /* Prune derefs/variables late, since scratch lowering leaves dead
@@ -248,7 +248,7 @@ compile(void *memctx, const uint32_t *spirv, size_t spirv_size)
             nir_var_function_temp | nir_var_shader_temp, NULL);
 
    /* Do a last round of clean up after the extra lowering */
-   NIR_PASS(_, nir, nir_copy_prop);
+   NIR_PASS(_, nir, nir_opt_copy_prop);
    NIR_PASS(_, nir, nir_opt_constant_folding);
    NIR_PASS(_, nir, nir_opt_algebraic);
    NIR_PASS(_, nir, nir_opt_cse);

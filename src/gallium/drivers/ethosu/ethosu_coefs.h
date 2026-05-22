@@ -11,7 +11,8 @@
 void
 fill_coefs(struct ethosu_subgraph *subgraph,
            struct ethosu_operation *operation,
-           struct pipe_resource *bias_rsrc,
-           struct pipe_resource *weight_rsrc);
+           int32_t *bias_data,
+           uint8_t *weight_data,
+           unsigned weight_size);
 
 #endif /* ETHOSU_COEFS_H */

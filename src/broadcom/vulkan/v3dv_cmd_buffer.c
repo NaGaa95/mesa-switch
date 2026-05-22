@@ -22,11 +22,19 @@
  */
 
 #include "broadcom/common/v3d_csd.h"
-#include "v3dv_private.h"
+#include "v3dv_device.h"
+#include "v3dv_cmd_buffer.h"
+#include "v3dv_image.h"
+#include "v3dv_entrypoints.h"
+#include "v3dv_version_dispatch.h"
+#include "vk_format.h"
 #include "util/perf/cpu_trace.h"
 #include "util/u_pack_color.h"
 #include "vk_common_entrypoints.h"
 #include "vk_util.h"
+
+#define V3D_VERSION 42
+#include "v3dv_format_table.h"
 
 float
 v3dv_get_aa_line_width(struct v3dv_pipeline *pipeline,
@@ -448,27 +456,14 @@ v3dv_job_allocate_tile_state(struct v3dv_job *job)
    const uint32_t layers =
       job->allocate_tile_state_for_all_layers ? tiling->layers : 1;
 
-   /* The PTB will request the tile alloc initial size per tile at start
-    * of tile binning.
-    */
-   uint32_t tile_alloc_size = 64 * layers *
-                              tiling->draw_tiles_x *
-                              tiling->draw_tiles_y;
-
-   /* The PTB allocates in aligned 4k chunks after the initial setup. */
-   tile_alloc_size = align(tile_alloc_size, 4096);
-
-   /* Include the first two chunk allocations that the PTB does so that
-    * we definitely clear the OOM condition before triggering one (the HW
-    * won't trigger OOM during the first allocations).
-    */
-   tile_alloc_size += 8192;
-
-   /* For performance, allocate some extra initial memory after the PTB's
-    * minimal allocations, so that we hopefully don't have to block the
-    * GPU on the kernel handling an OOM signal.
-    */
-   tile_alloc_size += 512 * 1024;
+   uint32_t tile_alloc_size, tile_state_size;
+   v3d_tile_alloc_sizes(layers,
+                        tiling->draw_tiles_x,
+                        tiling->draw_tiles_y,
+                        job->draw_count,
+                        job->device->devinfo.page_size,
+                        &tile_alloc_size,
+                        &tile_state_size);
 
    job->tile_alloc = v3dv_bo_alloc(job->device, tile_alloc_size,
                                    "tile_alloc", true);
@@ -479,11 +474,6 @@ v3dv_job_allocate_tile_state(struct v3dv_job *job)
 
    v3dv_job_add_bo_unchecked(job, job->tile_alloc);
 
-   const uint32_t tsda_per_tile_size = 256;
-   const uint32_t tile_state_size = layers *
-                                    tiling->draw_tiles_x *
-                                    tiling->draw_tiles_y *
-                                    tsda_per_tile_size;
    job->tile_state = v3dv_bo_alloc(job->device, tile_state_size, "TSDA", true);
    if (!job->tile_state) {
       v3dv_flag_oom(NULL, job);
@@ -500,7 +490,6 @@ v3dv_job_start_frame(struct v3dv_job *job,
                      uint32_t height,
                      uint32_t layers,
                      bool allocate_tile_state_for_all_layers,
-                     bool allocate_tile_state_now,
                      uint32_t render_target_count,
                      uint8_t max_internal_bpp,
                      uint8_t total_color_bpp,
@@ -520,14 +509,6 @@ v3dv_job_start_frame(struct v3dv_job *job,
    v3dv_return_if_oom(NULL, job);
 
    job->allocate_tile_state_for_all_layers = allocate_tile_state_for_all_layers;
-
-   /* For subpass jobs we postpone tile state allocation until we are finishing
-    * the job and have made a decision about double-buffer.
-    */
-   if (allocate_tile_state_now) {
-      if (!v3dv_job_allocate_tile_state(job))
-         return;
-   }
 
    v3d_X((&job->device->devinfo), job_emit_binning_prolog)(job, tiling,
       allocate_tile_state_for_all_layers ? tiling->layers : 1);
@@ -956,18 +937,14 @@ cmd_buffer_emit_resolve(struct v3dv_cmd_buffer *cmd_buffer,
 
    struct v3dv_image *src_image = (struct v3dv_image *) src_iview->vk.image;
    struct v3dv_image *dst_image = (struct v3dv_image *) dst_iview->vk.image;
-   VkResolveImageInfo2 resolve_info = {
-      .sType = VK_STRUCTURE_TYPE_RESOLVE_IMAGE_INFO_2,
-      .srcImage = v3dv_image_to_handle(src_image),
-      .srcImageLayout = VK_IMAGE_LAYOUT_GENERAL,
-      .dstImage = v3dv_image_to_handle(dst_image),
-      .dstImageLayout = VK_IMAGE_LAYOUT_GENERAL,
-      .regionCount = 1,
-      .pRegions = &region,
-   };
 
-   VkCommandBuffer cmd_buffer_handle = v3dv_cmd_buffer_to_handle(cmd_buffer);
-   v3dv_CmdResolveImage2(cmd_buffer_handle, &resolve_info);
+   /* Use view formats instead of image formats so that mutable resolve
+    * attachments (VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT) resolve correctly
+    * when the view format differs from the image creation format.
+    */
+   assert(src_iview->vk.format == dst_iview->vk.format);
+   v3dv_cmd_buffer_resolve_image(cmd_buffer, dst_image, src_image,
+                                 src_iview->vk.format, &region);
 }
 
 static void
@@ -1799,7 +1776,7 @@ cmd_buffer_subpass_create_job(struct v3dv_cmd_buffer *cmd_buffer,
                            width,
                            height,
                            layers,
-                           true, false,
+                           true,
                            subpass->color_count,
                            max_internal_bpp,
                            total_color_bpp,
@@ -2069,17 +2046,17 @@ cmd_buffer_execute_outside_pass(struct v3dv_cmd_buffer *primary,
             return;
 
          if (pending_barrier.dst_mask) {
-            /* FIXME: do the same we do for primaries and only choose the
-             * relevant src masks.
-             */
-            job->serialize = pending_barrier.src_mask_graphics |
-                             pending_barrier.src_mask_transfer |
-                             pending_barrier.src_mask_compute;
-            if (pending_barrier.bcl_buffer_access ||
-                pending_barrier.bcl_image_access) {
+            const uint8_t prev_dst_mask = pending_barrier.dst_mask;
+            v3dv_job_apply_barrier_state(job, &pending_barrier);
+
+            if ((prev_dst_mask & V3DV_BARRIER_GRAPHICS_BIT) &&
+                !(pending_barrier.dst_mask & V3DV_BARRIER_GRAPHICS_BIT) &&
+                (pending_barrier.bcl_buffer_access ||
+                 pending_barrier.bcl_image_access)) {
                job->needs_bcl_sync = true;
+               pending_barrier.bcl_buffer_access = 0;
+               pending_barrier.bcl_image_access = 0;
             }
-            memset(&pending_barrier, 0, sizeof(pending_barrier));
          }
       }
 
@@ -2790,7 +2767,7 @@ cmd_buffer_restart_job_for_msaa_if_needed(struct v3dv_cmd_buffer *cmd_buffer)
                         old_job->frame_tiling.width,
                         old_job->frame_tiling.height,
                         old_job->frame_tiling.layers,
-                        true, false,
+                        true,
                         old_job->frame_tiling.render_target_count,
                         old_job->frame_tiling.internal_bpp,
                         old_job->frame_tiling.total_color_bpp,
@@ -3064,8 +3041,18 @@ v3dv_cmd_buffer_emit_pre_draw(struct v3dv_cmd_buffer *cmd_buffer,
    if (BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_RS_LINE_WIDTH))
       v3d_X((&device->devinfo), cmd_buffer_emit_line_width)(cmd_buffer);
 
-   if (dyn->ia.primitive_topology == VK_PRIMITIVE_TOPOLOGY_POINT_LIST &&
-       !job->emitted_default_point_size) {
+   /* There is a bug in V3D 4.2 hardware where a FIFO in the binner may
+    * overflow in some scenarios where geometry is dropped in the pipeline
+    * (for example, if using primitive discards). The work around requires the
+    * driver to emit any CLE command, which will trigger the binner to flush
+    * the FIFO. The recommendation is to emit a very small packet that is fast
+    * to process by the CLE hardware such as PointSize in between all draw
+    * calls to ensure this flush always happens and there is never a chance of
+    * overflowing the binner.
+    */
+   if ((dyn->ia.primitive_topology == VK_PRIMITIVE_TOPOLOGY_POINT_LIST &&
+       !job->emitted_default_point_size) ||
+       device->devinfo.ver == 42) {
       v3d_X((&device->devinfo), cmd_buffer_emit_default_point_size)(cmd_buffer);
    }
 

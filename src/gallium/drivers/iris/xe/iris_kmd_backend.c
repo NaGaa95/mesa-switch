@@ -72,6 +72,10 @@ xe_gem_create(struct iris_bufmgr *bufmgr,
         heap_flags == IRIS_HEAP_DEVICE_LOCAL_CPU_VISIBLE_SMALL_BAR))
       flags |= DRM_XE_GEM_CREATE_FLAG_NEEDS_VISIBLE_VRAM;
 
+   if (iris_heap_is_compressed(heap_flags) == false &&
+       iris_bufmgr_get_device_info(bufmgr)->xe2_has_no_compression_hint)
+      flags |= DRM_XE_GEM_CREATE_FLAG_NO_COMPRESSION;
+
    struct drm_xe_gem_create gem_create = {
      .vm_id = vm_id,
      .size = align64(size, devinfo->mem_alignment),
@@ -89,9 +93,9 @@ xe_gem_create(struct iris_bufmgr *bufmgr,
    case INTEL_DEVICE_INFO_MMAP_MODE_WB:
       gem_create.cpu_caching = DRM_XE_GEM_CPU_CACHING_WB;
       break;
-   default:
-      UNREACHABLE("missing");
+   case INTEL_DEVICE_INFO_MMAP_MODE_INVALID:
       gem_create.cpu_caching = DRM_XE_GEM_CPU_CACHING_WC;
+      break;
    }
 
    if (alloc_flags & BO_ALLOC_PROTECTED)
@@ -110,6 +114,11 @@ xe_gem_mmap(struct iris_bufmgr *bufmgr, struct iris_bo *bo)
    struct drm_xe_gem_mmap_offset args = {
       .handle = bo->gem_handle,
    };
+   UNUSED const struct intel_device_info *devinfo = iris_bufmgr_get_device_info(bufmgr);
+
+   assert(iris_heap_to_pat_entry(devinfo, bo->real.heap, bo->real.scanout)->mmap !=
+          INTEL_DEVICE_INFO_MMAP_MODE_INVALID);
+
    if (intel_ioctl(iris_bufmgr_get_fd(bufmgr), DRM_IOCTL_XE_GEM_MMAP_OFFSET, &args))
       return NULL;
 

@@ -1,24 +1,6 @@
 /*
  * Copyright © 2021 Intel Corporation
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
- * IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  */
 
 #include <list>
@@ -108,86 +90,31 @@ brw_nir_lower_launch_mesh_workgroups(nir_shader *nir)
 #define BRW_PER_TASK_DATA_START_DW 8
 
 static void
-brw_nir_lower_tue_outputs(nir_shader *nir, brw_tue_map *map)
+brw_nir_lower_tue_outputs(brw_pass_tracker *pt, brw_tue_map *map)
 {
+   nir_shader *nir = pt->nir;
+
    memset(map, 0, sizeof(*map));
 
-   NIR_PASS(_, nir, nir_lower_io, nir_var_shader_out,
-            type_size_scalar_dwords, nir_lower_io_lower_64bit_to_32);
+   BRW_NIR_PASS(nir_lower_io, nir_var_shader_out,
+                type_size_scalar_dwords, nir_lower_io_lower_64bit_to_32);
 
    /* Lowering to explicit types will start offsets from task_payload_size, so
     * set it to start after the header.
     */
    nir->info.task_payload_size = BRW_PER_TASK_DATA_START_DW * 4;
-   NIR_PASS(_, nir, nir_lower_vars_to_explicit_types,
-            nir_var_mem_task_payload, shared_type_info);
-   NIR_PASS(_, nir, nir_lower_explicit_io,
-            nir_var_mem_task_payload, nir_address_format_32bit_offset);
+   BRW_NIR_PASS(nir_lower_vars_to_explicit_types,
+                nir_var_mem_task_payload, shared_type_info);
+   BRW_NIR_PASS(nir_lower_explicit_io,
+                nir_var_mem_task_payload, nir_address_format_32bit_offset);
 
-   map->size_dw = ALIGN(DIV_ROUND_UP(nir->info.task_payload_size, 4), 8);
+   map->size_dw = align(DIV_ROUND_UP(nir->info.task_payload_size, 4), 8);
 }
 
 static void
 brw_print_tue_map(FILE *fp, const struct brw_tue_map *map)
 {
    fprintf(fp, "TUE (%d dwords)\n\n", map->size_dw);
-}
-
-static bool
-brw_nir_adjust_task_payload_offsets_instr(struct nir_builder *b,
-                                          nir_intrinsic_instr *intrin,
-                                          void *data)
-{
-   switch (intrin->intrinsic) {
-   case nir_intrinsic_store_task_payload:
-   case nir_intrinsic_load_task_payload: {
-      nir_src *offset_src = nir_get_io_offset_src(intrin);
-
-      if (nir_src_is_const(*offset_src))
-         assert(nir_src_as_uint(*offset_src) % 4 == 0);
-
-      b->cursor = nir_before_instr(&intrin->instr);
-
-      /* Regular I/O uses dwords while explicit I/O used for task payload uses
-       * bytes.  Normalize it to dwords.
-       *
-       * TODO(mesh): Figure out how to handle 8-bit, 16-bit.
-       */
-
-      nir_def *offset = nir_ishr_imm(b, offset_src->ssa, 2);
-      nir_src_rewrite(offset_src, offset);
-
-      unsigned base = nir_intrinsic_base(intrin);
-      assert(base % 4 == 0);
-      nir_intrinsic_set_base(intrin, base / 4);
-
-      return true;
-   }
-
-   default:
-      return false;
-   }
-}
-
-static bool
-brw_nir_adjust_task_payload_offsets(nir_shader *nir)
-{
-   return nir_shader_intrinsics_pass(nir,
-                                       brw_nir_adjust_task_payload_offsets_instr,
-                                       nir_metadata_control_flow,
-                                       NULL);
-}
-
-void
-brw_nir_adjust_payload(nir_shader *shader)
-{
-   /* Adjustment of task payload offsets must be performed *after* last pass
-    * which interprets them as bytes, because it changes their unit.
-    */
-   bool adjusted = false;
-   NIR_PASS(adjusted, shader, brw_nir_adjust_task_payload_offsets);
-   if (adjusted) /* clean up the mess created by offset adjustments */
-      NIR_PASS(_, shader, nir_opt_constant_folding);
 }
 
 static bool
@@ -203,7 +130,7 @@ brw_nir_align_launch_mesh_workgroups_instr(nir_builder *b,
    /* This will avoid special case in nir_lower_task_shader dealing with
     * not vec4-aligned payload when payload_in_shared workaround is enabled.
     */
-   nir_intrinsic_set_range(intrin, ALIGN(range, 16));
+   nir_intrinsic_set_range(intrin, align(range, 16));
 
    return true;
 }
@@ -354,11 +281,19 @@ brw_compile_task(const struct brw_compiler *compiler,
    struct brw_task_prog_data *prog_data = params->prog_data;
    const bool debug_enabled = brw_should_print_shader(nir, DEBUG_TASK, params->base.source_hash);
 
-   brw_debug_archive_nir(params->base.archiver, nir, 0, "first");
+   brw_pass_tracker pt_ = {
+      .nir = nir,
+      .dispatch_width = 0,
+      .compiler = compiler,
+      .key = &key->base,
+      .archiver = params->base.archiver,
+   }, *pt = &pt_;
 
-   brw_nir_lower_tue_outputs(nir, &prog_data->map);
+   BRW_NIR_SNAPSHOT("first");
 
-   NIR_PASS(_, nir, brw_nir_align_launch_mesh_workgroups);
+   brw_nir_lower_tue_outputs(pt, &prog_data->map);
+
+   BRW_NIR_PASS(brw_nir_align_launch_mesh_workgroups);
 
    nir_lower_task_shader_options lower_ts_opt = {
       .payload_to_shared_for_atomics = true,
@@ -368,9 +303,9 @@ brw_compile_task(const struct brw_compiler *compiler,
        */
       .payload_offset_in_bytes = BRW_PER_TASK_DATA_START_DW * 4,
    };
-   NIR_PASS(_, nir, nir_lower_task_shader, lower_ts_opt);
+   BRW_NIR_PASS(nir_lower_task_shader, lower_ts_opt);
 
-   NIR_PASS(_, nir, brw_nir_lower_launch_mesh_workgroups);
+   BRW_NIR_PASS(brw_nir_lower_launch_mesh_workgroups);
 
    NIR_PASS(_, nir, brw_nir_lower_cs_intrinsics, compiler->devinfo,
             NULL);
@@ -387,7 +322,7 @@ brw_compile_task(const struct brw_compiler *compiler,
    prog_data->base.uses_inline_data = brw_nir_uses_inline_data(nir) ||
                                       key->base.uses_inline_push_addr;
 
-   brw_postprocess_nir_opts(nir, compiler, key->base.robust_flags);
+   brw_postprocess_nir_opts(pt);
 
    brw_simd_selection_state simd_state{
       .devinfo = compiler->devinfo,
@@ -395,7 +330,7 @@ brw_compile_task(const struct brw_compiler *compiler,
       .required_width = brw_required_dispatch_width(&nir->info),
    };
 
-   brw_debug_archive_nir(params->base.archiver, nir, 0, "before-simd");
+   BRW_NIR_SNAPSHOT("before_simd");
 
    unsigned pressure[SIMD_COUNT];
    brw_nir_quick_pressure_estimate(nir, devinfo, pressure);
@@ -416,15 +351,21 @@ brw_compile_task(const struct brw_compiler *compiler,
       const unsigned dispatch_width = 8 << simd;
 
       nir_shader *shader = nir_shader_clone(params->base.mem_ctx, nir);
-      brw_nir_apply_key(shader, compiler, &key->base, dispatch_width);
 
-      brw_debug_archive_nir(params->base.archiver, shader, dispatch_width, "first");
+      pt_ = {
+         .nir = shader,
+         .dispatch_width = dispatch_width,
+         .compiler = compiler,
+         .archiver = params->base.archiver,
+      };
 
-      NIR_PASS(_, shader, brw_nir_lower_simd, dispatch_width);
+      BRW_NIR_SNAPSHOT("first");
+      brw_nir_apply_key(pt, &key->base, dispatch_width);
 
-      brw_nir_optimize(shader, devinfo);
-      brw_postprocess_nir_out_of_ssa(shader, dispatch_width,
-                                     params->base.archiver, debug_enabled);
+      brw_nir_optimize(pt);
+      /* brw_nir_optimize undoes late lowerings. */
+      BRW_NIR_PASS(nir_opt_algebraic_late);
+      brw_postprocess_nir_out_of_ssa(pt, debug_enabled);
 
       const brw_shader_params shader_params = {
          .compiler                = compiler,
@@ -489,7 +430,7 @@ brw_compile_task(const struct brw_compiler *compiler,
 }
 
 static void
-brw_nir_lower_tue_inputs(nir_shader *nir, const brw_tue_map *map)
+brw_nir_lower_tue_inputs(brw_pass_tracker *pt, const brw_tue_map *map)
 {
    /* See brw_nir_lower_tue_outputs. If a task payload is read by this shader,
     * task_payload_size will be used to start offsets, and that's always
@@ -497,18 +438,17 @@ brw_nir_lower_tue_inputs(nir_shader *nir, const brw_tue_map *map)
     * We can't always use map, as it may not be present if task and mesh
     * shaders are not compiled together. This is possible with shader objects.
     */
+   nir_shader *nir = pt->nir;
    nir->info.task_payload_size = BRW_PER_TASK_DATA_START_DW * 4;
 
-   bool progress = false;
-
-   NIR_PASS(progress, nir, nir_lower_vars_to_explicit_types,
-            nir_var_mem_task_payload, shared_type_info);
+   bool progress = BRW_NIR_PASS(nir_lower_vars_to_explicit_types,
+                                nir_var_mem_task_payload, shared_type_info);
 
    if (progress) {
       /* The types for Task Output and Mesh Input should match, so their sizes
        * should also match.
        */
-      assert(!map || map->size_dw == ALIGN(DIV_ROUND_UP(nir->info.task_payload_size, 4), 8));
+      assert(!map || map->size_dw == align(DIV_ROUND_UP(nir->info.task_payload_size, 4), 8));
    } else {
       /* Mesh doesn't read any input, to make it clearer set the
        * task_payload_size to zero instead of keeping an incomplete size that
@@ -517,8 +457,8 @@ brw_nir_lower_tue_inputs(nir_shader *nir, const brw_tue_map *map)
       nir->info.task_payload_size = 0;
    }
 
-   NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_task_payload,
-            nir_address_format_32bit_offset);
+   BRW_NIR_PASS(nir_lower_explicit_io, nir_var_mem_task_payload,
+                nir_address_format_32bit_offset);
 }
 
 /* Attribute types. Flat attributes have to be a separate class because
@@ -529,13 +469,6 @@ enum {
    PRIM, /* per primitive */
    VERT, /* per vertex interpolated */
    VERT_FLAT, /* per vertex flat */
-};
-
-struct attr_desc {
-   int location;
-   const struct glsl_type *type;
-   unsigned dwords;
-   unsigned slots;
 };
 
 static void
@@ -692,112 +625,7 @@ brw_print_mue_map(FILE *fp, const struct brw_mue_map *map, struct nir_shader *ni
 }
 
 static bool
-remap_io_to_dwords(nir_builder *b, nir_intrinsic_instr *intrin, void *data)
-{
-   if (intrin->intrinsic != nir_intrinsic_load_per_vertex_output &&
-       intrin->intrinsic != nir_intrinsic_load_per_primitive_output &&
-       intrin->intrinsic != nir_intrinsic_store_per_vertex_output &&
-       intrin->intrinsic != nir_intrinsic_store_per_primitive_output)
-      return false;
-
-   nir_io_semantics io_sem = nir_intrinsic_io_semantics(intrin);
-   if (io_sem.location == VARYING_SLOT_PRIMITIVE_INDICES ||
-       io_sem.location == VARYING_SLOT_PRIMITIVE_COUNT)
-      return false;
-
-   nir_intrinsic_set_base(intrin, nir_intrinsic_base(intrin) * 4);
-   if (nir_intrinsic_has_range(intrin))
-      nir_intrinsic_set_range(intrin, nir_intrinsic_range(intrin) * 4);
-
-   b->cursor = nir_before_instr(&intrin->instr);
-
-   nir_src *offset = nir_get_io_offset_src(intrin);
-   assert(offset != NULL);
-
-   nir_src_rewrite(offset, nir_ishl_imm(b, offset->ssa, 2));
-
-   return true;
-}
-
-static void
-brw_nir_lower_mue_outputs(nir_shader *nir, const struct brw_mue_map *map)
-{
-   nir_foreach_shader_out_variable(var, nir) {
-      int location = var->data.location;
-      assert(location >= 0);
-
-      switch (location) {
-      case VARYING_SLOT_PRIMITIVE_COUNT:
-      case VARYING_SLOT_PRIMITIVE_INDICES:
-         /* Primitive count & indices are not part of the per-primitive block,
-          * they have there own spot just before. We saved their offset in the
-          * the per-primitive array, we just don't need to add the block
-          * offset.
-          */
-         var->data.driver_location =
-            map->per_primitive_offsets[location] / 4;
-         break;
-
-      case VARYING_SLOT_PRIMITIVE_SHADING_RATE:
-         var->data.driver_location = map->per_primitive_offset / 16;
-         var->data.location_frac = 0;
-         break;
-
-      case VARYING_SLOT_LAYER:
-         var->data.driver_location = map->per_primitive_offset / 16;
-         var->data.location_frac = 1;
-         break;
-
-      case VARYING_SLOT_VIEWPORT:
-         var->data.driver_location = map->per_primitive_offset / 16;
-         var->data.location_frac = 2;
-         break;
-
-      case VARYING_SLOT_CULL_PRIMITIVE:
-         var->data.driver_location = map->per_primitive_offset / 16;
-         var->data.location_frac = 3;
-         break;
-
-      case VARYING_SLOT_PSIZ:
-         var->data.driver_location = map->per_vertex_offset / 16;
-         var->data.location_frac = 3;
-         break;
-
-      default:
-         if (nir->info.per_primitive_outputs & BITFIELD64_BIT(location))  {
-            assert(map->per_primitive_offsets[location] != -1);
-            var->data.driver_location =
-               (map->per_primitive_offset +
-                map->per_primitive_offsets[location]) / 16;
-         } else {
-            /* Each per vertex location has its own slot/vec4 (16B) of data, use
-             * map->vue_map.varying_to_slot[] to get the 16B offset and add the
-             * per-vertex block offset.
-             */
-            assert(map->vue_map.varying_to_slot[location] != -1);
-            var->data.driver_location =
-               map->per_vertex_offset / 16 +
-               map->vue_map.varying_to_slot[location];
-         }
-         break;
-      }
-   }
-
-   NIR_PASS(_, nir, nir_lower_io, nir_var_shader_out,
-            type_size_vec4,
-            nir_lower_io_lower_64bit_to_32);
-
-   /* Everythings works with slots in terms if IO, but our backend deals with
-    * dwords. Apply remapping.
-    */
-   NIR_PASS(_, nir, nir_shader_intrinsics_pass,
-            remap_io_to_dwords, nir_metadata_control_flow, NULL);
-}
-
-static bool
-brw_nir_initialize_mue(nir_shader *nir,
-                       const struct brw_mue_map *map,
-                       unsigned dispatch_width)
+brw_nir_initialize_mue(nir_shader *nir, const struct brw_mue_map *map)
 {
    nir_builder b;
    nir_function_impl *entrypoint = nir_shader_get_entrypoint(nir);
@@ -832,10 +660,13 @@ brw_nir_initialize_mue(nir_shader *nir,
                                            prim_in_inv * workgroup_size);
 
       nir_store_per_primitive_output(&b, zerovec, prim, dw_off,
-                                     .base = (int)map->per_primitive_offset / 4,
                                      .write_mask = WRITEMASK_XYZW,
                                      .component = 0,
-                                     .src_type = nir_type_uint32);
+                                     .src_type = nir_type_uint32,
+                                     .io_semantics = {
+                                        .location = VARYING_SLOT_PRIMITIVE_SHADING_RATE,
+                                        .num_slots = 1
+                                     });
    }
 
    /* How many prims are left? */
@@ -852,10 +683,13 @@ brw_nir_initialize_mue(nir_shader *nir,
                                                prims_per_inv * workgroup_size);
 
          nir_store_per_primitive_output(&b, zerovec, prim, dw_off,
-                                        .base = (int)map->per_primitive_offset / 4,
                                         .write_mask = WRITEMASK_XYZW,
                                         .component = 0,
-                                        .src_type = nir_type_uint32);
+                                        .src_type = nir_type_uint32,
+                                        .io_semantics = {
+                                           .location = VARYING_SLOT_PRIMITIVE_SHADING_RATE,
+                                           .num_slots = 1
+                                        });
       }
       nir_pop_if(&b, if_stmt);
    }
@@ -863,11 +697,17 @@ brw_nir_initialize_mue(nir_shader *nir,
    /* If there's more than one subgroup, then we need to wait for all of them
     * to finish initialization before we can proceed. Otherwise some subgroups
     * may start filling MUE before other finished initializing.
+    *
+    * Note that brw_nir_lower_simd and subsequent optimizations will remove
+    * this code if condition is false.
     */
-   if (workgroup_size > dispatch_width) {
+   nir_push_if(&b, nir_ilt_imm(&b, nir_load_subgroup_size(&b), workgroup_size));
+   {
       nir_barrier(&b, SCOPE_WORKGROUP, SCOPE_WORKGROUP,
-                         NIR_MEMORY_ACQ_REL, nir_var_shader_out);
+                  NIR_MEMORY_ACQ_REL, nir_var_shader_out);
    }
+   nir_pop_if(&b, NULL);
+
 
    if (remaining) {
       nir_progress(true, entrypoint, nir_metadata_none);
@@ -875,63 +715,6 @@ brw_nir_initialize_mue(nir_shader *nir,
       nir_progress(true, entrypoint, nir_metadata_control_flow);
    }
    return true;
-}
-
-static void
-brw_nir_adjust_offset(nir_builder *b, nir_intrinsic_instr *intrin, uint32_t pitch)
-{
-   nir_src *index_src = nir_get_io_arrayed_index_src(intrin);
-   nir_src *offset_src = nir_get_io_offset_src(intrin);
-
-   b->cursor = nir_before_instr(&intrin->instr);
-   nir_def *offset =
-      nir_iadd(b,
-               offset_src->ssa,
-               nir_imul_imm(b, index_src->ssa, pitch));
-   nir_src_rewrite(offset_src, offset);
-}
-
-static bool
-brw_nir_adjust_offset_for_arrayed_indices_instr(nir_builder *b,
-                                                nir_intrinsic_instr *intrin,
-                                                void *data)
-{
-   const struct brw_mue_map *map = (const struct brw_mue_map *) data;
-
-   /* Remap per_vertex and per_primitive offsets using the extra source and
-    * the pitch.
-    */
-   switch (intrin->intrinsic) {
-   case nir_intrinsic_load_per_vertex_output:
-   case nir_intrinsic_store_per_vertex_output:
-      brw_nir_adjust_offset(b, intrin, map->per_vertex_stride / 4);
-      return true;
-
-   case nir_intrinsic_load_per_primitive_output:
-   case nir_intrinsic_store_per_primitive_output: {
-      struct nir_io_semantics sem = nir_intrinsic_io_semantics(intrin);
-      uint32_t pitch;
-      if (sem.location == VARYING_SLOT_PRIMITIVE_INDICES)
-         pitch = map->per_primitive_indices_stride;
-      else
-         pitch = map->per_primitive_stride;
-
-      brw_nir_adjust_offset(b, intrin, pitch / 4);
-      return true;
-   }
-
-   default:
-      return false;
-   }
-}
-
-static bool
-brw_nir_adjust_offset_for_arrayed_indices(nir_shader *nir, const struct brw_mue_map *map)
-{
-   return nir_shader_intrinsics_pass(nir,
-                                       brw_nir_adjust_offset_for_arrayed_indices_instr,
-                                       nir_metadata_control_flow,
-                                       (void *)map);
 }
 
 struct index_packing_state {
@@ -1187,7 +970,15 @@ brw_compile_mesh(const struct brw_compiler *compiler,
    struct brw_mesh_prog_data *prog_data = params->prog_data;
    const bool debug_enabled = brw_should_print_shader(nir, DEBUG_MESH, params->base.source_hash);
 
-   brw_debug_archive_nir(params->base.archiver, nir, 0, "first");
+   brw_pass_tracker pt_ = {
+      .nir = nir,
+      .dispatch_width = 0,
+      .compiler = compiler,
+      .key = &key->base,
+      .archiver = params->base.archiver,
+   }, *pt = &pt_;
+
+   BRW_NIR_SNAPSHOT("first");
 
    brw_prog_data_init(&prog_data->base.base, &params->base);
 
@@ -1222,18 +1013,23 @@ brw_compile_mesh(const struct brw_compiler *compiler,
    prog_data->uses_drawid =
       BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_DRAW_ID);
 
-   brw_nir_lower_tue_inputs(nir, params->tue_map);
+   brw_nir_lower_tue_inputs(pt, params->tue_map);
 
-   NIR_PASS(_, nir, brw_nir_lower_mesh_primitive_count);
-   NIR_PASS(_, nir, nir_opt_dce);
-   NIR_PASS(_, nir, nir_remove_dead_variables, nir_var_shader_out, NULL);
+   BRW_NIR_PASS(brw_nir_lower_mesh_primitive_count);
+   BRW_NIR_PASS(nir_opt_dce);
+   BRW_NIR_PASS(nir_remove_dead_variables, nir_var_shader_out, NULL);
 
    brw_compute_mue_map(compiler, nir, &prog_data->map,
                        prog_data->index_format,
                        key->base.vue_layout,
                        apply_wa_18019110168 ? wa_18019110168_mapping : NULL);
-   brw_nir_lower_mue_outputs(nir, &prog_data->map);
+   brw_nir_lower_mesh_outputs(nir, &prog_data->map);
 
+   /* When Primitive Header is enabled, we may not generates writes to all
+    * fields, so let's initialize everything.
+    */
+   if (prog_data->map.has_per_primitive_header)
+      BRW_NIR_PASS(brw_nir_initialize_mue, &prog_data->map);
 
    NIR_PASS(_, nir, brw_nir_lower_cs_intrinsics, compiler->devinfo,
             NULL);
@@ -1243,7 +1039,23 @@ brw_compile_mesh(const struct brw_compiler *compiler,
    prog_data->base.uses_inline_data = brw_nir_uses_inline_data(nir) ||
                                       key->base.uses_inline_push_addr;
 
-   brw_postprocess_nir_opts(nir, compiler, key->base.robust_flags);
+   brw_postprocess_nir_opts(pt);
+
+   const struct brw_lower_urb_cb_data cb_data = {
+      .devinfo = devinfo,
+      .varying_to_slot = prog_data->map.vue_map.varying_to_slot,
+      .per_vertex_stride = prog_data->map.per_vertex_stride,
+      .per_vertex_offset = prog_data->map.per_vertex_offset,
+      .per_primitive_offset = prog_data->map.per_primitive_offset,
+      .per_primitive_stride = prog_data->map.per_primitive_stride,
+      .per_primitive_indices_stride =
+         prog_data->map.per_primitive_indices_stride,
+      .per_primitive_byte_offsets = prog_data->map.per_primitive_offsets,
+   };
+   BRW_NIR_PASS(brw_nir_lower_outputs_to_urb_intrinsics, &cb_data);
+   brw_nir_opt_vectorize_urb(pt);
+   struct nir_opt_offsets_options offset_options = {};
+   BRW_NIR_PASS(nir_opt_offsets, &offset_options);
 
    brw_simd_selection_state simd_state{
       .devinfo = compiler->devinfo,
@@ -1253,7 +1065,7 @@ brw_compile_mesh(const struct brw_compiler *compiler,
 
    std::unique_ptr<brw_shader> v[3];
 
-   brw_debug_archive_nir(params->base.archiver, nir, 0, "before-simd");
+   BRW_NIR_SNAPSHOT("before_simd");
 
    for (unsigned i = 0; i < 3; i++) {
       const unsigned simd = devinfo->ver >= 30 ? 2 - i : i;
@@ -1265,26 +1077,23 @@ brw_compile_mesh(const struct brw_compiler *compiler,
 
       nir_shader *shader = nir_shader_clone(params->base.mem_ctx, nir);
 
-      brw_debug_archive_nir(params->base.archiver, shader, dispatch_width, "first");
+      pt_ = {
+         .nir = shader,
+         .dispatch_width = dispatch_width,
+         .compiler = compiler,
+         .archiver = params->base.archiver,
+      };
 
-      /*
-       * When Primitive Header is enabled, we may not generates writes to all
-       * fields, so let's initialize everything.
-       */
-      if (prog_data->map.has_per_primitive_header)
-         NIR_PASS(_, shader, brw_nir_initialize_mue, &prog_data->map, dispatch_width);
+      BRW_NIR_SNAPSHOT("first");
+      brw_nir_apply_key(pt, &key->base, dispatch_width);
 
-      brw_nir_apply_key(shader, compiler, &key->base, dispatch_width);
-
-      NIR_PASS(_, shader, brw_nir_adjust_offset_for_arrayed_indices, &prog_data->map);
       /* Load uniforms can do a better job for constants, so fold before it. */
-      NIR_PASS(_, shader, nir_opt_constant_folding);
+      BRW_NIR_PASS(nir_opt_constant_folding);
 
-      NIR_PASS(_, shader, brw_nir_lower_simd, dispatch_width);
-
-      brw_nir_optimize(shader, devinfo);
-      brw_postprocess_nir_out_of_ssa(shader, dispatch_width,
-                                     params->base.archiver, debug_enabled);
+      brw_nir_optimize(pt);
+      /* brw_nir_optimize undoes late lowerings. */
+      BRW_NIR_PASS(nir_opt_algebraic_late);
+      brw_postprocess_nir_out_of_ssa(pt, debug_enabled);
 
       const brw_shader_params shader_params = {
          .compiler                = compiler,

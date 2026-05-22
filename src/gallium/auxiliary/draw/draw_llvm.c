@@ -60,7 +60,7 @@
 #include "util/u_pointer.h"
 #include "util/u_string.h"
 #include "nir_serialize.h"
-#include "util/mesa-sha1.h"
+#include "util/mesa-blake3.h"
 #define DEBUG_STORE 0
 
 
@@ -442,7 +442,7 @@ static void
 draw_get_ir_cache_key(struct nir_shader *nir,
                       const void *key, size_t key_size,
                       uint32_t val_32bit,
-                      unsigned char ir_sha1_cache_key[20])
+                      unsigned char ir_blake3_cache_key[BLAKE3_KEY_LEN])
 {
    struct blob blob = { 0 };
    unsigned ir_size;
@@ -453,12 +453,12 @@ draw_get_ir_cache_key(struct nir_shader *nir,
    ir_binary = blob.data;
    ir_size = blob.size;
 
-   struct mesa_sha1 ctx;
-   _mesa_sha1_init(&ctx);
-   _mesa_sha1_update(&ctx, key, key_size);
-   _mesa_sha1_update(&ctx, ir_binary, ir_size);
-   _mesa_sha1_update(&ctx, &val_32bit, 4);
-   _mesa_sha1_final(&ctx, ir_sha1_cache_key);
+   blake3_hasher ctx;
+   _mesa_blake3_init(&ctx);
+   _mesa_blake3_update(&ctx, key, key_size);
+   _mesa_blake3_update(&ctx, ir_binary, ir_size);
+   _mesa_blake3_update(&ctx, &val_32bit, 4);
+   _mesa_blake3_final(&ctx, ir_blake3_cache_key);
 
    blob_finish(&blob);
 }
@@ -476,7 +476,7 @@ draw_llvm_create_variant(struct draw_llvm *llvm,
    struct llvm_vertex_shader *shader =
       llvm_vertex_shader(llvm->draw->vs.vertex_shader);
    char module_name[64];
-   unsigned char ir_sha1_cache_key[20];
+   unsigned char ir_blake3_cache_key[BLAKE3_KEY_LEN];
    struct lp_cached_code cached = { 0 };
    bool needs_caching = false;
    variant = MALLOC(sizeof *variant +
@@ -497,11 +497,11 @@ draw_llvm_create_variant(struct draw_llvm *llvm,
                             key,
                             shader->variant_key_size,
                             num_inputs,
-                            ir_sha1_cache_key);
+                            ir_blake3_cache_key);
 
       llvm->draw->disk_cache_find_shader(llvm->draw->disk_cache_cookie,
                                          &cached,
-                                         ir_sha1_cache_key);
+                                         ir_blake3_cache_key);
       if (!cached.data_size)
          needs_caching = true;
    }
@@ -530,7 +530,7 @@ draw_llvm_create_variant(struct draw_llvm *llvm,
    if (needs_caching)
       llvm->draw->disk_cache_insert_shader(llvm->draw->disk_cache_cookie,
                                            &cached,
-                                           ir_sha1_cache_key);
+                                           ir_blake3_cache_key);
    gallivm_free_ir(variant->gallivm);
 
    variant->list_item_global.base = variant;
@@ -2505,7 +2505,7 @@ draw_gs_llvm_create_variant(struct draw_llvm *llvm,
    struct llvm_geometry_shader *shader =
       llvm_geometry_shader(llvm->draw->gs.geometry_shader);
    char module_name[64];
-   unsigned char ir_sha1_cache_key[20];
+   unsigned char ir_blake3_cache_key[BLAKE3_KEY_LEN];
    struct lp_cached_code cached = { 0 };
    bool needs_caching = false;
 
@@ -2528,11 +2528,11 @@ draw_gs_llvm_create_variant(struct draw_llvm *llvm,
                             key,
                             shader->variant_key_size,
                             num_outputs,
-                            ir_sha1_cache_key);
+                            ir_blake3_cache_key);
 
       llvm->draw->disk_cache_find_shader(llvm->draw->disk_cache_cookie,
                                          &cached,
-                                         ir_sha1_cache_key);
+                                         ir_blake3_cache_key);
       if (!cached.data_size)
          needs_caching = true;
    }
@@ -2553,7 +2553,7 @@ draw_gs_llvm_create_variant(struct draw_llvm *llvm,
    if (needs_caching)
       llvm->draw->disk_cache_insert_shader(llvm->draw->disk_cache_cookie,
                                            &cached,
-                                           ir_sha1_cache_key);
+                                           ir_blake3_cache_key);
    gallivm_free_ir(variant->gallivm);
 
    variant->list_item_global.base = variant;
@@ -3177,7 +3177,7 @@ draw_tcs_llvm_create_variant(struct draw_llvm *llvm,
    struct draw_tcs_llvm_variant *variant;
    struct llvm_tess_ctrl_shader *shader = llvm_tess_ctrl_shader(llvm->draw->tcs.tess_ctrl_shader);
    char module_name[64];
-   unsigned char ir_sha1_cache_key[20];
+   unsigned char ir_blake3_cache_key[BLAKE3_KEY_LEN];
    struct lp_cached_code cached = { 0 };
    bool needs_caching = false;
 
@@ -3199,11 +3199,11 @@ draw_tcs_llvm_create_variant(struct draw_llvm *llvm,
                             key,
                             shader->variant_key_size,
                             num_outputs,
-                            ir_sha1_cache_key);
+                            ir_blake3_cache_key);
 
       llvm->draw->disk_cache_find_shader(llvm->draw->disk_cache_cookie,
                                          &cached,
-                                         ir_sha1_cache_key);
+                                         ir_blake3_cache_key);
       if (!cached.data_size)
          needs_caching = true;
    }
@@ -3227,7 +3227,7 @@ draw_tcs_llvm_create_variant(struct draw_llvm *llvm,
    if (needs_caching)
       llvm->draw->disk_cache_insert_shader(llvm->draw->disk_cache_cookie,
                                            &cached,
-                                           ir_sha1_cache_key);
+                                           ir_blake3_cache_key);
    gallivm_free_ir(variant->gallivm);
 
    variant->list_item_global.base = variant;
@@ -3715,7 +3715,7 @@ draw_tes_llvm_create_variant(struct draw_llvm *llvm,
    struct draw_tes_llvm_variant *variant;
    struct llvm_tess_eval_shader *shader = llvm_tess_eval_shader(llvm->draw->tes.tess_eval_shader);
    char module_name[64];
-   unsigned char ir_sha1_cache_key[20];
+   unsigned char ir_blake3_cache_key[BLAKE3_KEY_LEN];
    struct lp_cached_code cached = { 0 };
    bool needs_caching = false;
 
@@ -3736,11 +3736,11 @@ draw_tes_llvm_create_variant(struct draw_llvm *llvm,
                             key,
                             shader->variant_key_size,
                             num_outputs,
-                            ir_sha1_cache_key);
+                            ir_blake3_cache_key);
 
       llvm->draw->disk_cache_find_shader(llvm->draw->disk_cache_cookie,
                                          &cached,
-                                         ir_sha1_cache_key);
+                                         ir_blake3_cache_key);
       if (!cached.data_size)
          needs_caching = true;
    }
@@ -3766,7 +3766,7 @@ draw_tes_llvm_create_variant(struct draw_llvm *llvm,
    if (needs_caching)
       llvm->draw->disk_cache_insert_shader(llvm->draw->disk_cache_cookie,
                                            &cached,
-                                           ir_sha1_cache_key);
+                                           ir_blake3_cache_key);
    gallivm_free_ir(variant->gallivm);
 
    variant->list_item_global.base = variant;

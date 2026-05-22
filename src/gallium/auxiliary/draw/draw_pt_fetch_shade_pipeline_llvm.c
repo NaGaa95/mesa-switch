@@ -695,6 +695,15 @@ llvm_pipeline_generic(struct draw_pt_middle_end *middle,
                    gshader ? gshader->num_vertex_streams : 1,
                    vert_info, prim_info);
 
+   /* rasterization stream selection */
+   if ((opt & PT_SHADE) && gshader) {
+      unsigned rs = draw->rasterizer->rasterization_stream;
+      if (rs < gshader->num_vertex_streams) {
+         vert_info = &gs_vert_info[rs];
+         prim_info = &gs_prim_info[rs];
+      }
+   }
+
    if (prim_info->count == 0) {
 //      debug_printf("GS/IA didn't emit any vertices!\n");
    } else {
@@ -723,11 +732,11 @@ llvm_pipeline_generic(struct draw_pt_middle_end *middle,
          }
       }
    }
-
-   FREE(vert_info->verts);
-   if (gshader && gshader->num_vertex_streams > 1) {
-     for (unsigned i = 1; i < gshader->num_vertex_streams; i++)
-       FREE(gs_vert_info[i].verts);
+   if ((opt & PT_SHADE) && gshader) {
+      for (unsigned i = 0; i < gshader->num_vertex_streams; i++)
+         FREE(gs_vert_info[i].verts);
+   } else {
+      FREE(vert_info->verts);
    }
 
    FREE(patch_lengths);

@@ -267,8 +267,7 @@ clone_alu(clone_state *state, const nir_alu_instr *alu)
 {
    nir_alu_instr *nalu = nir_alu_instr_create(state->ns, alu->op);
    clone_debug_info(state, &nalu->instr, &alu->instr);
-   nalu->exact = alu->exact;
-   nalu->fp_fast_math = alu->fp_fast_math;
+   nalu->fp_math_ctrl = alu->fp_math_ctrl;
    nalu->no_signed_wrap = alu->no_signed_wrap;
    nalu->no_unsigned_wrap = alu->no_unsigned_wrap;
 
@@ -424,6 +423,7 @@ clone_tex(clone_state *state, const nir_tex_instr *tex)
    ntex->texture_non_uniform = tex->texture_non_uniform;
    ntex->sampler_non_uniform = tex->sampler_non_uniform;
    ntex->offset_non_uniform = tex->offset_non_uniform;
+   ntex->embedded_sampler = tex->embedded_sampler;
 
    ntex->backend_flags = tex->backend_flags;
 
@@ -491,6 +491,19 @@ clone_call(clone_state *state, const nir_call_instr *call)
    return ncall;
 }
 
+static nir_cmat_call_instr *
+clone_cmat_call(clone_state *state, const nir_cmat_call_instr *call)
+{
+   nir_function *ncallee = remap_global(state, call->callee);
+   nir_cmat_call_instr *ncall = nir_cmat_call_instr_create(state->ns, call->op, ncallee);
+   clone_debug_info(state, &ncall->instr, &call->instr);
+
+   for (unsigned i = 0; i < ncall->num_params; i++)
+      __clone_src(state, ncall, &ncall->params[i], &call->params[i]);
+   memcpy(ncall->const_index, call->const_index, sizeof(ncall->const_index));
+   return ncall;
+}
+
 static nir_instr *
 clone_instr(clone_state *state, const nir_instr *instr)
 {
@@ -513,8 +526,8 @@ clone_instr(clone_state *state, const nir_instr *instr)
       return &clone_jump(state, nir_instr_as_jump(instr))->instr;
    case nir_instr_type_call:
       return &clone_call(state, nir_instr_as_call(instr))->instr;
-   case nir_instr_type_parallel_copy:
-      UNREACHABLE("Cannot clone parallel copies");
+   case nir_instr_type_cmat_call:
+      return &clone_cmat_call(state, nir_instr_as_cmat_call(instr))->instr;
    default:
       UNREACHABLE("bad instr type");
       return NULL;
@@ -747,6 +760,7 @@ nir_function_clone(nir_shader *ns, const nir_function *fxn)
       }
    }
    nfxn->is_entrypoint = fxn->is_entrypoint;
+   nfxn->cmat_call = fxn->cmat_call;
    nfxn->is_preamble = fxn->is_preamble;
    nfxn->should_inline = fxn->should_inline;
    nfxn->dont_inline = fxn->dont_inline;

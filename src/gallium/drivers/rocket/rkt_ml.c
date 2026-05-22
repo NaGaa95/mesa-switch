@@ -40,7 +40,7 @@ static void
 create_tensor(struct rkt_ml_subgraph *subgraph, unsigned idx,
               unsigned size)
 {
-   struct pipe_context *context = subgraph->base.context;
+   struct pipe_context *context = subgraph->context;
    struct pipe_resource **tensors = util_dynarray_begin(&subgraph->tensors);
 
    assert(idx < util_dynarray_num_elements(&subgraph->tensors,
@@ -90,7 +90,7 @@ static void
 compile_operation(struct rkt_ml_subgraph *subgraph,
                   struct rkt_operation *operation)
 {
-   struct pipe_context *pcontext = subgraph->base.context;
+   struct pipe_context *pcontext = subgraph->context;
    unsigned regcfg_total_size = 0;
    struct util_dynarray *regcfgs;
    struct pipe_transfer *transfer = NULL;
@@ -100,12 +100,12 @@ compile_operation(struct rkt_ml_subgraph *subgraph,
    regcfgs = calloc(num_tasks, sizeof(struct util_dynarray));
 
    for (int i = 0; i < num_tasks; i++) {
-      util_dynarray_init(&regcfgs[i], NULL);
+      regcfgs[i] = UTIL_DYNARRAY_INIT;
       rkt_fill_regcmd(subgraph, operation, &regcfgs[i], i);
 
       unsigned size =
          util_dynarray_num_elements(&regcfgs[i], uint64_t) * sizeof(uint64_t);
-      regcfg_total_size += ALIGN(size, 64);
+      regcfg_total_size += align(size, 64);
    }
 
    operation->regcmd = pipe_buffer_create(pcontext->screen, 0,
@@ -129,13 +129,13 @@ compile_operation(struct rkt_ml_subgraph *subgraph,
             util_dynarray_element(&regcfgs[i], uint64_t, reg_count - 3);
 
          uint64_t addr = rkt_resource(operation->regcmd)->phys_addr +
-                         regcmd_offset + ALIGN(size * sizeof(uint64_t), 64);
+                         regcmd_offset + align(size * sizeof(uint64_t), 64);
          *next_address_reg |= addr << 16;
 
          unsigned regs_to_fetch =
             util_dynarray_num_elements(&regcfgs[i + 1], uint64_t);
          regs_to_fetch -= 4;
-         regs_to_fetch = ALIGN(regs_to_fetch / 2, 2);
+         regs_to_fetch = align(regs_to_fetch / 2, 2);
          *reg_count_reg |= regs_to_fetch << 16;
       }
 
@@ -151,7 +151,7 @@ compile_operation(struct rkt_ml_subgraph *subgraph,
          rkt_dump_buffer(regcmd, "regcmd", 0, i, regcmd_offset,
                          (size + 4) * sizeof(uint64_t));
 
-      regcmd_offset += ALIGN(size * sizeof(uint64_t), 64);
+      regcmd_offset += align(size * sizeof(uint64_t), 64);
    }
 
    pipe_buffer_unmap(pcontext, transfer);
@@ -168,10 +168,13 @@ lower_convolution(struct rkt_ml_subgraph *subgraph,
                   const struct pipe_ml_operation *poperation,
                   struct rkt_operation *operation)
 {
-   util_dynarray_init(&operation->tasks, NULL);
+   operation->tasks = UTIL_DYNARRAY_INIT;
 
    operation->depthwise = rkt_is_depthwise(poperation);
-   operation->padding_same = poperation->conv.padding_same;
+   operation->padding_top = poperation->conv.padding_top;
+   operation->padding_bottom = poperation->conv.padding_bottom;
+   operation->padding_left = poperation->conv.padding_left;
+   operation->padding_right = poperation->conv.padding_right;
    operation->stride = poperation->conv.stride_x;
 
    operation->input_index = poperation->input_tensors[0]->index;
@@ -261,7 +264,7 @@ tensor_quantization_supported(struct pipe_tensor *tensor)
 }
 
 bool
-rkt_ml_operation_supported(struct pipe_context *pcontext,
+rkt_ml_operation_supported(struct pipe_ml_device *pdevice,
                            const struct pipe_ml_operation *operation)
 {
    bool supported = false;
@@ -285,8 +288,8 @@ rkt_ml_operation_supported(struct pipe_context *pcontext,
       break;
    }
    case PIPE_ML_OPERATION_TYPE_ADD:
-      supported = operation->input_tensors[0]->resource == NULL &&
-                  operation->input_tensors[1]->resource == NULL;
+      supported = operation->input_tensors[0]->data == NULL &&
+                  operation->input_tensors[1]->data == NULL;
       break;
    default:
       supported = false;
@@ -296,19 +299,25 @@ rkt_ml_operation_supported(struct pipe_context *pcontext,
 }
 
 struct pipe_ml_subgraph *
-rkt_ml_subgraph_create(struct pipe_context *pcontext,
+rkt_ml_subgraph_create(struct pipe_ml_device *pdevice,
                        const struct pipe_ml_operation *poperations,
                        unsigned count)
 {
+   struct rkt_screen *screen = rkt_ml_device_screen(pdevice);
+   struct rkt_ml_device *dev = rkt_ml_device(pdevice);
    struct rkt_ml_subgraph *subgraph;
    unsigned tensor_count;
 
+   if (!dev->context)
+      dev->context = screen->pscreen.context_create(&screen->pscreen, NULL, 0);
+
    subgraph = calloc(1, sizeof(*subgraph));
-   subgraph->base.context = pcontext;
+   subgraph->base.device = pdevice;
+   subgraph->context = dev->context;
 
    tensor_count = count_tensors(poperations, count);
-   util_dynarray_init(&subgraph->tensors, NULL);
-   util_dynarray_init(&subgraph->operations, NULL);
+   subgraph->tensors = UTIL_DYNARRAY_INIT;
+   subgraph->operations = UTIL_DYNARRAY_INIT;
    if (!util_dynarray_resize(&subgraph->tensors, struct pipe_resource *,
                              tensor_count))
       return NULL;
@@ -322,8 +331,7 @@ rkt_ml_subgraph_create(struct pipe_context *pcontext,
       switch (poperations[i].type) {
       case PIPE_ML_OPERATION_TYPE_CONVOLUTION:
          lower_convolution(subgraph, &poperations[i], &operation);
-         util_dynarray_append(&subgraph->operations, struct rkt_operation,
-                              operation);
+         util_dynarray_append(&subgraph->operations, operation);
          break;
       case PIPE_ML_OPERATION_TYPE_ADD: {
          /* Fuse tensor addition into convolution*/
@@ -474,8 +482,7 @@ rkt_ml_subgraph_invoke(struct pipe_context *pcontext,
 
    DBG("Submitting graph\n");
 
-   struct util_dynarray jobs = {0};
-   util_dynarray_init(&jobs, NULL);
+   struct util_dynarray jobs = UTIL_DYNARRAY_INIT;
 
    util_dynarray_foreach (&subgraph->operations, struct rkt_operation,
                           operation) {
@@ -511,7 +518,7 @@ rkt_ml_subgraph_invoke(struct pipe_context *pcontext,
          job.out_bo_handle_count = 1;
          job.tasks = (uint64_t)tasks;
          job.task_count = task_count;
-         util_dynarray_append(&jobs, struct drm_rocket_job, job);
+         util_dynarray_append(&jobs, job);
       } else {
          /* Spread tasks among cores, for parallelism */
          util_dynarray_foreach (&operation->tasks, struct split_task, task) {
@@ -527,7 +534,7 @@ rkt_ml_subgraph_invoke(struct pipe_context *pcontext,
             job.out_bo_handle_count = 1;
             job.tasks = (uint64_t)ktask;
             job.task_count = 1;
-            util_dynarray_append(&jobs, struct drm_rocket_job, job);
+            util_dynarray_append(&jobs, job);
          }
       }
    }
@@ -613,7 +620,7 @@ free_operation(struct rkt_operation *operation)
 }
 
 void
-rkt_ml_subgraph_destroy(struct pipe_context *context,
+rkt_ml_subgraph_destroy(struct pipe_ml_device *pdevice,
                         struct pipe_ml_subgraph *psubgraph)
 {
    struct rkt_ml_subgraph *subgraph = (struct rkt_ml_subgraph *)(psubgraph);

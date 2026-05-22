@@ -1105,8 +1105,8 @@ svga_texture_create(struct pipe_screen *screen,
    /* Initialize the backing resource cache */
    tex->backed_handle = NULL;
 
-   svgascreen->hud.total_resource_bytes += tex->size;
-   svgascreen->hud.num_resources++;
+   p_atomic_add(&svgascreen->hud.total_resource_bytes, tex->size);
+   p_atomic_inc(&svgascreen->hud.num_resources);
 
    SVGA_STATS_TIME_POP(svgascreen->sws);
 
@@ -1195,7 +1195,7 @@ svga_texture_from_handle(struct pipe_screen *screen,
 
    tex->imported = true;
 
-   ss->hud.num_resources++;
+   p_atomic_inc(&ss->hud.num_resources);
 
    return &tex->b;
 

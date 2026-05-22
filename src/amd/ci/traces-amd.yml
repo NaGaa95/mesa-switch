@@ -1,7 +1,7 @@
 %YAML 1.2
 ---
 traces-db:
-  download-url: "https://s3.freedesktop.org/mesa-tracie-public/"
+  download-url: https://s3.freedesktop.org/mesa-tracie-public/
 
 traces:
   unigine/heaven-scene1-low-d3d11.trace-dxgi:
@@ -12,7 +12,7 @@ traces:
     vk-radv-raven:
       label: [no-perf, skip]
       checksum: e7631312bf602e9c0de94320441d83c7
-      text: "flaky, starting from around https://mesa.pages.freedesktop.org/-/mesa/-/jobs/40335547/"
+      text: flaky, starting from around https://mesa.pages.freedesktop.org/-/mesa/-/jobs/40335547/
   unigine/tropics-d3d9.trace-dxgi:
     vk-radv-raven:
       label: [no-perf, slow, skip]
@@ -62,7 +62,7 @@ traces:
       checksum: 38d31c579d9d1cca6a7a47035d19f194
   gputest/pixmark-volplosion-v2.trace:
     gl-radeonsi-stoney:
-      checksum: c8321043b7c05156b71f9837b54e7b50
+      checksum: 03571165f80f971a30a5d9c41d61df4e
   gputest/plot3d-v2.trace:
     gl-radeonsi-stoney:
       checksum: 2832d2190df232bcbde71a4b720303e1

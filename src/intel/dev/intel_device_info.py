@@ -136,6 +136,8 @@ Enum("intel_platform",
       "INTEL_PLATFORM_BMG",
       "INTEL_PLATFORM_PTL",
       "INTEL_PLATFORM_WCL",
+      "INTEL_PLATFORM_NVL_U",
+      "INTEL_PLATFORM_NVL_P",
       ])
 
 Struct("intel_memory_class_instance",
@@ -144,13 +146,10 @@ Struct("intel_memory_class_instance",
          Member("int", "instance")])
 
 Enum("intel_device_info_mmap_mode",
-      [EnumValue("INTEL_DEVICE_INFO_MMAP_MODE_UC", value=0),
+      [EnumValue("INTEL_DEVICE_INFO_MMAP_MODE_INVALID",
+                 comment=dedent("""No CPU access allowed.""")),
        EnumValue("INTEL_DEVICE_INFO_MMAP_MODE_WC"),
-       EnumValue("INTEL_DEVICE_INFO_MMAP_MODE_WB"),
-       EnumValue("INTEL_DEVICE_INFO_MMAP_MODE_XD",
-                 comment=dedent("""\
-                 Xe2+ only. Only supported in GPU side and used for displayable
-                 buffers."""))
+       EnumValue("INTEL_DEVICE_INFO_MMAP_MODE_WB")
        ])
 
 Struct("intel_device_info_pat_entry",
@@ -221,8 +220,8 @@ Struct("intel_device_info_mem_desc",
 
 Struct("intel_device_info_urb_desc",
        [Member("int", "size"),
-        Member("int", "min_entries", array=4),
-        Member("int", "max_entries", array=4)])
+        Member("int", "min_entries", array=8),
+        Member("int", "max_entries", array=8)])
 
 Struct("intel_device_info_pat_desc",
        [Member("intel_device_info_pat_entry", "cached_coherent",
@@ -283,6 +282,7 @@ Struct("intel_device_info",
         Member("bool", "has_64bit_float_via_math_pipe", compiler_field=True),
         Member("bool", "has_64bit_int", compiler_field=True),
         Member("bool", "has_bfloat16", compiler_field=True),
+        Member("bool", "has_fp8", compiler_field=True),
         Member("bool", "has_integer_dword_mul", compiler_field=True),
         Member("bool", "has_systolic", compiler_field=True),
         Member("bool", "supports_simd16_3src", compiler_field=True),
@@ -307,6 +307,10 @@ Struct("intel_device_info",
         Member("bool", "has_context_isolation"),
         Member("bool", "has_set_pat_uapi"),
         Member("bool", "has_indirect_unroll"),
+        Member("bool", "supports_low_latency_hint"),
+        Member("bool", "xe2_has_no_compression_hint"),
+        Member("bool", "xe_has_state_cache_perf_fix"),
+        Member("bool", "has_userptr_uapi"),
 
         Member("bool", "has_coarse_pixel_primitive_and_cb", compiler_field=True,
                comment=dedent("""\
@@ -442,6 +446,10 @@ Struct("intel_device_info",
 
                Thread count * number of EUs per subslice""")),
 
+        Member("unsigned", "num_geom_pipes", comment="Number of geometry pipes"),
+        Member("unsigned", "num_depth_pipes", comment="Number of depth pipes"),
+        Member("unsigned", "num_color_pipes", comment="Number of color pipes"),
+
         Member("unsigned", "max_cs_workgroup_threads", compiler_field=True,
                comment=dedent("""\
                Maximum number of threads per workgroup supported by the GPGPU_WALKER or
@@ -477,5 +485,7 @@ Struct("intel_device_info",
         Member("intel_device_info_mem_desc", "mem"),
         Member("intel_device_info_pat_desc", "pat"),
         Member("intel_cooperative_matrix_configuration",
-               "cooperative_matrix_configurations", array=16)]
+               "cooperative_matrix_configurations", array=16),
+
+        Member("bool", "is_virtio")]
        )

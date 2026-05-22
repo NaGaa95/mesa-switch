@@ -359,8 +359,12 @@ zink_blit(struct pipe_context *pctx,
    const struct util_format_description *dst_desc = util_format_description(info->dst.format);
 
    struct zink_resource *src = zink_resource(info->src.resource);
+   if (src->unflushed_transient)
+      src = src->transient;
    struct zink_resource *use_src = src;
    struct zink_resource *dst = zink_resource(info->dst.resource);
+   if (dst->unflushed_transient)
+      dst = dst->transient;
    bool needs_present_readback = false;
 
    if (ctx->awaiting_resolve && ctx->in_rp && ctx->dynamic_fb.tc_info.has_resolve) {
@@ -487,6 +491,8 @@ zink_blit(struct pipe_context *pctx,
    if (whole)
       pctx->invalidate_resource(pctx, info->dst.resource);
 
+   bool zsbuf_unused = ctx->zsbuf_unused;
+   bool zsbuf_readonly = ctx->zsbuf_readonly;
    ctx->unordered_blitting = !(info->render_condition_enable && ctx->render_condition_active) &&
                              !needs_present_readback &&
                              zink_get_cmdbuf(ctx, src, dst) == ctx->bs->reordered_cmdbuf;
@@ -509,9 +515,9 @@ zink_blit(struct pipe_context *pctx,
       zink_select_draw_vbo(ctx);
    }
    zink_blit_begin(ctx, ZINK_BLIT_SAVE_FB | ZINK_BLIT_SAVE_FS | ZINK_BLIT_SAVE_TEXTURES);
-   if (zink_format_needs_mutable(info->src.format, info->src.resource->format))
+   if (zink_format_needs_mutable(info->src.format, info->src.resource->format, (src->obj->vkflags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT) > 0))
       zink_resource_object_init_mutable(ctx, src);
-   if (zink_format_needs_mutable(info->dst.format, info->dst.resource->format))
+   if (zink_format_needs_mutable(info->dst.format, info->dst.resource->format, (dst->obj->vkflags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT) > 0))
       zink_resource_object_init_mutable(ctx, dst);
    zink_blit_barriers(ctx, use_src, dst, whole);
    /* if clears can't be stored, set blit barriers for all attachments because clears will be flushed */
@@ -556,7 +562,9 @@ zink_blit(struct pipe_context *pctx,
    if (ctx->unordered_blitting) {
       zink_batch_no_rp(ctx);
       ctx->in_rp = in_rp;
-      ctx->gfx_pipeline_state.rp_state = zink_update_rendering_info(ctx);
+      uint32_t rp_state = zink_update_rendering_info(ctx);
+      ctx->gfx_pipeline_state.dirty |= (ctx->gfx_pipeline_state.rp_state != rp_state);
+      ctx->gfx_pipeline_state.rp_state = rp_state;
       ctx->rp_changed = rp_changed;
       ctx->rp_tc_info_updated |= rp_tc_info_updated;
       ctx->queries_disabled = queries_disabled;
@@ -565,6 +573,8 @@ zink_blit(struct pipe_context *pctx,
       ctx->gfx_pipeline_state.pipeline = pipeline;
       ctx->pipeline_changed[ZINK_PIPELINE_GFX] = true;
       ctx->ds3_states = ds3_states;
+      ctx->zsbuf_readonly = zsbuf_readonly;
+      ctx->zsbuf_unused = zsbuf_unused;
       zink_select_draw_vbo(ctx);
    }
    ctx->unordered_blitting = false;

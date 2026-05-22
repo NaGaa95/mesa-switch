@@ -15,10 +15,9 @@ spec@glsl-4.*
 spec@glsl-es-3.20.*
 
 # Slow CL tests (> 5 minute to run)
-program@execute@builtin@builtin-float-sincos-1.0.generated
 
 # Slow CTS tests (> 1 minute to run)
-dEQP-VK.spirv_assembly.instruction.graphics.spirv_ids_abuse.lots_ids_geom
+asan-dEQP-VK.ssbo.phys.layout.random.scalar.3
 dEQP-VK.ssbo.layout.random.8bit.all_per_block_buffers.5
 dEQP-VK.ssbo.layout.random.8bit.scalar.78
 dEQP-VK.ssbo.layout.random.nested_structs_arrays.17
@@ -81,7 +80,6 @@ dEQP-VK.protected_memory.*
 dEQP-VK.query_pool.statistics_query.*
 dEQP-VK.ray_query.*
 dEQP-VK.ray_tracing_pipeline.*
-dEQP-VK.robustness.robustness2.*
 dEQP-VK.shader_object.rendering.*
 dEQP-VK.sparse_resources.*
 dEQP-VK.transform_feedback.*
@@ -90,29 +88,3 @@ dEQP-VK.transform_feedback.*
 # avoid interferences when running with other tests in parallel
 dEQP-VK.api.device_init.create_instance_device_intentional_alloc_fail.basic
 dEQP-VK.api.object_management.alloc_callback_fail.*
-
-# These tests generates OOM when running in parallel with other tests
-dEQP-VK.image.concurrent_copy.vk_format_r32g32_sfloat.vk_image_tiling_linear.vk_image_type_3d.multiple.gradient.device.write
-dEQP-VK.image.concurrent_copy.vk_format_r32g32_sfloat.vk_image_tiling_linear.vk_image_type_3d.multiple.random.device.write
-dEQP-VK.image.concurrent_copy.vk_format_r32g32_sfloat.vk_image_tiling_linear.vk_image_type_3d.single.gradient.device.write
-dEQP-VK.image.concurrent_copy.vk_format_r32g32_sfloat.vk_image_tiling_linear.vk_image_type_3d.single.random.device.write
-dEQP-VK.image.concurrent_copy.vk_format_r32g32_sfloat.vk_image_tiling_optimal.vk_image_type_3d.multiple.gradient.device.write
-dEQP-VK.image.concurrent_copy.vk_format_r32g32_sfloat.vk_image_tiling_optimal.vk_image_type_3d.multiple.random.device.write
-dEQP-VK.image.concurrent_copy.vk_format_r32g32_sfloat.vk_image_tiling_optimal.vk_image_type_3d.single.gradient.device.write
-dEQP-VK.image.concurrent_copy.vk_format_r32g32_sfloat.vk_image_tiling_optimal.vk_image_type_3d.single.random.device.write
-dEQP-VK.image.concurrent_copy.vk_format_r8_unorm.vk_image_tiling_linear.vk_image_type_3d.multiple.gradient.device.write
-dEQP-VK.image.concurrent_copy.vk_format_r8_unorm.vk_image_tiling_linear.vk_image_type_3d.multiple.random.device.write
-dEQP-VK.image.concurrent_copy.vk_format_r8_unorm.vk_image_tiling_linear.vk_image_type_3d.single.gradient.device.write
-dEQP-VK.image.concurrent_copy.vk_format_r8_unorm.vk_image_tiling_linear.vk_image_type_3d.single.random.device.write
-dEQP-VK.image.concurrent_copy.vk_format_r8_unorm.vk_image_tiling_optimal.vk_image_type_3d.multiple.gradient.device.write
-dEQP-VK.image.concurrent_copy.vk_format_r8_unorm.vk_image_tiling_optimal.vk_image_type_3d.multiple.random.device.write
-dEQP-VK.image.concurrent_copy.vk_format_r8_unorm.vk_image_tiling_optimal.vk_image_type_3d.single.gradient.device.write
-dEQP-VK.image.concurrent_copy.vk_format_r8_unorm.vk_image_tiling_optimal.vk_image_type_3d.single.random.device.write
-dEQP-VK.image.concurrent_copy.vk_format_r8g8b8a8_unorm.vk_image_tiling_linear.vk_image_type_3d.multiple.gradient.device.write
-dEQP-VK.image.concurrent_copy.vk_format_r8g8b8a8_unorm.vk_image_tiling_linear.vk_image_type_3d.multiple.random.device.write
-dEQP-VK.image.concurrent_copy.vk_format_r8g8b8a8_unorm.vk_image_tiling_linear.vk_image_type_3d.single.gradient.device.write
-dEQP-VK.image.concurrent_copy.vk_format_r8g8b8a8_unorm.vk_image_tiling_linear.vk_image_type_3d.single.random.device.write
-dEQP-VK.image.concurrent_copy.vk_format_r8g8b8a8_unorm.vk_image_tiling_optimal.vk_image_type_3d.multiple.gradient.device.write
-dEQP-VK.image.concurrent_copy.vk_format_r8g8b8a8_unorm.vk_image_tiling_optimal.vk_image_type_3d.multiple.random.device.write
-dEQP-VK.image.concurrent_copy.vk_format_r8g8b8a8_unorm.vk_image_tiling_optimal.vk_image_type_3d.single.gradient.device.write
-dEQP-VK.image.concurrent_copy.vk_format_r8g8b8a8_unorm.vk_image_tiling_optimal.vk_image_type_3d.single.random.device.write

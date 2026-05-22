@@ -27,6 +27,7 @@
 #include "vk_device.h"
 #include "vk_format.h"
 #include "vk_pipeline.h"
+#include "vk_render_pass.h"
 
 #include "nir_builder.h"
 
@@ -303,7 +304,7 @@ build_blit_shader(const struct vk_meta_blit_key *key)
 
       nir_def *val;
       if (resolve_mode == VK_RESOLVE_MODE_NONE) {
-         val = nir_txl(b, src_coord, nir_imm_float(b, 0),
+         val = nir_tex(b, src_coord, .lod = nir_imm_float(b, 0),
                        .texture_deref = t, .sampler_deref = s);
       } else {
          val = build_tex_resolve(b, t, nir_f2u32(b, src_coord),
@@ -883,16 +884,35 @@ vk_meta_resolve_image2(struct vk_command_buffer *cmd,
    VK_FROM_HANDLE(vk_image, src_image, resolve->srcImage);
    VK_FROM_HANDLE(vk_image, dst_image, resolve->dstImage);
 
+   /* Color resolve default to be based on the format */
    VkResolveModeFlagBits resolve_mode = VK_RESOLVE_MODE_SAMPLE_ZERO_BIT;
    if (vk_format_is_color(src_image->format) &&
        !vk_format_is_int(src_image->format))
       resolve_mode = VK_RESOLVE_MODE_AVERAGE_BIT;
 
+   VkResolveImageFlagBitsKHR resolve_flags = 0;
+   VkResolveModeFlagBits stencil_resolve_mode = VK_RESOLVE_MODE_SAMPLE_ZERO_BIT;
+
+   const VkResolveImageModeInfoKHR *mode_info =
+      vk_find_struct_const(resolve->pNext, RESOLVE_IMAGE_MODE_INFO_KHR);
+   if (mode_info != NULL) {
+      resolve_flags = mode_info->flags;
+      resolve_mode = mode_info->resolveMode;
+      stencil_resolve_mode = mode_info->stencilResolveMode;
+   }
+
+   VkFormat src_format = src_image->format;
+   VkFormat dst_format = dst_image->format;
+   if (resolve_flags & VK_RESOLVE_IMAGE_SKIP_TRANSFER_FUNCTION_BIT_KHR) {
+      src_format = vk_format_srgb_to_linear(src_format);
+      dst_format = vk_format_srgb_to_linear(dst_format);
+   }
+
    vk_meta_resolve_image(cmd, meta,
-                         src_image, src_image->format, resolve->srcImageLayout,
-                         dst_image, dst_image->format, resolve->dstImageLayout,
+                         src_image, src_format, resolve->srcImageLayout,
+                         dst_image, dst_format, resolve->dstImageLayout,
                          resolve->regionCount, resolve->pRegions,
-                         resolve_mode, VK_RESOLVE_MODE_SAMPLE_ZERO_BIT);
+                         resolve_mode, stencil_resolve_mode);
 }
 
 static void
@@ -903,6 +923,7 @@ vk_meta_resolve_attachment(struct vk_command_buffer *cmd,
                            struct vk_image_view *dst_view,
                            VkImageLayout dst_image_layout,
                            VkImageAspectFlags resolve_aspects,
+                           VkRenderingAttachmentFlagsKHR att_flags,
                            VkResolveModeFlagBits resolve_mode,
                            VkResolveModeFlagBits stencil_resolve_mode,
                            VkRect2D area, uint32_t layer_count,
@@ -923,6 +944,13 @@ vk_meta_resolve_attachment(struct vk_command_buffer *cmd,
       .extent = { area.extent.width, area.extent.height, 1},
    };
 
+   VkFormat src_format = src_view->format;
+   VkFormat dst_format = dst_view->format;
+   if (att_flags & VK_RENDERING_ATTACHMENT_RESOLVE_SKIP_TRANSFER_FUNCTION_BIT_KHR) {
+      src_format = vk_format_srgb_to_linear(src_format);
+      dst_format = vk_format_srgb_to_linear(dst_format);
+   }
+
    if (view_mask) {
       u_foreach_bit(v, view_mask) {
          region.srcSubresource.baseArrayLayer = src_view->base_array_layer + v;
@@ -931,10 +959,8 @@ vk_meta_resolve_attachment(struct vk_command_buffer *cmd,
          region.dstSubresource.layerCount = 1;
 
          vk_meta_resolve_image(cmd, meta,
-                               src_view->image, src_view->format,
-                               src_image_layout,
-                               dst_view->image, dst_view->format,
-                               dst_image_layout,
+                               src_view->image, src_format, src_image_layout,
+                               dst_view->image, dst_format, dst_image_layout,
                                1, &region, resolve_mode, stencil_resolve_mode);
       }
    } else {
@@ -944,10 +970,8 @@ vk_meta_resolve_attachment(struct vk_command_buffer *cmd,
       region.dstSubresource.layerCount = layer_count;
 
       vk_meta_resolve_image(cmd, meta,
-                            src_view->image, src_view->format,
-                            src_image_layout,
-                            dst_view->image, dst_view->format,
-                            dst_image_layout,
+                            src_view->image, src_format, src_image_layout,
+                            dst_view->image, dst_format, dst_image_layout,
                             1, &region, resolve_mode, stencil_resolve_mode);
    }
 }
@@ -969,6 +993,7 @@ vk_meta_resolve_rendering(struct vk_command_buffer *cmd,
       vk_meta_resolve_attachment(cmd, meta, view, att->imageLayout,
                                  res_view, att->resolveImageLayout,
                                  VK_IMAGE_ASPECT_COLOR_BIT,
+                                 vk_get_rendering_attachment_flags(att),
                                  att->resolveMode, VK_RESOLVE_MODE_NONE,
                                  pRenderingInfo->renderArea,
                                  pRenderingInfo->layerCount,
@@ -994,6 +1019,7 @@ vk_meta_resolve_rendering(struct vk_command_buffer *cmd,
                                     res_view, d_att->resolveImageLayout,
                                     VK_IMAGE_ASPECT_DEPTH_BIT |
                                     VK_IMAGE_ASPECT_STENCIL_BIT,
+                                    0, /* Flags don't affect Z/S resolves */
                                     d_att->resolveMode, s_att->resolveMode,
                                     pRenderingInfo->renderArea,
                                     pRenderingInfo->layerCount,
@@ -1006,6 +1032,7 @@ vk_meta_resolve_rendering(struct vk_command_buffer *cmd,
             vk_meta_resolve_attachment(cmd, meta, view, d_att->imageLayout,
                                        res_view, d_att->resolveImageLayout,
                                        VK_IMAGE_ASPECT_DEPTH_BIT,
+                                       0, /* Flags don't affect Z/S resolves */
                                        d_att->resolveMode, VK_RESOLVE_MODE_NONE,
                                        pRenderingInfo->renderArea,
                                        pRenderingInfo->layerCount,
@@ -1019,6 +1046,7 @@ vk_meta_resolve_rendering(struct vk_command_buffer *cmd,
             vk_meta_resolve_attachment(cmd, meta, view, s_att->imageLayout,
                                        res_view, s_att->resolveImageLayout,
                                        VK_IMAGE_ASPECT_STENCIL_BIT,
+                                       0, /* Flags don't affect Z/S resolves */
                                        VK_RESOLVE_MODE_NONE, s_att->resolveMode,
                                        pRenderingInfo->renderArea,
                                        pRenderingInfo->layerCount,

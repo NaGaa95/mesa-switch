@@ -210,6 +210,8 @@ d3d12_flush_resource(struct pipe_context *pctx,
                                    D3D12_RESOURCE_STATE_COMMON,
                                    D3D12_TRANSITION_FLAG_INVALIDATE_BINDINGS);
    d3d12_apply_resource_states(ctx, false);
+   d3d12_batch_reference_resource(d3d12_current_batch(ctx), res, true);
+   ctx->has_commands = true;
 }
 
 static void
@@ -478,6 +480,7 @@ d3d12_context_set_queue_priority_manager(struct pipe_context *ctx, struct d3d12_
    return 0;
 }
 
+#ifdef HAVE_GALLIUM_D3D12_VIDEO
 int
 d3d12_video_encoder_set_max_async_queue_depth(struct pipe_context *ctx, uint32_t max_async_depth)
 {
@@ -490,6 +493,7 @@ d3d12_video_encoder_set_max_async_queue_depth(struct pipe_context *ctx, uint32_t
    d3d12_ctx->max_video_encoding_async_depth = max_async_depth;
    return 0;
 }
+#endif // HAVE_GALLIUM_D3D12_VIDEO
 
 struct pipe_context *
 d3d12_context_create(struct pipe_screen *pscreen, void *priv, unsigned flags)

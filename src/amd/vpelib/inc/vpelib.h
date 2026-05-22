@@ -158,7 +158,7 @@ enum vpe_status vpe_build_resolve_query(
  * @param[in] param  provide the asic version.
  * @return           vpe engine instance if valid. NULL otherwise
  */
-const struct vpe_engine *vpe_create_engine(struct vpe_init_data *param);
+struct vpe_engine *vpe_create_engine(struct vpe_init_data *param);
 
 /**
  * destroy the vpe engine instance.

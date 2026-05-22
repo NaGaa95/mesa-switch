@@ -113,16 +113,6 @@ if [ -n "${S3_ANDROID_ARTIFACT_NAME:-}" ]; then
 		  --path="/cuttlefish"
 		  --format=tar
 		  --compression=zstd
-		- append-overlay
-		  --name=android-kernel
-		  --url="https://${S3_BASE_PATH}/${AOSP_KERNEL_PROJECT_PATH}/aosp-kernel-common-${AOSP_KERNEL_BUILD_VERSION_TAGS}.${AOSP_KERNEL_BUILD_NUMBER}/bzImage"
-		  --path="/cuttlefish"
-		  --format=file
-		- append-overlay
-		  --name=android-initramfs
-		  --url="https://${S3_BASE_PATH}/${AOSP_KERNEL_PROJECT_PATH}/aosp-kernel-common-${AOSP_KERNEL_BUILD_VERSION_TAGS}.${AOSP_KERNEL_BUILD_NUMBER}/initramfs.img"
-		  --path="/cuttlefish"
-		  --format=file
 	)
 fi
 

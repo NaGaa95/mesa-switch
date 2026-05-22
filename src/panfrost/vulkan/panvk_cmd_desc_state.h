@@ -63,6 +63,7 @@ struct panvk_descriptor_state {
    BITSET_DECLARE(dirty_push_sets, MAX_SETS);
 
    uint32_t dyn_buf_offsets[MAX_SETS][MAX_DYNAMIC_BUFFERS];
+   uint32_t dyn_ssbos[MAX_SETS];
 };
 
 #if PAN_ARCH < 9

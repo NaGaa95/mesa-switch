@@ -1,28 +1,6 @@
 /*
  * Copyright © 2010 Intel Corporation
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
- * IN THE SOFTWARE.
- *
- * Authors:
- *    Eric Anholt <eric@anholt.net>
- *
+ * SPDX-License-Identifier: MIT
  */
 
 #include "brw_eu.h"
@@ -754,18 +732,15 @@ brw_instruction_scheduler::brw_instruction_scheduler(void *mem_ctx, const brw_sh
 
       this->livein = linear_alloc_array(lin_ctx, BITSET_WORD *, block_count);
       for (int i = 0; i < block_count; i++)
-         this->livein[i] = linear_zalloc_array(lin_ctx, BITSET_WORD,
-                                         BITSET_WORDS(grf_count));
+         this->livein[i] = BITSET_LINEAR_ZALLOC(lin_ctx, grf_count);
 
       this->liveout = linear_alloc_array(lin_ctx, BITSET_WORD *, block_count);
       for (int i = 0; i < block_count; i++)
-         this->liveout[i] = linear_zalloc_array(lin_ctx, BITSET_WORD,
-                                          BITSET_WORDS(grf_count));
+         this->liveout[i] = BITSET_LINEAR_ZALLOC(lin_ctx, grf_count);
 
       this->hw_liveout = linear_alloc_array(lin_ctx, BITSET_WORD *, block_count);
       for (int i = 0; i < block_count; i++)
-         this->hw_liveout[i] = linear_zalloc_array(lin_ctx, BITSET_WORD,
-                                             BITSET_WORDS(hw_reg_count));
+         this->hw_liveout[i] = BITSET_LINEAR_ZALLOC(lin_ctx, grf_count);
 
       setup_liveness(s->cfg);
 

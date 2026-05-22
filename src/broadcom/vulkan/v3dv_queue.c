@@ -21,8 +21,12 @@
  * IN THE SOFTWARE.
  */
 
-#include "v3dv_private.h"
-#include "drm-uapi/v3d_drm.h"
+#include "v3dv_device.h"
+#include "v3dv_cmd_buffer.h"
+#include "v3dv_image.h"
+#include "v3dv_entrypoints.h"
+#include "v3dv_version_dispatch.h"
+#include <xf86drm.h>
 
 #include "broadcom/clif/clif_dump.h"
 #include "util/libsync.h"
@@ -43,8 +47,9 @@ v3dv_clif_dump(struct v3dv_device *device,
          V3D_DBG(CLIF)))
       return;
 
+   struct log_stream *stream = mesa_log_streami();
    struct clif_dump *clif = clif_dump_init(&device->devinfo,
-                                           stderr,
+                                           stream,
                                            V3D_DBG(CL) ||
                                            V3D_DBG(CL_NO_BIN),
                                            V3D_DBG(CL_NO_BIN));
@@ -69,6 +74,7 @@ v3dv_clif_dump(struct v3dv_device *device,
 
  free_clif:
    clif_dump_destroy(clif);
+   mesa_log_stream_destroy(stream);
 }
 
 static VkResult
@@ -861,13 +867,16 @@ handle_csd_indirect_cpu_job(struct v3dv_queue *queue,
    submit.bo_handle_count = 1;
    submit.bo_handles = (uintptr_t)(void *)&bo->handle;
 
-   csd_job->csd.submit.bo_handle_count = csd_job->bo_count;
    uint32_t *bo_handles = (uint32_t *) malloc(sizeof(uint32_t) * csd_job->bo_count);
    uint32_t bo_idx = 0;
    set_foreach (csd_job->bos, entry) {
-      struct v3dv_bo *bo = (struct v3dv_bo *)entry->key;
-      bo_handles[bo_idx++] = bo->handle;
+      struct v3dv_bo *csd_bo = (struct v3dv_bo *)entry->key;
+      /* dedup against cpu_job bo */
+      if (csd_bo->handle == bo->handle)
+         continue;
+      bo_handles[bo_idx++] = csd_bo->handle;
    }
+   csd_job->csd.submit.bo_handle_count = bo_idx;
    csd_job->csd.submit.bo_handles = (uintptr_t)(void *)bo_handles;
 
    struct drm_v3d_indirect_csd indirect = {0};

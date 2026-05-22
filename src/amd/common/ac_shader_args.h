@@ -183,35 +183,19 @@ struct ac_shader_args {
    struct ac_arg inline_push_consts[AC_MAX_INLINE_PUSH_CONSTS];
    uint64_t inline_push_const_mask;
    struct ac_arg dynamic_descriptors;
+   struct ac_arg dynamic_descriptors_offset_addr;
    struct ac_arg view_index;
    struct ac_arg force_vrs_rates;
 
    /* RT */
    struct {
-      struct ac_arg uniform_shader_addr;
       struct ac_arg sbt_descriptors;
       struct ac_arg launch_sizes[3];
       struct ac_arg launch_size_addr;
       struct ac_arg launch_ids[3];
       struct ac_arg dynamic_callable_stack_base;
       struct ac_arg traversal_shader_addr;
-      struct ac_arg shader_addr;
-      struct ac_arg shader_record;
       struct ac_arg payload_offset;
-      struct ac_arg ray_origin;
-      struct ac_arg ray_tmin;
-      struct ac_arg ray_direction;
-      struct ac_arg ray_tmax;
-      struct ac_arg cull_mask_and_flags;
-      struct ac_arg sbt_offset;
-      struct ac_arg sbt_stride;
-      struct ac_arg miss_index;
-      struct ac_arg accel_struct;
-      struct ac_arg primitive_id;
-      struct ac_arg instance_addr;
-      struct ac_arg primitive_addr;
-      struct ac_arg geometry_id_and_flags;
-      struct ac_arg hit_kind;
    } rt;
 };
 

@@ -333,21 +333,20 @@ static void destroy_queue(struct queue_data *data)
    ralloc_free(data);
 }
 
-static void device_destroy_queues(struct device_data *data)
+static void destroy_device_data(struct device_data *data)
 {
+   loader_platform_thread_lock_mutex(&globalLock);
+
    struct queue_data *tmp_queue = VK_NULL_HANDLE;
    for (auto it = data->queue_data_head; it != VK_NULL_HANDLE;) {
       tmp_queue = it->next;
       destroy_queue(it);
       it = tmp_queue;
    }
-}
 
-static void destroy_device_data(struct device_data *data)
-{
-   loader_platform_thread_lock_mutex(&globalLock);
    unmap_object(HKEY(data->device));
    ralloc_free(data);
+
    loader_platform_thread_unlock_mutex(&globalLock);
 }
 
@@ -790,7 +789,7 @@ void *writePNG(void *data) {
    char *tmpFilename = (char *)malloc(length + 4); // Allow for ".tmp"
    VkResult res;
    png_byte *row_pointer;
-   png_infop info;
+   png_infop info = NULL;
    png_struct* png;
    uint64_t rowPitch = threadData->srLayout.rowPitch;
    uint64_t start_time, end_time;
@@ -1483,7 +1482,7 @@ static VkResult screenshot_CreateInstance(
                                           instance_data->instance);
    instance_data_map_physical_devices(instance_data, true);
 
-   parse_screenshot_env(&instance_data->params, getenv("VK_LAYER_MESA_SCREENSHOT_CONFIG"));
+   parse_screenshot_env(&instance_data->params, os_get_option("VK_LAYER_MESA_SCREENSHOT_CONFIG"));
 
    if (!globalLockInitialized) {
       loader_platform_thread_create_mutex(&globalLock);

@@ -38,7 +38,6 @@ pub struct VirtGpuResource {
     size: usize,
     handle: MesaHandle,
     attached_fences: Vec<MesaHandle>,
-    #[allow(dead_code)]
     vulkan_info: VulkanInfo,
     system_mapping: Option<MemoryMapping>,
 }
@@ -154,7 +153,7 @@ impl VirtGpuKumquat {
     pub fn get_caps(&self, capset_id: u32, slice: &mut [u8]) -> MesaResult<()> {
         let caps = self.capsets.get(&capset_id).ok_or(MesaError::Unsupported)?;
         let length = min(slice.len(), caps.len());
-        slice.copy_from_slice(&caps[0..length]);
+        slice[0..length].copy_from_slice(&caps[0..length]);
         Ok(())
     }
 

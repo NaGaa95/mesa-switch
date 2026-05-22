@@ -7,9 +7,7 @@ zink-lavapipe:
     - .test-piglit
     - .deqp-test
     - .zink-lavapipe-test
-  tags:
-    # FIXME: kvm is a hack, should not be needed
-    - $FDO_RUNNER_JOB_PRIORITY_TAG_X86_64_KVM
+  timeout: 15m  # base run time = 10m, but it's on the shared runners so it can go up
   variables:
     DEQP_SUITE: zink-lavapipe
     PIGLIT_NO_WINDOW: 1
@@ -72,7 +70,9 @@ zink-anv-adl:
     # We use gbm because its a copy of tgl job
     PIGLIT_PLATFORM: gbm
     FDO_CI_CONCURRENT: 6 # higher is too much, and leads to OOM
-  timeout: 30m
+    # Xe regression in 6.19
+    # https://gitlab.freedesktop.org/drm/xe/kernel/-/issues/7584
+    KERNEL_TAG: "v6.17-mesa-ddf6"
   parallel: 4
 
 # Manual full run when you want to double-check the full status.
@@ -119,7 +119,6 @@ zink-anv-tgl:
   extends:
     - .zink-anv-tgl-test
     - .test-piglit
-  timeout: 30m
   variables:
     DEQP_SUITE: zink-anv-tgl
     PIGLIT_NO_WINDOW: 1
@@ -174,7 +173,7 @@ zink-tu-a618:
     - .lava-arm64-test-gl
     - .zink-turnip-collabora-rules
     - .zink-test
-    - .lava-sc7180-trogdor-lazor-limozeen:arm64
+    - .lava-sc7180-trogdor-kingoftown:arm64
   variables:
     DEQP_SUITE: zink-tu-a618
     FLAKES_CHANNEL: "#freedreno-ci"
@@ -267,7 +266,7 @@ zink-radv-navi10-valve:
     HWCI_START_WESTON: 1
     CI_TRON_TIMEOUT__OVERALL__MINUTES: 30
     GPU_VERSION: zink-radv-navi10
-    RADV_PERFTEST: hic
+    RADV_EXPERIMENTAL: hic
 
 zink-radv-vangogh-valve:
   timeout: 35m
@@ -284,7 +283,7 @@ zink-radv-vangogh-valve:
     CI_TRON_TIMEOUT__BOOT_CYCLE__MINUTES: 30
     CI_TRON_TIMEOUT__OVERALL__MINUTES: 30
     FDO_CI_CONCURRENT: 6
-    RADV_PERFTEST: hic
+    RADV_EXPERIMENTAL: hic
 
 zink-radv-vangogh-traces:
   extends:
@@ -308,21 +307,7 @@ zink-radv-navi31-valve:
     HWCI_START_WESTON: 1
     GPU_VERSION: zink-radv-navi31
     CI_TRON_TIMEOUT__OVERALL__MINUTES: 10
-    RADV_PERFTEST: hic
-
-zink-radv-cezanne:
-  extends:
-    - .lava-x86_64-test-gl
-    - .zink-test
-    - .test-piglit
-    - .lava-acer-cp514-3wh-r0qs-guybrush:x86_64
-    - .zink-radv-collabora-rules
-  parallel: 4
-  variables:
-    DEQP_SUITE: zink-radv
-    DRIVER_NAME: zink-radv
-    GPU_VERSION: zink-radv-cezanne
-    HWCI_START_WESTON: 1
+    RADV_EXPERIMENTAL: hic
 
 zink-radv-gfx1201-valve:
   extends:
@@ -334,7 +319,7 @@ zink-radv-gfx1201-valve:
     HWCI_START_WESTON: 1
     GPU_VERSION: zink-radv-gfx1201
     CI_TRON_TIMEOUT__OVERALL__MINUTES: 10
-    RADV_PERFTEST: hic
+    RADV_EXPERIMENTAL: hic
 
 zink-radv-gfx1201-traces:
   extends:

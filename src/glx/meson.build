@@ -58,7 +58,7 @@ extra_libs_libglx = []
 extra_deps_libgl = []
 extra_ld_args_libgl = []
 
-if with_dri_platform == 'drm'
+if with_dri_platform == 'drm' or with_dri_platform == 'pseudo-drm'
   files_libglx += files('dri3_glx.c', 'dri3_priv.h')
 endif
 

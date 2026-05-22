@@ -95,7 +95,8 @@ bool pco_nir_lower_barriers(nir_shader *shader, pco_data *data)
    return progress;
 }
 
-static nir_def *lower_atomic(nir_builder *b, nir_instr *instr, void *cb_data)
+static nir_def *
+lower_usclib_atomic(nir_builder *b, nir_instr *instr, void *cb_data)
 {
    nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
    bool *uses_usclib = cb_data;
@@ -123,8 +124,7 @@ static nir_def *lower_atomic(nir_builder *b, nir_instr *instr, void *cb_data)
    }
 
    nir_def *addr_data = intr->src[0].ssa;
-   nir_def *addr_lo = nir_channel(b, addr_data, 0);
-   nir_def *addr_hi = nir_channel(b, addr_data, 1);
+   nir_def *addr = nir_channels(b, addr_data, BITFIELD_RANGE(0, 2));
    nir_def *value = nir_channel(b, addr_data, 2);
    nir_def *value_swap = nir_channel(b, addr_data, 3);
 
@@ -133,22 +133,66 @@ static nir_def *lower_atomic(nir_builder *b, nir_instr *instr, void *cb_data)
    assert(num_components == 1 && bit_size == 32);
 
    *uses_usclib = true;
-   return usclib_emu_global_atomic_comp_swap(b,
-                                             addr_lo,
-                                             addr_hi,
-                                             value,
-                                             value_swap);
+   return usclib_emu_global_atomic_comp_swap(b, addr, value, value_swap);
+}
+
+static bool lower_global_atomic_intrinsic(nir_builder *b,
+                                          nir_intrinsic_instr *intrin,
+                                          UNUSED void *data)
+{
+   nir_intrinsic_op op;
+   bool is_swap = false;
+   switch (intrin->intrinsic) {
+   case nir_intrinsic_global_atomic_2x32:
+      op = nir_intrinsic_global_atomic_pco;
+      break;
+   case nir_intrinsic_global_atomic_swap_2x32:
+      op = nir_intrinsic_global_atomic_swap_pco;
+      is_swap = true;
+      break;
+   default:
+      return false;
+   }
+
+   nir_src *addr_src = &intrin->src[0];
+   nir_src *data_src = &intrin->src[1];
+   nir_src *data2_src;
+   if (is_swap)
+      data2_src = &intrin->src[2];
+
+   b->cursor = nir_before_instr(&intrin->instr);
+
+   nir_def *new_src = nir_pad_vector(b, addr_src->ssa, is_swap ? 4 : 3);
+   new_src = nir_vector_insert_imm(b, new_src, data_src->ssa, 2);
+   if (is_swap)
+      new_src = nir_vector_insert_imm(b, new_src, data2_src->ssa, 3);
+
+   nir_intrinsic_instr *new_intrin = nir_intrinsic_instr_create(b->shader, op);
+   new_intrin->num_components = intrin->num_components;
+   nir_def_init(&new_intrin->instr,
+                &new_intrin->def,
+                intrin->def.num_components,
+                intrin->def.bit_size);
+   new_intrin->src[0] = nir_src_for_ssa(new_src);
+   assert(nir_intrinsic_has_atomic_op(intrin));
+   nir_intrinsic_set_atomic_op(new_intrin, nir_intrinsic_atomic_op(intrin));
+
+   nir_builder_instr_insert(b, &new_intrin->instr);
+   nir_def_rewrite_uses(&intrin->def, &new_intrin->def);
+   nir_instr_remove(&intrin->instr);
+
+   return true;
 }
 
 /**
- * \brief Filters lowerable atomic instructions.
+ * \brief Filters atomic instructions emulated with usclib.
  *
  * \param[in] instr NIR instruction.
  * \param[in] cb_data User callback data.
  * \return True if the instruction matches the filter.
  */
-static bool is_lowerable_atomic(const nir_instr *instr,
-                                UNUSED const void *cb_data)
+static bool atomic_uses_usclib(const nir_instr *instr,
+                               UNUSED const void *cb_data)
 {
    if (instr->type != nir_instr_type_intrinsic)
       return false;
@@ -167,10 +211,18 @@ static bool is_lowerable_atomic(const nir_instr *instr,
  */
 bool pco_nir_lower_atomics(nir_shader *shader, pco_data *data)
 {
-   return nir_shader_lower_instructions(shader,
-                                        is_lowerable_atomic,
-                                        lower_atomic,
-                                        &data->common.uses.usclib);
+   bool progress = false;
+
+   progress |= nir_shader_intrinsics_pass(shader,
+                                          lower_global_atomic_intrinsic,
+                                          nir_metadata_none,
+                                          NULL);
+   progress |= nir_shader_lower_instructions(shader,
+                                             atomic_uses_usclib,
+                                             lower_usclib_atomic,
+                                             &data->common.uses.usclib);
+
+   return progress;
 }
 
 static nir_def *

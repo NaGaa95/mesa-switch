@@ -67,8 +67,7 @@ struct ir3_context {
    struct ir3_instruction *frag_face, *frag_coord;
 
    /* For vertex shaders, keep track of the system values sources */
-   struct ir3_instruction *vertex_id, *basevertex, *instance_id, *base_instance,
-      *draw_id, *view_index, *is_indexed_draw;
+   struct ir3_instruction *vertex_id, *instance_id, *view_index;
 
    /* For fragment shaders: */
    struct ir3_instruction *samp_id, *samp_mask_in;
@@ -104,7 +103,7 @@ struct ir3_context {
     * src used for an array of vec1 cannot be also used for an
     * array of vec4.
     */
-   struct hash_table *addr0_ht[4];
+   struct hash_table *addr0_ht[8];
 
    struct hash_table *sel_cond_conversions;
    struct hash_table *predicate_conversions;
@@ -135,8 +134,6 @@ struct ir3_context {
    unsigned max_texture_index;
 
    unsigned prefetch_limit;
-
-   bool has_relative_load_const_ir3;
 
    /* set if we encounter something we can't handle yet, so we
     * can bail cleanly and fallback to TGSI compiler f/e

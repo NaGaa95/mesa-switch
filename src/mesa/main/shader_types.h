@@ -35,7 +35,7 @@
 #include "util/glheader.h"
 #include "main/menums.h"
 #include "program/prog_parameter.h"
-#include "util/mesa-sha1.h"
+#include "util/mesa-blake3.h"
 #include "util/mesa-blake3.h"
 #include "compiler/shader_info.h"
 #include "compiler/list.h"
@@ -179,8 +179,8 @@ struct gl_shader
 
    enum gl_compile_status CompileStatus;
 
-   /** SHA1 of the pre-processed source used by the disk cache. */
-   uint8_t disk_cache_sha1[SHA1_DIGEST_LENGTH];
+   /** BLAKE3 of the pre-processed source used by the disk cache. */
+   uint8_t disk_cache_blake3[BLAKE3_KEY_LEN];
    /** BLAKE3 of the original source before replacement, set by glShaderSource. */
    blake3_hash source_blake3;
    /** BLAKE3 of FallbackSource (a copy of some original source before replacement). */
@@ -323,8 +323,8 @@ struct gl_shader_program_data
 {
    GLint RefCount;  /**< Reference count */
 
-   /** SHA1 hash of linked shader program */
-   unsigned char sha1[20];
+   /** BLAKE3 hash of linked shader program */
+   unsigned char blake3[BLAKE3_KEY_LEN];
 
    unsigned NumUniformStorage;
    unsigned NumHiddenUniforms;

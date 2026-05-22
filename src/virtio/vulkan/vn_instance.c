@@ -39,6 +39,7 @@ static const struct vk_instance_extension_table
 #ifdef VN_USE_WSI_PLATFORM
       .KHR_get_surface_capabilities2 = true,
       .KHR_surface = true,
+      .KHR_surface_maintenance1 = true,
       .KHR_surface_protected_capabilities = true,
       .EXT_surface_maintenance1 = true,
       .EXT_swapchain_colorspace = true,
@@ -236,14 +237,14 @@ out_renderer_destroy:
 
 /* instance commands */
 
-VkResult
+VKAPI_ATTR VkResult VKAPI_CALL
 vn_EnumerateInstanceVersion(uint32_t *pApiVersion)
 {
    *pApiVersion = VN_MAX_API_VERSION;
    return VK_SUCCESS;
 }
 
-VkResult
+VKAPI_ATTR VkResult VKAPI_CALL
 vn_EnumerateInstanceExtensionProperties(const char *pLayerName,
                                         uint32_t *pPropertyCount,
                                         VkExtensionProperties *pProperties)
@@ -255,7 +256,7 @@ vn_EnumerateInstanceExtensionProperties(const char *pLayerName,
       &vn_instance_supported_extensions, pPropertyCount, pProperties);
 }
 
-VkResult
+VKAPI_ATTR VkResult VKAPI_CALL
 vn_EnumerateInstanceLayerProperties(uint32_t *pPropertyCount,
                                     VkLayerProperties *pProperties)
 {
@@ -263,7 +264,7 @@ vn_EnumerateInstanceLayerProperties(uint32_t *pPropertyCount,
    return VK_SUCCESS;
 }
 
-VkResult
+VKAPI_ATTR VkResult VKAPI_CALL
 vn_CreateInstance(const VkInstanceCreateInfo *pCreateInfo,
                   const VkAllocationCallbacks *pAllocator,
                   VkInstance *pInstance)
@@ -410,7 +411,7 @@ out_mtx_destroy:
    return vn_error(NULL, result);
 }
 
-void
+VKAPI_ATTR void VKAPI_CALL
 vn_DestroyInstance(VkInstance _instance,
                    const VkAllocationCallbacks *pAllocator)
 {
@@ -458,7 +459,7 @@ vn_DestroyInstance(VkInstance _instance,
    vk_free(alloc, instance);
 }
 
-PFN_vkVoidFunction
+VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
 vn_GetInstanceProcAddr(VkInstance _instance, const char *pName)
 {
    struct vn_instance *instance = vn_instance_from_handle(_instance);

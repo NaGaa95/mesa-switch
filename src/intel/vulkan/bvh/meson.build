@@ -13,7 +13,8 @@ bvh_shaders = [
 gfx_versions = [
   ['125', '125'],
   ['20', '200'],
-  ['30', '300']
+  ['30', '300'],
+  ['35', '350'],
 ]
 
 anv_bvh_include_dir = dir_source_root + '/src/intel/vulkan/bvh'

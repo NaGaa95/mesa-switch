@@ -44,6 +44,7 @@
 #include "pipe/p_state.h"
 #include "pipe/p_defines.h"
 #include "pipe/p_shader_tokens.h"
+#include "util/mesa-blake3.h"
 
 #include "draw_vertex_header.h"
 
@@ -399,10 +400,10 @@ struct draw_context
    void *disk_cache_cookie;
    void (*disk_cache_find_shader)(void *cookie,
                                   struct lp_cached_code *cache,
-                                  unsigned char ir_sha1_cache_key[20]);
+                                  unsigned char ir_blake3_cache_key[BLAKE3_KEY_LEN]);
    void (*disk_cache_insert_shader)(void *cookie,
                                     struct lp_cached_code *cache,
-                                    unsigned char ir_sha1_cache_key[20]);
+                                    unsigned char ir_blake3_cache_key[BLAKE3_KEY_LEN]);
 
    void *driver_private;
 };

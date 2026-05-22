@@ -1,3 +1,8 @@
+/*
+ * Copyright © 2021 Collabora, Ltd.
+ * SPDX-License-Identifier: MIT
+ */
+
 #include <xf86drm.h>
 #include <stdio.h>
 #include <lib/kmod/pan_kmod.h>

@@ -149,6 +149,7 @@ encoder_capabilities::initialize( pipe_screen *pScreen, pipe_video_profile video
    m_bHWSupportSliceModeMB = ( ( supportedSliceStructures & PIPE_VIDEO_CAP_SLICE_STRUCTURE_ARBITRARY_MACROBLOCKS ) != 0 );
    m_bHWSupportSliceModeBits = ( ( supportedSliceStructures & PIPE_VIDEO_CAP_SLICE_STRUCTURE_MAX_SLICE_SIZE ) != 0 );
    m_bHWSupportSliceModeMBRow = ( ( supportedSliceStructures & PIPE_VIDEO_CAP_SLICE_STRUCTURE_EQUAL_MULTI_ROWS ) != 0 );
+   m_bHWSupportSliceModeAuto = ( ( supportedSliceStructures & PIPE_VIDEO_CAP_SLICE_STRUCTURE_AUTO ) != 0 );
 
    m_TwoPassSupport.value =
       pScreen->get_video_param( pScreen, videoProfile, PIPE_VIDEO_ENTRYPOINT_ENCODE, PIPE_VIDEO_CAP_ENC_TWO_PASS );
@@ -165,4 +166,9 @@ encoder_capabilities::initialize( pipe_screen *pScreen, pipe_video_profile video
                                                                             videoProfile,
                                                                             PIPE_VIDEO_ENTRYPOINT_ENCODE,
                                                                             PIPE_VIDEO_CAP_ENC_SPATIAL_ADAPTIVE_QUANTIZATION );
+
+   m_bHWSupportReadableReconstructedPicture = pScreen->get_video_param( pScreen,
+                                                                        videoProfile,
+                                                                        PIPE_VIDEO_ENTRYPOINT_ENCODE,
+                                                                        PIPE_VIDEO_CAP_ENC_READABLE_RECONSTRUCTED_PICTURE ) != 0;
 }

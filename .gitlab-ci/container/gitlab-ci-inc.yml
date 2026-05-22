@@ -20,8 +20,6 @@
   extends:
     - .set-image
     - .incorporate-base-tag+templates-commit
-  variables:
-    MESA_IMAGE: "$CI_REGISTRY_IMAGE/${MESA_IMAGE_PATH}:${FDO_DISTRIBUTION_TAG}"
 
 .container:
   stage: container

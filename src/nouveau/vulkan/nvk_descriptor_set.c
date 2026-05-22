@@ -808,7 +808,7 @@ nvk_descriptor_set_create(struct nvk_device *dev,
    VkResult result;
 
    uint32_t mem_size = sizeof(struct nvk_descriptor_set) +
-      layout->dynamic_buffer_count * sizeof(struct nvk_buffer_address);
+      layout->vk.dynamic_descriptor_count * sizeof(struct nvk_buffer_address);
 
    set = vk_object_zalloc(&dev->vk, NULL, mem_size,
                           VK_OBJECT_TYPE_DESCRIPTOR_SET);

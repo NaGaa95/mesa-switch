@@ -75,7 +75,7 @@ lower_large_src(nir_src *src, void *s)
 {
    lower_state *state = s;
 
-   nir_instr *parent = src->ssa->parent_instr;
+   nir_instr *parent = nir_def_instr(src->ssa);
 
    /* No need to visit instructions we've already visited.. this also
     * avoids infinite recursion when phi's are involved:
@@ -153,11 +153,13 @@ lower_intrinsic(lower_state *state, nir_intrinsic_instr *intr)
    case nir_intrinsic_global_atomic_swap:
    case nir_intrinsic_load_global_constant:
    case nir_intrinsic_load_global:
+   case nir_intrinsic_load_pixel_local:
       /* just assume that 24b is not sufficient: */
       lower_large_src(&intr->src[0], state);
       return;
 
    case nir_intrinsic_store_global:
+   case nir_intrinsic_store_pixel_local:
       /* just assume that 24b is not sufficient: */
       lower_large_src(&intr->src[1], state);
       return;

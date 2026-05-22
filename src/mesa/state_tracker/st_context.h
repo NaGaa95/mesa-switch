@@ -315,7 +315,7 @@ struct st_context
       enum pipe_format dst_format;
       unsigned level;
       unsigned layer;
-      unsigned hits;
+      size_t hits;
    } readpix_cache;
 
    /** for glClear */
@@ -545,7 +545,6 @@ st_context_add_work(struct st_context *st)
     * performance.
     */
    if (unlikely(++st->work_counter % 512 == 0)) {
-      st->work_counter = 0;
       if (!st->thread_scheduler_disabled)
          st_context_apply_scheduler_policy(st);
    }

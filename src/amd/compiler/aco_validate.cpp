@@ -73,6 +73,13 @@ validate_ir(Program* program)
          is_valid = false;
       }
    };
+   auto check_block = [&program, &is_valid](bool success, const char* msg, Block* block) -> void
+   {
+      if (!success) {
+         aco_err(program, "Error in BB%d: %s", block->index, msg);
+         is_valid = false;
+      }
+   };
 
    /* check reachability */
    if (program->progress < CompilationProgress::after_lower_to_hw) {
@@ -132,16 +139,39 @@ validate_ir(Program* program)
    }
 
    for (Block& block : program->blocks) {
+      int num_p_logical_start = 0;
+      int num_p_logical_end = 0;
       for (aco_ptr<Instruction>& instr : block.instructions) {
 
-         if (program->progress < CompilationProgress::after_lower_to_hw) {
-            for (const Operand& op : instr->operands)
+         /* Check that register assignment and register class are consistent. */
+         for (const Operand& op : instr->operands) {
+            if (program->progress < CompilationProgress::after_lower_to_hw)
                check(!op.isTemp() || op.regClass() == program->temp_rc[op.tempId()],
                      "Operand RC not consistent.", instr.get());
 
-            for (const Definition& def : instr->definitions)
+            if (program->progress >= CompilationProgress::after_ra)
+               check(op.isFixed(), "Operand without register assignment.", instr.get());
+
+            check(!op.hasRegClass() || op.isUndefined() || !op.isFixed() ||
+                     (op.physReg().reg() >= 256
+                         ? op.isOfType(RegType::vgpr)
+                         : (op.isOfType(RegType::sgpr) && op.physReg().byte() == 0)),
+                  "Operand RC and assignment not consistent.", instr.get());
+         }
+
+         for (const Definition& def : instr->definitions) {
+            if (program->progress < CompilationProgress::after_lower_to_hw)
                check(!def.isTemp() || def.regClass() == program->temp_rc[def.tempId()],
                      "Definition RC not consistent.", instr.get());
+
+            if (program->progress >= CompilationProgress::after_ra)
+               check(def.isFixed(), "Definition without register assignment.", instr.get());
+
+            check(!def.isFixed() ||
+                     (def.physReg().reg() >= 256
+                         ? def.regClass().type() == RegType::vgpr
+                         : (def.regClass().type() == RegType::sgpr && def.physReg().byte() == 0)),
+                  "Definition RC and assignment not consistent.", instr.get());
          }
 
          const aco_alu_opcode_info& opcode_info = instr_info.alu_opcode_infos[(int)instr->opcode];
@@ -383,6 +413,8 @@ validate_ir(Program* program)
                check(!valu.opsel[3], "Unexpected opsel for sub-dword definition", instr.get());
          } else if (instr->opcode == aco_opcode::v_fma_mixlo_f16 ||
                     instr->opcode == aco_opcode::v_fma_mixhi_f16 ||
+                    instr->opcode == aco_opcode::p_v_fma_mixlo_f16_rtz ||
+                    instr->opcode == aco_opcode::p_v_fma_mixhi_f16_rtz ||
                     instr->opcode == aco_opcode::v_fma_mix_f32) {
             check(instr->definitions[0].regClass() ==
                      (instr->opcode == aco_opcode::v_fma_mix_f32 ? v1 : v2b),
@@ -417,7 +449,10 @@ validate_ir(Program* program)
                   ((instr->isMUBUF() || instr->isMTBUF()) && i == 1) ||
                   (instr->isScratch() && i == 0) || (instr->isDS() && i == 0) ||
                   (instr->opcode == aco_opcode::p_init_scratch && i == 0) ||
-                  (instr_disables_wqm(instr.get()) && i + 2 >= instr->operands.size());
+                  (instr_disables_wqm(instr.get()) && i + 2 >= instr->operands.size()) ||
+                  ((instr->opcode == aco_opcode::p_return ||
+                    instr->opcode == aco_opcode::p_reload_preserved) &&
+                   i == 0);
                check(can_be_undef, "Undefs can only be used in certain operands", instr.get());
             } else {
                check(instr->operands[i].isFixed() || instr->operands[i].isTemp() ||
@@ -495,7 +530,7 @@ validate_ir(Program* program)
                   scalar_mask = 0x5;
 
                if (instr->isDPP())
-                  scalar_mask &= 0x4; /* TODO 0x6 for GFX11.5+ */
+                  scalar_mask &= program->gfx_level >= GFX11_5 ? 0x6 : 0x4;
 
                if (instr->isVOPC() || instr->opcode == aco_opcode::v_readfirstlane_b32 ||
                    instr->opcode == aco_opcode::v_readlane_b32 ||
@@ -511,7 +546,7 @@ validate_ir(Program* program)
                }
 
                unsigned num_sgprs = 0;
-               unsigned sgpr[] = {0, 0};
+               Operand sgpr_ops[] = {Operand(), Operand()};
                for (unsigned i = 0; i < instr->operands.size(); i++) {
                   Operand op = instr->operands[i];
                   if (instr->opcode == aco_opcode::v_readfirstlane_b32 ||
@@ -545,9 +580,16 @@ validate_ir(Program* program)
                      check(scalar_mask & (1 << i), "Wrong source position for SGPR argument",
                            instr.get());
 
-                     if (op.tempId() != sgpr[0] && op.tempId() != sgpr[1]) {
+                     /* Ignore flags and SSA when register was assigned. */
+                     Operand current_sgpr =
+                        op.isFixed() ? Operand(op.physReg(), op.regClass()) : Operand(op.getTemp());
+                     bool same = false;
+                     for (unsigned j = 0; j < MIN2(2, num_sgprs); j++)
+                        same |= current_sgpr == sgpr_ops[j];
+                     if (!same) {
                         if (num_sgprs < 2)
-                           sgpr[num_sgprs++] = op.tempId();
+                           sgpr_ops[num_sgprs] = current_sgpr;
+                        num_sgprs++;
                      }
                   }
 
@@ -597,8 +639,18 @@ validate_ir(Program* program)
 
          switch (instr->format) {
          case Format::PSEUDO: {
-            if (instr->opcode == aco_opcode::p_create_vector ||
-                instr->opcode == aco_opcode::p_start_linear_vgpr) {
+            if (instr->opcode == aco_opcode::p_logical_start) {
+               check(
+                  num_p_logical_end == 0 && instr->operands.empty() && instr->definitions.empty(),
+                  "Invalid p_logical_start", instr.get());
+               num_p_logical_start++;
+            } else if (instr->opcode == aco_opcode::p_logical_end) {
+               check(
+                  num_p_logical_start == 1 && instr->operands.empty() && instr->definitions.empty(),
+                  "Invalid p_logical_end", instr.get());
+               num_p_logical_end++;
+            } else if (instr->opcode == aco_opcode::p_create_vector ||
+                       instr->opcode == aco_opcode::p_start_linear_vgpr) {
                unsigned size = 0;
                for (const Operand& op : instr->operands) {
                   check(op.bytes() < 4 || size % 4 == 0, "Operand is not aligned", instr.get());
@@ -784,11 +836,6 @@ validate_ir(Program* program)
                check(instr->definitions[0].regClass().type() == RegType::sgpr ||
                         program->wave_size == 32,
                      "The result of unclustered reductions must go into an SGPR.", instr.get());
-            else
-               check(instr->definitions[0].regClass().type() == RegType::vgpr,
-                     "The result of scans and clustered reductions must go into a VGPR.",
-                     instr.get());
-
             break;
          }
          case Format::SMEM: {
@@ -894,7 +941,8 @@ validate_ir(Program* program)
                         "MIMG operands[3+] (VADDR) must be VGPR", instr.get());
                   if (non_mask_ops > 4) {
                      if (program->gfx_level < GFX11) {
-                        check(instr->operands[i].regClass() == v1,
+                        check(instr->operands[i].regClass() == v1 ||
+                                 instr->operands[i].regClass() == lv1,
                               "GFX10 MIMG VADDR must be v1 if NSA is used", instr.get());
                      } else {
                         unsigned num_scalar = program->gfx_level >= GFX12 ? (non_mask_ops - 4) : 4;
@@ -903,7 +951,8 @@ validate_ir(Program* program)
                             instr->opcode != aco_opcode::image_bvh_dual_intersect_ray &&
                             instr->opcode != aco_opcode::image_bvh8_intersect_ray &&
                             i < 3 + num_scalar) {
-                           check(instr->operands[i].regClass() == v1,
+                           check(instr->operands[i].regClass() == v1 ||
+                                    instr->operands[i].regClass() == lv1,
                                  "first 4 GFX11 MIMG VADDR must be v1 if NSA is used", instr.get());
                         }
                      }
@@ -963,7 +1012,8 @@ validate_ir(Program* program)
             break;
          }
          case Format::LDSDIR: {
-            check(instr->definitions.size() == 1 && instr->definitions[0].regClass() == v1,
+            check(instr->definitions.size() == 1 && (instr->definitions[0].regClass() == v1 ||
+                                                     instr->definitions[0].regClass() == lv1),
                   "LDSDIR must have an v1 definition", instr.get());
             check(instr->operands.size() == 1, "LDSDIR must have an operand", instr.get());
             if (!instr->operands.empty()) {
@@ -1032,6 +1082,20 @@ validate_ir(Program* program)
          }
          default: break;
          }
+      }
+
+      /* Check that we have exactly one p_logical_start and one p_logical_end in each logical block
+       * of the CFG. */
+      check_block(num_p_logical_start <= 1 && num_p_logical_end == num_p_logical_start,
+                  "There must be exactly one p_logical_start and p_logical_end", &block);
+      if (program->progress < CompilationProgress::after_lower_to_hw) {
+         // TODO: this check requires aco_tests to either insert p_logical_start/end or being
+         // skipped check_block(num_p_logical_start == 1 || (block.index != 0 &&
+         // block.logical_preds.empty()),
+         //             "Missing p_logical_start / p_logical_end in logical block", &block);
+         check_block(num_p_logical_start == 0 || block.index == 0 || !block.logical_preds.empty(),
+                     "p_logical_start and p_logical_end are only allowed in logical blocks",
+                     &block);
       }
    }
 
@@ -1107,14 +1171,14 @@ validate_cfg(Program* program)
                      "logical successors must be sorted", &block);
 
       /* critical edges are not allowed */
-      if (block.linear_preds.size() > 1) {
+      if (block.linear_preds.size() > 1)
          for (unsigned pred : block.linear_preds)
             check_block(program->blocks[pred].linear_succs.size() == 1,
                         "linear critical edges are not allowed", &program->blocks[pred]);
+      if (block.logical_preds.size() > 1)
          for (unsigned pred : block.logical_preds)
             check_block(program->blocks[pred].logical_succs.size() == 1,
                         "logical critical edges are not allowed", &program->blocks[pred]);
-      }
    }
 
    return is_valid;
@@ -1318,6 +1382,8 @@ validate_subdword_operand(amd_gfx_level gfx_level, const aco_ptr<Instruction>& i
    if (instr->isVOP3P()) {
       bool fma_mix = instr->opcode == aco_opcode::v_fma_mixlo_f16 ||
                      instr->opcode == aco_opcode::v_fma_mixhi_f16 ||
+                     instr->opcode == aco_opcode::p_v_fma_mixlo_f16_rtz ||
+                     instr->opcode == aco_opcode::p_v_fma_mixhi_f16_rtz ||
                      instr->opcode == aco_opcode::v_fma_mix_f32;
       return instr->valu().opsel_lo[index] == (byte >> 1) &&
              instr->valu().opsel_hi[index] == (fma_mix || (byte >> 1));
@@ -1381,6 +1447,7 @@ validate_subdword_definition(amd_gfx_level gfx_level, const aco_ptr<Instruction>
    switch (instr->opcode) {
    case aco_opcode::v_interp_p2_hi_f16:
    case aco_opcode::v_fma_mixhi_f16:
+   case aco_opcode::p_v_fma_mixhi_f16_rtz:
    case aco_opcode::buffer_load_ubyte_d16_hi:
    case aco_opcode::buffer_load_sbyte_d16_hi:
    case aco_opcode::buffer_load_short_d16_hi:
@@ -1515,14 +1582,53 @@ validate_instr_defs(Program* program, std::array<unsigned, 2048>& regs,
    return err;
 }
 
+bool
+validate_call(Program* program, std::array<unsigned, 2048>& regs,
+              const std::vector<Assignment>& assignments, const Location& loc,
+              aco_ptr<Instruction>& instr)
+{
+   bool err = false;
+
+   RegisterDemand limit = get_addr_regs_from_waves(program, program->min_waves);
+   BITSET_DECLARE(preserved_regs, 512);
+   instr->call().abi.preservedRegisters(preserved_regs, limit);
+
+   for (unsigned i = 0; i < regs.size(); i++) {
+      unsigned temp = regs[i];
+      bool is_preserved = BITSET_TEST(preserved_regs, i / 4);
+      if (!temp || is_preserved)
+         continue;
+
+      bool can_use_clobbered =
+         program->temp_rc[temp].is_linear_vgpr() ||
+         std::any_of(
+            instr->operands.begin(), instr->operands.end(), [&](const Operand& op)
+            { return op.tempId() == temp && (op.isKillBeforeDef() || !op.isClobbered()); });
+      if (!can_use_clobbered) {
+         err |= ra_fail(program, loc, assignments[temp].defloc,
+                        "Assignment of %%%d in clobbered register at call instruction", temp);
+      }
+   }
+
+   for (Definition def : instr->definitions) {
+      for (unsigned i = 0; i < def.bytes(); i++) {
+         bool is_preserved = BITSET_TEST(preserved_regs, (def.physReg().reg_b + i) / 4);
+         if (is_preserved) {
+            err |= ra_fail(program, loc, Location(),
+                           "Assignment of %%%d in callee-preserved register of call instruction",
+                           def.tempId());
+         }
+      }
+   }
+
+   return err;
+}
+
 } /* end namespace */
 
 bool
 validate_ra(Program* program)
 {
-   if (!(debug_flags & DEBUG_VALIDATE_RA))
-      return false;
-
    bool err = false;
    aco::live_var_analysis(program);
    std::vector<std::vector<Temp>> phi_sgpr_ops(program->blocks.size());
@@ -1653,6 +1759,9 @@ validate_ra(Program* program)
                   regs[reg.reg_b + i] = 0;
             }
          }
+
+         if (instr->isCall())
+            err |= validate_call(program, regs, assignments, loc, instr);
 
          if (instr->opcode != aco_opcode::p_phi && instr->opcode != aco_opcode::p_linear_phi) {
             for (const Operand& op : instr->operands) {

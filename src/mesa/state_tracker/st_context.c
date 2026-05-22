@@ -93,7 +93,7 @@ st_vp_uses_current_values(const struct gl_context *ctx)
 
    const uint64_t inputs = ctx->VertexProgram._Current->info.inputs_read;
 
-   return ~_mesa_get_enabled_vertex_arrays(ctx) & inputs;
+   return ~(uint64_t)_mesa_get_enabled_vertex_arrays(ctx) & inputs;
 }
 
 
@@ -772,7 +772,7 @@ st_create_context_priv(struct gl_context *ctx, struct pipe_context *pipe,
    list_inithead(&st->zombie_shaders.list.node);
    simple_mtx_init(&st->zombie_shaders.mutex, mtx_plain);
 
-   util_dynarray_init(&st->release_resources, NULL);
+   st->release_resources = UTIL_DYNARRAY_INIT;
 
    ctx->Const.DriverSupportedPrimMask = screen->caps.supported_prim_modes |
                                         /* patches is always supported */
@@ -911,7 +911,7 @@ st_add_releasebuf(struct st_context *st, struct pipe_resource *releasebuf)
       return;
    if (st->release_counter != st->work_counter)
       st_prune_releasebufs(st);
-   util_dynarray_append(&st->release_resources, struct pipe_resource*, releasebuf);
+   util_dynarray_append(&st->release_resources, releasebuf);
    st->release_counter = st->work_counter;
 }
 

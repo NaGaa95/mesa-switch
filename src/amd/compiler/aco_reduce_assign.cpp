@@ -42,8 +42,8 @@ setup_reduce_temp(Program* program)
       return;
 
    assert(maxSize == 1 || maxSize == 2);
-   Temp reduceTmp(0, RegClass(RegType::vgpr, maxSize).as_linear());
-   Temp vtmp(0, RegClass(RegType::vgpr, maxSize).as_linear());
+   Temp reduceTmp(0, lv1.resize(maxSize * 4));
+   Temp vtmp(0, lv1.resize(maxSize * 4));
    int inserted_at = -1;
    int vtmp_inserted_at = -1;
 
