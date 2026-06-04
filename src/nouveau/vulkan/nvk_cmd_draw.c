@@ -15,9 +15,12 @@
 
 #include "util/bitpack_helpers.h"
 #include "util/compiler.h"
+#include "util/u_debug.h"
 #include "vk_format.h"
 #include "vk_render_pass.h"
 #include "vk_standard_sample_locations.h"
+
+#include <stdio.h>
 
 #include "nv_push_cl902d.h"
 #include "nv_push_cl9097.h"
@@ -46,6 +49,67 @@ nvk_cmd_buffer_3d_cls(struct nvk_cmd_buffer *cmd)
    const struct nvk_physical_device *pdev = nvk_device_physical(dev);
    return pdev->info.cls_eng3d;
 }
+
+#ifdef HAVE_SWITCH_PLATFORM
+/* GM20B tiled-cache methods are present in public deko3d Maxwell definitions
+ * but not in Mesa's trimmed class header.  Keep them local and raw.
+ */
+#define NVK_NVB097_SET_TILED_CACHE                        0x0f60
+#define NVK_NVB097_SET_TILED_CACHE_TILE_SIZE              0x0f64
+#define NVK_NVB097_SET_TILED_CACHE_BUFFER_INTERLEAVE      0x0f68
+#define NVK_NVB097_SET_TILED_CACHE_CONTROL                0x0f6c
+#define NVK_NVB097_SET_TILED_CACHE_STATE_THRESHOLD        0x0f70
+#define NVK_NVB097_TILED_CACHE_INVALIDATE_TEXTURE_DATA    0x0f74
+#define NVK_NVB097_TILED_CACHE_INVALIDATE_TARGET          0x0f78
+#define NVK_NVB097_TILED_CACHE_BARRIER                    0x0f7c
+#define NVK_NVB097_TILED_CACHE_FLUSH                      0x0f80
+#define NVK_NVB097_SET_TILED_CACHE_CONTROL_EXTENDED       0x1108
+
+#define NVK_SWITCH_TC_TILE_SIZE                           0x00800080
+#define NVK_SWITCH_TC_BUFFER_INTERLEAVE                   0x00001109
+#define NVK_SWITCH_TC_CONTROL                             0x08080202
+#define NVK_SWITCH_TC_CONTROL_EXTENDED                    0x0000001f
+#define NVK_SWITCH_TC_STATE_THRESHOLD                     0x00080001
+#define NVK_SWITCH_TC_FLUSH_NORMAL                        0
+#define NVK_SWITCH_TC_FLUSH_ALT                           1
+#define NVK_SWITCH_TC_DISCARD_DEPTH_STENCIL               1
+#define NVK_SWITCH_TC_DISCARD_COLOR(i)                    ((i) << 4)
+
+static bool
+nvk_switch_file_toggle_enabled(const char *path)
+{
+   FILE *f = fopen(path, "r");
+   if (f == NULL)
+      return false;
+
+   fclose(f);
+   return true;
+}
+
+static bool
+nvk_switch_tiled_cache_enabled(void)
+{
+   static int enabled = -1;
+
+   if (enabled < 0) {
+      enabled =
+         debug_get_bool_option("NVK_SWITCH_TILED_CACHE", false) ? 1 : 0;
+      if (!enabled &&
+          nvk_switch_file_toggle_enabled(
+             "sdmc:/nvk_switch_tiled_cache.enable"))
+         enabled = 1;
+   }
+
+   return enabled != 0;
+}
+
+void
+nvk_switch_tiled_cache_barrier(struct nvk_cmd_buffer *cmd)
+{
+   struct nv_push *p = nvk_cmd_buffer_push(cmd, 2);
+   __push_immd(p, SUBC_NV9097, NVK_NVB097_TILED_CACHE_BARRIER, 0);
+}
+#endif
 
 static uint32_t
 get_sm_disp_ctrl_reg(const struct nv_device_info *devinfo)
@@ -276,6 +340,15 @@ nvk_push_draw_state_init(struct nvk_queue *queue, struct nv_push *p)
    P_MTHD(p, NV9097, SET_COLOR_COMPRESSION(0));
    for (unsigned i = 0; i < 8; i++)
       P_NV9097_SET_COLOR_COMPRESSION(p, i, ENABLE_TRUE);
+
+#ifdef HAVE_SWITCH_PLATFORM
+   P_IMMD(p, NV9097, SET_COMPRESSION_THRESHOLD, SAMPLES__16);
+
+      /* Keep shader exceptions disabled on GM20B, avoiding fatal channel
+       * errors for undefined shader behavior such as some OOB accesses.
+       */
+   P_IMMD(p, NV9097, SET_SHADER_EXCEPTIONS, ENABLE_FALSE);
+#endif
 
    P_IMMD(p, NV9097, SET_CT_SELECT, { .target_count = 1 });
 
@@ -611,10 +684,7 @@ nvk_push_draw_state_init(struct nvk_queue *queue, struct nv_push *p)
    P_NV9097_SET_VERTEX_STREAM_SUBSTITUTE_B(p, zero_addr);
 
    if (pdev->info.cls_eng3d >= VOLTA_A) {
-      /* These WATERMARK settings are based on what the blob sets. I'm guessing
-       * these are thresholds for balancing PS vs VS shaders but I'm not sure.
-       * We could do this on older cards if we knew what values to set.
-       */
+      /* Tune pixel-shader launch watermarks. */
       P_IMMD(p, NV9097, SET_PS_WARP_WATERMARKS, {
          .low = 0x8,
          .high = pdev->info.max_warps_per_mp * pdev->info.mp_per_tpc,
@@ -624,6 +694,25 @@ nvk_push_draw_state_init(struct nvk_queue *queue, struct nv_push *p)
          .high = 0x1000,
       });
    }
+#ifdef HAVE_SWITCH_PLATFORM
+   else if (pdev->info.cls_eng3d >= MAXWELL_B) {
+      P_IMMD(p, NV9097, SET_PS_WARP_WATERMARKS, {
+         .low = 0x8,
+         .high = pdev->info.max_warps_per_mp * pdev->info.mp_per_tpc,
+      });
+
+      /* Maxwell-B TIR defaults for MSAA-dependent counters,
+       * alpha-to-coverage, and coverage reduction.
+       */
+      P_IMMD(p, NVB197, SET_TIR_CONTROL, {
+         .z_pass_pixel_count_use_raster_samples =
+            Z_PASS_PIXEL_COUNT_USE_RASTER_SAMPLES_ENABLE,
+         .alpha_to_coverage_use_raster_samples =
+            ALPHA_TO_COVERAGE_USE_RASTER_SAMPLES_ENABLE,
+         .reduce_coverage = REDUCE_COVERAGE_ENABLE,
+      });
+   }
+#endif
 
    P_MTHD(p, NV9097, SET_MME_SHADOW_SCRATCH(NVK_MME_SCRATCH_VB_ENABLES));
    P_NV9097_SET_MME_SHADOW_SCRATCH(p, NVK_MME_SCRATCH_VB_ENABLES, 0);
@@ -1042,6 +1131,199 @@ nvk_rendering_linear(const struct nvk_rendering_state *render)
 
    return true;
 }
+
+#ifdef HAVE_SWITCH_PLATFORM
+static bool
+nvk_switch_rendering_can_use_tiled_cache(struct nvk_cmd_buffer *cmd,
+                                         const struct nvk_rendering_state *render)
+{
+   if (!nvk_switch_tiled_cache_enabled())
+      return false;
+
+   if (nvk_cmd_buffer_3d_cls(cmd) < MAXWELL_B)
+      return false;
+
+   /* Keep the first pass conservative: single-layer, block-linear render
+    * targets. The hardware supports more, but this avoids enabling TC for
+    * linear-shadow or multiview paths we haven't validated on GM20B yet.
+    */
+   if (render->linear || render->view_mask != 0 || render->layer_count != 1)
+      return false;
+
+   bool has_attachment = false;
+   for (uint32_t i = 0; i < render->color_att_count; i++) {
+      const struct nvk_image_view *iview = render->color_att[i].iview;
+      if (iview == NULL)
+         continue;
+
+      const struct nvk_image *image = (struct nvk_image *)iview->vk.image;
+      const uint8_t ip = iview->planes[0].image_plane;
+      const struct nvk_image_plane *plane = &image->planes[ip];
+      const struct nil_image_level *level =
+         &plane->nil.levels[iview->vk.base_mip_level];
+
+      if (level->tiling.gob_type == NIL_GOB_TYPE_LINEAR)
+         return false;
+
+      has_attachment = true;
+   }
+
+   return has_attachment || render->depth_att.iview || render->stencil_att.iview;
+}
+
+static bool
+nvk_switch_load_op_discards(VkAttachmentLoadOp op)
+{
+   return op == VK_ATTACHMENT_LOAD_OP_CLEAR ||
+          op == VK_ATTACHMENT_LOAD_OP_DONT_CARE ||
+          op == VK_ATTACHMENT_LOAD_OP_NONE;
+}
+
+static bool
+nvk_switch_attachment_needs_store(const struct nvk_attachment *att)
+{
+   return att->iview != NULL &&
+          (att->store_op == VK_ATTACHMENT_STORE_OP_STORE ||
+           att->resolve_mode != VK_RESOLVE_MODE_NONE);
+}
+
+static void
+nvk_switch_tiled_cache_discard_color(struct nvk_cmd_buffer *cmd,
+                                     uint32_t rt)
+{
+   struct nv_push *p = nvk_cmd_buffer_push(cmd, 2);
+   __push_immd(p, SUBC_NV9097, NVK_NVB097_TILED_CACHE_INVALIDATE_TARGET,
+               NVK_SWITCH_TC_DISCARD_COLOR(rt));
+}
+
+static void
+nvk_switch_tiled_cache_discard_depth_stencil(struct nvk_cmd_buffer *cmd)
+{
+   struct nv_push *p = nvk_cmd_buffer_push(cmd, 2);
+   __push_immd(p, SUBC_NV9097, NVK_NVB097_TILED_CACHE_INVALIDATE_TARGET,
+               NVK_SWITCH_TC_DISCARD_DEPTH_STENCIL);
+}
+
+static void
+nvk_switch_tiled_cache_discard_loads(struct nvk_cmd_buffer *cmd,
+                                     const struct nvk_rendering_state *render,
+                                     const VkRenderingInfo *info)
+{
+   if (!render->tiled_cache_enabled)
+      return;
+
+   if (render->flags & VK_RENDERING_RESUMING_BIT)
+      return;
+
+   for (uint32_t i = 0; i < render->color_att_count; i++) {
+      if (render->color_att[i].iview == NULL)
+         continue;
+
+      if (nvk_switch_load_op_discards(info->pColorAttachments[i].loadOp))
+         nvk_switch_tiled_cache_discard_color(cmd, i);
+   }
+
+   const bool has_depth =
+      info->pDepthAttachment != NULL &&
+      info->pDepthAttachment->imageView != VK_NULL_HANDLE;
+   const bool has_stencil =
+      info->pStencilAttachment != NULL &&
+      info->pStencilAttachment->imageView != VK_NULL_HANDLE;
+
+   if (!has_depth && !has_stencil)
+      return;
+
+   const bool preserve_depth =
+      has_depth && info->pDepthAttachment->loadOp == VK_ATTACHMENT_LOAD_OP_LOAD;
+   const bool preserve_stencil =
+      has_stencil &&
+      info->pStencilAttachment->loadOp == VK_ATTACHMENT_LOAD_OP_LOAD;
+
+   if (!preserve_depth && !preserve_stencil)
+      nvk_switch_tiled_cache_discard_depth_stencil(cmd);
+}
+
+static bool
+nvk_switch_tiled_cache_needs_store(const struct nvk_rendering_state *render)
+{
+   if (render->flags & VK_RENDERING_SUSPENDING_BIT)
+      return true;
+
+   for (uint32_t i = 0; i < render->color_att_count; i++) {
+      if (nvk_switch_attachment_needs_store(&render->color_att[i]))
+         return true;
+   }
+
+   return nvk_switch_attachment_needs_store(&render->depth_att) ||
+          nvk_switch_attachment_needs_store(&render->stencil_att);
+}
+
+static void
+nvk_switch_tiled_cache_discard_stores(struct nvk_cmd_buffer *cmd,
+                                      const struct nvk_rendering_state *render)
+{
+   if (render->flags & VK_RENDERING_SUSPENDING_BIT)
+      return;
+
+   for (uint32_t i = 0; i < render->color_att_count; i++) {
+      const struct nvk_attachment *att = &render->color_att[i];
+      if (att->iview != NULL && !nvk_switch_attachment_needs_store(att))
+         nvk_switch_tiled_cache_discard_color(cmd, i);
+   }
+
+   const bool has_ds =
+      render->depth_att.iview != NULL || render->stencil_att.iview != NULL;
+   const bool needs_ds_store =
+      nvk_switch_attachment_needs_store(&render->depth_att) ||
+      nvk_switch_attachment_needs_store(&render->stencil_att);
+
+   if (has_ds && !needs_ds_store)
+      nvk_switch_tiled_cache_discard_depth_stencil(cmd);
+}
+
+static void
+nvk_switch_tiled_cache_begin(struct nvk_cmd_buffer *cmd,
+                             struct nvk_rendering_state *render)
+{
+   if (!nvk_switch_rendering_can_use_tiled_cache(cmd, render))
+      return;
+
+   struct nv_push *p = nvk_cmd_buffer_push(cmd, 14);
+   __push_immd(p, SUBC_NV9097, NVK_NVB097_SET_TILED_CACHE, 0);
+   __push_immd(p, SUBC_NV9097, NVK_NVB097_SET_TILED_CACHE_TILE_SIZE,
+               NVK_SWITCH_TC_TILE_SIZE);
+   __push_immd(p, SUBC_NV9097, NVK_NVB097_SET_TILED_CACHE_BUFFER_INTERLEAVE,
+               NVK_SWITCH_TC_BUFFER_INTERLEAVE);
+   __push_immd(p, SUBC_NV9097, NVK_NVB097_SET_TILED_CACHE_CONTROL,
+               NVK_SWITCH_TC_CONTROL);
+   __push_immd(p, SUBC_NV9097, NVK_NVB097_SET_TILED_CACHE_CONTROL_EXTENDED,
+               NVK_SWITCH_TC_CONTROL_EXTENDED);
+   __push_immd(p, SUBC_NV9097, NVK_NVB097_SET_TILED_CACHE_STATE_THRESHOLD,
+               NVK_SWITCH_TC_STATE_THRESHOLD);
+   __push_immd(p, SUBC_NV9097, NVK_NVB097_SET_TILED_CACHE, 1);
+
+   render->tiled_cache_enabled = true;
+}
+
+static void
+nvk_switch_tiled_cache_end(struct nvk_cmd_buffer *cmd,
+                           struct nvk_rendering_state *render)
+{
+   if (!render->tiled_cache_enabled)
+      return;
+
+   const bool needs_store = nvk_switch_tiled_cache_needs_store(render);
+   nvk_switch_tiled_cache_discard_stores(cmd, render);
+
+   struct nv_push *p = nvk_cmd_buffer_push(cmd, 4);
+   __push_immd(p, SUBC_NV9097, NVK_NVB097_TILED_CACHE_FLUSH,
+               needs_store ? NVK_SWITCH_TC_FLUSH_NORMAL :
+                             NVK_SWITCH_TC_FLUSH_ALT);
+   __push_immd(p, SUBC_NV9097, NVK_NVB097_SET_TILED_CACHE, 0);
+
+   render->tiled_cache_enabled = false;
+}
+#endif
 
 static VkResult
 ensure_linear_tiled_shadow_mem_locked(struct nvk_device *dev,
@@ -1513,7 +1795,7 @@ nvk_CmdBeginRendering(VkCommandBuffer commandBuffer,
       P_NV9097_SET_ZCULL_STORAGE_C(p, addr_end >> 32);
       P_NV9097_SET_ZCULL_STORAGE_D(p, addr_end & UINT32_MAX);
 
-      P_IMMD(p, NV9097, SET_ZCULL_REGION_FORMAT, TYPE_Z_4X4);
+      P_IMMD(p, NV9097, SET_ZCULL_REGION_FORMAT, zcull_info.region_format);
 
       P_MTHD(p, NV9097, SET_ZCULL_REGION_SIZE_A);
       P_NV9097_SET_ZCULL_REGION_SIZE_A(p, zcull_info.width);
@@ -1679,6 +1961,11 @@ nvk_CmdBeginRendering(VkCommandBuffer commandBuffer,
    if (sample_layout != NIL_SAMPLE_LAYOUT_INVALID)
       nvk_cmd_set_sample_layout(cmd, sample_layout);
 
+#ifdef HAVE_SWITCH_PLATFORM
+   nvk_switch_tiled_cache_begin(cmd, render);
+   nvk_switch_tiled_cache_discard_loads(cmd, render, pRenderingInfo);
+#endif
+
    if (render->flags & VK_RENDERING_RESUMING_BIT)
       return;
 
@@ -1762,11 +2049,17 @@ nvk_CmdEndRendering2KHR(VkCommandBuffer commandBuffer,
    VK_FROM_HANDLE(nvk_cmd_buffer, cmd, commandBuffer);
    struct nvk_rendering_state *render = &cmd->state.gfx.render;
 
+#ifdef HAVE_SWITCH_PLATFORM
+   nvk_switch_tiled_cache_end(cmd, render);
+#endif
+
    struct nvk_zcull_plane* zcull_plane = nvk_get_zcull_plane(render);
    if (zcull_plane &&
        render->depth_att.store_op == VK_ATTACHMENT_STORE_OP_STORE) {
-      struct nv_push *p = nvk_cmd_buffer_push(cmd, 2);
+      struct nv_push *p = nvk_cmd_buffer_push(cmd, 4);
       P_IMMD(p, NV9097, STORE_ZCULL, 0);
+      /* GM20B needs a pipe NOP after STORE_ZCULL before later 3D work. */
+      P_IMMD(p, NV9097, PIPE_NOP, 0);
    }
 
    if (!(render->flags & VK_RENDERING_SUSPENDING_BIT)) {

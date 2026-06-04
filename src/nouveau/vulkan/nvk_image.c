@@ -12,6 +12,7 @@
 #include "nvkmd/nvkmd.h"
 
 #include "util/detect_os.h"
+#include "util/u_debug.h"
 #include "vk_android.h"
 #include "vk_enum_to_str.h"
 #include "vk_format.h"
@@ -23,6 +24,38 @@
 #include "clc197.h"
 #include "clc597.h"
 #include "clcd97.h"
+
+#include <stdio.h>
+
+#ifdef HAVE_SWITCH_PLATFORM
+static bool
+nvk_switch_file_toggle_enabled(const char *path)
+{
+   FILE *f = fopen(path, "r");
+   if (f == NULL)
+      return false;
+
+   fclose(f);
+   return true;
+}
+
+static bool
+nvk_switch_zcull_save_restore_enabled(void)
+{
+   static int enabled = -1;
+
+   if (enabled < 0) {
+      enabled =
+         debug_get_bool_option("NVK_SWITCH_ZCULL_SAVE_RESTORE", false) ? 1 : 0;
+      if (!enabled &&
+          nvk_switch_file_toggle_enabled(
+             "sdmc:/nvk_switch_zcull_save_restore.enable"))
+         enabled = 1;
+   }
+
+   return enabled != 0;
+}
+#endif
 
 static bool
 nvk_use_separate_zs(const struct nvk_physical_device *pdev, VkFormat vk_format)
@@ -816,7 +849,8 @@ nvk_image_can_compress(const struct nvkmd_pdev *nvkmd_pdev,
       if (image->plane_count > 1 ||
           image->vk.usage & (VK_IMAGE_USAGE_HOST_TRANSFER_BIT) ||
           image->vk.create_flags & (VK_IMAGE_CREATE_SPARSE_BINDING_BIT |
-                                    VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT))
+                                    VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT) ||
+          image->vk.wsi_legacy_scanout)
          return false;
       else if (image->vk.usage & (VK_IMAGE_USAGE_STORAGE_BIT |
                                   VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
@@ -910,7 +944,7 @@ nvk_image_init(struct nvk_device *dev,
       if (result != VK_SUCCESS)
          return result;
 
-      image->vk.drm_format_mod = eci.drmFormatModifier;
+      IMAGE_DRM_FORMAT_MOD(image) = eci.drmFormatModifier;
       for (uint8_t plane = 0; plane < eci.drmFormatModifierPlaneCount; plane++) {
          explicit_row_stride_B[plane] = eci.pPlaneLayouts[plane].rowPitch;
          explicit_offsets_B[plane] = eci.pPlaneLayouts[plane].offset;
@@ -960,7 +994,7 @@ nvk_image_init(struct nvk_device *dev,
          assert(IMAGE_DRM_FORMAT_MOD(image) != DRM_FORMAT_MOD_INVALID);
       }
 
-      if (image->vk.drm_format_mod == DRM_FORMAT_MOD_LINEAR) {
+      if (IMAGE_DRM_FORMAT_MOD(image) == DRM_FORMAT_MOD_LINEAR) {
          for (uint8_t plane = 0; plane < image->plane_count; plane++) {
             VkFormat format = ycbcr_info ?
                ycbcr_info->planes[plane].format : image->vk.format;
@@ -1065,11 +1099,22 @@ nvk_image_init(struct nvk_device *dev,
       }
    }
 
-   /* Disable zcull save/restore regions until
-    * https://gitlab.freedesktop.org/mesa/mesa/-/work_items/15221
-    * is fixed.
+   /* Upstream still keeps persistent zcull save/restore disabled globally.
+    * On Switch, public deko3d and the L4T nvgpu UAPI both expose a bound
+    * zcull context plus per-depth-surface zcull storage, so keep this
+    * Switch-only and restricted to simple 2D depth images. Dynamic clear-only
+    * zcull remains available for the other cases below.
     */
-   if (false &&
+   const bool enable_zcull_save_restore =
+#ifdef HAVE_SWITCH_PLATFORM
+      nvk_switch_zcull_save_restore_enabled() &&
+      image->vk.array_layers == 1 &&
+#else
+      false &&
+#endif
+      true;
+
+   if (enable_zcull_save_restore &&
        (image->vk.aspects & VK_IMAGE_ASPECT_DEPTH_BIT) &&
        image->vk.image_type != VK_IMAGE_TYPE_3D &&
        image->vk.tiling == VK_IMAGE_TILING_OPTIMAL &&
@@ -1349,11 +1394,17 @@ nvk_get_image_memory_requirements(struct nvk_device *dev,
       switch (ext->sType) {
       case VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS: {
          VkMemoryDedicatedRequirements *dedicated = (void *)ext;
+#ifndef __SWITCH__
          if (image->vk.tiling == VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT &&
              image->vk.drm_format_mod != DRM_FORMAT_MOD_LINEAR) {
             dedicated->prefersDedicatedAllocation = true;
             dedicated->requiresDedicatedAllocation = true;
          } else if (image->can_compress) {
+#else
+         /* No DRM format modifiers on Switch; struct vk_image has no
+          * drm_format_mod field on this platform. */
+         if (image->can_compress) {
+#endif
             /* We need dedicated allocations as compressed images have to be
              * pinned to VRAM due to nouveau, and we can't have a separate
              * memory type that's pinned and non evictable due to the Vulkan API

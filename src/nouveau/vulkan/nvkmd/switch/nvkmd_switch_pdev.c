@@ -5,6 +5,7 @@
 
 #include "nvkmd_switch.h"
 
+#include "nvk_device.h"
 #include "vk_log.h"
 #include "vk_sync_dummy.h"
 #include "util/cnd_monotonic.h"
@@ -46,8 +47,20 @@ struct nvkmd_switch_sync {
    mtx_t mutex;
    struct u_cnd_monotonic cond;
    NvMultiFence fence;
+   struct nvkmd_mem *payload_mem;
+   volatile uint32_t *payload;
+   uint64_t payload_addr;
+   uint32_t next_payload_value;
+   uint32_t payload_wait_value;
+   bool has_payload_wait;
    bool signaled;
 };
+
+static bool
+nvkmd_switch_payload_reached(uint32_t payload, uint32_t wait_value)
+{
+   return (int32_t)(payload - wait_value) >= 0;
+}
 
 static void
 nvkmd_switch_multifence_reset(NvMultiFence *fence)
@@ -108,6 +121,26 @@ nvkmd_switch_sync_init(struct vk_device *device,
                        "nvkmd-switch: cnd_init failed");
    }
 
+   struct nvk_device *dev = container_of(device, struct nvk_device, vk);
+   VkResult result =
+      nvkmd_dev_alloc_mapped_mem(dev->nvkmd, &dev->vk.base,
+                                 sizeof(uint32_t), sizeof(uint32_t),
+                                 NVKMD_MEM_GART | NVKMD_MEM_COHERENT,
+                                 NVKMD_MEM_MAP_RDWR,
+                                 &ssync->payload_mem);
+   if (result != VK_SUCCESS) {
+      u_cnd_monotonic_destroy(&ssync->cond);
+      mtx_destroy(&ssync->mutex);
+      return result;
+   }
+
+   ssync->payload = ssync->payload_mem->map;
+   ssync->payload_addr = ssync->payload_mem->va->addr;
+   ssync->next_payload_value = initial_value != 0 ? 1 : 0;
+   ssync->payload_wait_value = ssync->next_payload_value;
+   ssync->has_payload_wait = initial_value != 0;
+   *ssync->payload = ssync->next_payload_value;
+
    nvkmd_switch_multifence_reset(&ssync->fence);
    ssync->signaled = initial_value != 0;
    return VK_SUCCESS;
@@ -118,6 +151,9 @@ nvkmd_switch_sync_finish(struct vk_device *device,
                          struct vk_sync *sync)
 {
    struct nvkmd_switch_sync *ssync = nvkmd_switch_sync_from_vk(sync);
+
+   if (ssync->payload_mem != NULL)
+      nvkmd_mem_unref(ssync->payload_mem);
 
    u_cnd_monotonic_destroy(&ssync->cond);
    mtx_destroy(&ssync->mutex);
@@ -132,6 +168,14 @@ nvkmd_switch_sync_signal(struct vk_device *device,
    int ret;
 
    mtx_lock(&ssync->mutex);
+   if (ssync->fence.num_fences == 0) {
+      ssync->next_payload_value++;
+      if (ssync->next_payload_value == 0)
+         ssync->next_payload_value = 1;
+      ssync->payload_wait_value = ssync->next_payload_value;
+      ssync->has_payload_wait = true;
+      *ssync->payload = ssync->payload_wait_value;
+   }
    ssync->signaled = true;
    ret = u_cnd_monotonic_broadcast(&ssync->cond);
    mtx_unlock(&ssync->mutex);
@@ -152,6 +196,10 @@ nvkmd_switch_sync_reset(struct vk_device *device,
    mtx_lock(&ssync->mutex);
    ssync->signaled = false;
    nvkmd_switch_multifence_reset(&ssync->fence);
+   ssync->has_payload_wait = false;
+   ssync->next_payload_value = 0;
+   ssync->payload_wait_value = 0;
+   *ssync->payload = 0;
    mtx_unlock(&ssync->mutex);
 
    return VK_SUCCESS;
@@ -172,11 +220,13 @@ nvkmd_switch_sync_move(struct vk_device *device,
    signaled = src_sync->signaled;
    src_sync->signaled = false;
    nvkmd_switch_multifence_reset(&src_sync->fence);
+   src_sync->has_payload_wait = false;
    mtx_unlock(&src_sync->mutex);
 
    mtx_lock(&dst_sync->mutex);
    dst_sync->fence = fence;
    dst_sync->signaled = signaled;
+   dst_sync->has_payload_wait = false;
    u_cnd_monotonic_broadcast(&dst_sync->cond);
    mtx_unlock(&dst_sync->mutex);
 
@@ -258,9 +308,16 @@ nvkmd_switch_sync_wait(struct vk_device *device,
    const bool do_fence_wait =
       ssync->fence.num_fences > 0 && !(wait_flags & VK_SYNC_WAIT_PENDING);
    NvMultiFence fence_copy = ssync->fence;
+   const bool has_payload_wait = ssync->has_payload_wait;
+   const uint32_t payload_wait_value = ssync->payload_wait_value;
+   volatile uint32_t *payload = ssync->payload;
    mtx_unlock(&ssync->mutex);
 
    if (!do_fence_wait)
+      return VK_SUCCESS;
+
+   if (has_payload_wait &&
+       nvkmd_switch_payload_reached(*payload, payload_wait_value))
       return VK_SUCCESS;
 
    const s32 timeout_us = nvkmd_switch_abs_ns_to_us(abs_timeout_ns);
@@ -271,6 +328,15 @@ nvkmd_switch_sync_wait(struct vk_device *device,
 
       return vk_errorf(device, VK_ERROR_DEVICE_LOST,
                        "nvkmd-switch: nvMultiFenceWait failed: 0x%x", rc);
+   }
+
+   while (has_payload_wait &&
+          !nvkmd_switch_payload_reached(*payload, payload_wait_value)) {
+      if (abs_timeout_ns != UINT64_MAX &&
+          os_time_get_nano() >= abs_timeout_ns)
+         return VK_TIMEOUT;
+
+      svcSleepThread(0);
    }
 
    return VK_SUCCESS;
@@ -308,6 +374,23 @@ nvkmd_switch_sync_import_nvfence(struct vk_sync *sync, const NvFence *fence)
 }
 
 void
+nvkmd_switch_sync_import_nvfence_payload(struct vk_sync *sync,
+                                         const NvFence *fence,
+                                         uint32_t payload_value)
+{
+   struct nvkmd_switch_sync *ssync = nvkmd_switch_sync_from_vk(sync);
+   NvMultiFence mf;
+   nvMultiFenceCreate(&mf, fence);
+
+   mtx_lock(&ssync->mutex);
+   nvkmd_switch_multifence_copy_valid(&ssync->fence, &mf);
+   ssync->payload_wait_value = payload_value;
+   ssync->has_payload_wait = true;
+   u_cnd_monotonic_broadcast(&ssync->cond);
+   mtx_unlock(&ssync->mutex);
+}
+
+void
 nvkmd_switch_sync_import_nvmultifence(struct vk_sync *sync,
                                       const NvMultiFence *fence)
 {
@@ -315,8 +398,31 @@ nvkmd_switch_sync_import_nvmultifence(struct vk_sync *sync,
 
    mtx_lock(&ssync->mutex);
    nvkmd_switch_multifence_copy_valid(&ssync->fence, fence);
+   ssync->has_payload_wait = false;
    u_cnd_monotonic_broadcast(&ssync->cond);
    mtx_unlock(&ssync->mutex);
+}
+
+bool
+nvkmd_switch_sync_prepare_payload_signal(struct vk_sync *sync,
+                                         uint64_t *addr_out,
+                                         uint32_t *value_out)
+{
+   if (sync == NULL || sync->type != &nvkmd_switch_point_sync_type)
+      return false;
+
+   struct nvkmd_switch_sync *ssync = nvkmd_switch_sync_from_vk(sync);
+
+   mtx_lock(&ssync->mutex);
+   ssync->next_payload_value++;
+   if (ssync->next_payload_value == 0)
+      ssync->next_payload_value = 1;
+
+   *addr_out = ssync->payload_addr;
+   *value_out = ssync->next_payload_value;
+   mtx_unlock(&ssync->mutex);
+
+   return true;
 }
 
 bool
@@ -482,6 +588,24 @@ nvkmd_switch_try_create_pdev(struct vk_object_base *log_obj,
       .has_alloc_tiled = false,
       .has_map_fixed = false,
       .has_overmap = false,
+      /* GM20B supports color/depth compression.  The public L4T nvgpu UAPI
+       * exposes compression page size and compbit metadata, and public
+       * deko3d maps image memory with compressed kinds.  NVK's Turing+
+       * restriction is a nouveau-kernel limitation, not a hardware one, so
+       * it does not apply to this backend.
+       *
+       * NOTE: forcing this false is NOT a safe toggle here. With it off,
+       * nvk_image sets NIL_IMAGE_USAGE_UNCOMPRESSED_BIT, NIL picks the
+       * *uncompressed* pte_kind, and this backend's bind path
+       * (nvkmd_switch_dev.c) rejects that kind with
+       * VK_ERROR_INITIALIZATION_FAILED on the first GFx/UI render target
+       * -> unhandled C++ exception -> abort at startup. So the backend can
+       * currently bind the compressed kind but not the uncompressed one; the
+       * UI/font corruption seen with this true is therefore most likely the
+       * compbit backing not being allocated for the compressed kind, which
+       * must be fixed in the Switch mem backend's bind/kind handling rather
+       * than by flipping this flag. Keep true until that is sorted. */
+      .has_compression = true,
    };
 
    pdev->base.bind_align_B = NVKMD_SWITCH_BIND_ALIGN_B;

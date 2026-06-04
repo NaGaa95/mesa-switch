@@ -19,6 +19,11 @@
 #include "nv_push_clc3c0.h"
 #include "nv_push_clc397.h"
 
+#include "util/u_debug.h"
+
+#include <stdio.h>
+#include <string.h>
+
 static VkResult
 nvk_queue_push(struct nvk_queue *queue, const struct nv_push *push);
 
@@ -205,6 +210,128 @@ nvk_queue_submit_bind(struct nvk_queue *queue,
    return VK_SUCCESS;
 }
 
+#ifdef __SWITCH__
+static bool
+nvk_queue_switch_file_toggle_enabled(const char *path)
+{
+   FILE *f = fopen(path, "r");
+   if (f == NULL)
+      return false;
+
+   fclose(f);
+   return true;
+}
+
+static bool
+nvk_queue_small_gpfifo_copy_enabled(void)
+{
+   static int enabled = -1;
+
+   if (enabled < 0) {
+      enabled =
+         debug_get_bool_option("NVK_SWITCH_SMALL_GPFIFO_COPY", false) ? 1 : 0;
+      if (!enabled &&
+          nvk_queue_switch_file_toggle_enabled(
+             "sdmc:/nvk_switch_small_gpfifo_copy.enable"))
+         enabled = 1;
+   }
+
+   return enabled != 0;
+}
+
+/* Opt-in Switch experiment: copy very small pushbuffer segments into an
+ * internal queue push stream instead of spending one GPFIFO entry per segment.
+ * Keep the cutoff cache-line sized and conservative; first-submit device loss
+ * is worse than one extra GPFIFO entry.
+ */
+#define NVK_QUEUE_SMALL_GPFIFO_COPY_THRESHOLD_B 128
+
+static bool
+nvk_queue_should_copy_small_push(const struct nvk_cmd_push *push,
+                                 bool prev_incomplete)
+{
+   return nvk_queue_small_gpfifo_copy_enabled() &&
+          !prev_incomplete &&
+          push->map != NULL &&
+          push->range > 0 &&
+          push->range <= NVK_QUEUE_SMALL_GPFIFO_COPY_THRESHOLD_B &&
+          !push->incomplete &&
+          !push->no_prefetch;
+}
+
+static VkResult
+nvk_queue_submit_execs(struct nvk_queue *queue,
+                       uint32_t exec_count,
+                       const struct nvkmd_ctx_exec *execs)
+{
+   if (exec_count == 0)
+      return VK_SUCCESS;
+
+   return nvkmd_ctx_exec(queue->exec_ctx, &queue->vk.base, exec_count, execs);
+}
+
+static VkResult
+nvk_queue_submit_small_push_copy(struct nvk_queue *queue,
+                                 const struct nvk_cmd_push *pushes,
+                                 uint32_t push_count,
+                                 uint32_t *index,
+                                 bool *copied_pushes)
+{
+   struct nvk_device *dev = nvk_queue_device(queue);
+   uint32_t batch_size_B = 0;
+   uint32_t batch_count = 0;
+
+   while (*index + batch_count < push_count) {
+      const struct nvk_cmd_push *push = &pushes[*index + batch_count];
+
+      if (!nvk_queue_should_copy_small_push(push, false))
+         break;
+
+      if (batch_size_B + push->range > NVK_MEM_STREAM_MAX_ALLOC_SIZE)
+         break;
+
+      batch_size_B += push->range;
+      batch_count++;
+   }
+
+   assert(batch_count > 0);
+   assert(batch_size_B > 0);
+
+   uint64_t batch_addr;
+   void *batch_map;
+   VkResult result =
+      nvk_mem_stream_alloc(dev, &queue->push_stream, batch_size_B, 4,
+                           &batch_addr, &batch_map);
+   if (result != VK_SUCCESS)
+      return result;
+
+   uint8_t *dst = batch_map;
+   for (uint32_t i = 0; i < batch_count; i++) {
+      const struct nvk_cmd_push *push = &pushes[*index + i];
+      memcpy(dst, push->map, push->range);
+      dst += push->range;
+   }
+
+   /* Make the copied push data visible before appending its GPFIFO entry.
+    * nvGpuChannelAppendEntry() may drain the channel when the libnx ring is
+    * full, so waiting until the final stream signal would be too late.
+    */
+   nvk_mem_stream_flush_cpu(dev, &queue->push_stream);
+
+   const struct nvkmd_ctx_exec exec = {
+      .addr = batch_addr,
+      .size_B = batch_size_B,
+   };
+   result = nvkmd_ctx_exec(queue->exec_ctx, &queue->vk.base, 1, &exec);
+   if (result != VK_SUCCESS)
+      return result;
+
+   *copied_pushes = true;
+   *index += batch_count;
+   return VK_SUCCESS;
+}
+#endif
+
 static VkResult
 nvk_queue_submit_exec(struct nvk_queue *queue,
                       struct vk_queue_submit *submit)
@@ -244,6 +371,8 @@ nvk_queue_submit_exec(struct nvk_queue *queue,
    if (result != VK_SUCCESS)
       goto fail;
 
+   bool copied_pushes = false;
+
    for (unsigned i = 0; i < submit->command_buffer_count; i++) {
       struct nvk_cmd_buffer *cmd =
          container_of(submit->command_buffers[i], struct nvk_cmd_buffer, vk);
@@ -252,7 +381,51 @@ nvk_queue_submit_exec(struct nvk_queue *queue,
          util_dynarray_num_elements(&cmd->pushes, struct nvk_cmd_push);
       STACK_ARRAY(struct nvkmd_ctx_exec, execs, max_execs);
       uint32_t exec_count = 0;
+#ifdef __SWITCH__
+      const struct nvk_cmd_push *pushes = util_dynarray_begin(&cmd->pushes);
+      const uint32_t push_count = max_execs;
+      bool prev_incomplete = false;
 
+      for (uint32_t j = 0; j < push_count; ) {
+         const struct nvk_cmd_push *push = &pushes[j];
+
+         if (push->range == 0)
+            goto next_push;
+
+         if (nvk_queue_should_copy_small_push(push, prev_incomplete)) {
+            result = nvk_queue_submit_execs(queue, exec_count, execs);
+            if (result != VK_SUCCESS) {
+               STACK_ARRAY_FINISH(execs);
+               goto fail;
+            }
+            exec_count = 0;
+
+            result = nvk_queue_submit_small_push_copy(queue, pushes,
+                                                      push_count, &j,
+                                                      &copied_pushes);
+            if (result != VK_SUCCESS) {
+               STACK_ARRAY_FINISH(execs);
+               goto fail;
+            }
+
+            prev_incomplete = false;
+            continue;
+         }
+
+         execs[exec_count++] = (struct nvkmd_ctx_exec) {
+            .addr = push->addr,
+            .size_B = push->range,
+            .incomplete = push->incomplete,
+            .no_prefetch = push->no_prefetch,
+         };
+
+next_push:
+         prev_incomplete = push->incomplete;
+         j++;
+      }
+
+      result = nvk_queue_submit_execs(queue, exec_count, execs);
+#else
       util_dynarray_foreach(&cmd->pushes, struct nvk_cmd_push, push) {
          if (push->range == 0)
             continue;
@@ -267,9 +440,17 @@ nvk_queue_submit_exec(struct nvk_queue *queue,
 
       result = nvkmd_ctx_exec(queue->exec_ctx, &queue->vk.base,
                               exec_count, execs);
+#endif
 
       STACK_ARRAY_FINISH(execs);
 
+      if (result != VK_SUCCESS)
+         goto fail;
+   }
+
+   if (copied_pushes) {
+      result = nvk_mem_stream_flush(dev, &queue->push_stream,
+                                    queue->exec_ctx, NULL);
       if (result != VK_SUCCESS)
          goto fail;
    }

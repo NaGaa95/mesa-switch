@@ -57,63 +57,6 @@ wsi_switch_present_trace_enabled(void)
          mesa_logi(fmt, ##__VA_ARGS__);                                         \
    } while (0)
 
-struct wsi_switch_stats {
-   uint64_t last_ns;
-   uint32_t acquires;
-   uint32_t acquire_fences;
-   uint32_t dequeue_fails;
-   uint32_t presents;
-   uint32_t native_presents;
-   uint32_t host_wait_presents;
-   uint32_t null_fence_presents;
-   uint32_t queue_fails;
-};
-
-static struct wsi_switch_stats wsi_switch_stats;
-
-static bool
-wsi_switch_stats_enabled(void)
-{
-   static int enabled = -1;
-
-   if (enabled < 0)
-      enabled = debug_get_bool_option("NVK_SWITCH_STATS", false) ? 1 : 0;
-
-   return enabled != 0;
-}
-
-static void
-wsi_switch_stats_maybe_log(void)
-{
-   if (!wsi_switch_stats_enabled())
-      return;
-
-   const uint64_t now_ns = os_time_get_nano();
-   if (wsi_switch_stats.last_ns == 0) {
-      wsi_switch_stats.last_ns = now_ns;
-      return;
-   }
-
-   const uint64_t elapsed_ns = now_ns - wsi_switch_stats.last_ns;
-   if (elapsed_ns < 1000000000ull)
-      return;
-
-   mesa_logi("wsi-switch stats: acquires=%u acquire_fences=%u dequeue_fails=%u"
-             " presents=%u native=%u host_wait=%u null_fence=%u queue_fails=%u",
-             wsi_switch_stats.acquires,
-             wsi_switch_stats.acquire_fences,
-             wsi_switch_stats.dequeue_fails,
-             wsi_switch_stats.presents,
-             wsi_switch_stats.native_presents,
-             wsi_switch_stats.host_wait_presents,
-             wsi_switch_stats.null_fence_presents,
-             wsi_switch_stats.queue_fails);
-
-   wsi_switch_stats = (struct wsi_switch_stats) {
-      .last_ns = now_ns,
-   };
-}
-
 static VkResult
 wsi_switch_surface_get_support(VkIcdSurfaceBase *surface,
                                struct wsi_device *wsi_device,
@@ -438,8 +381,17 @@ wsi_switch_create_scanout_image(struct wsi_switch_swapchain *chain,
     * nvk_device_memory.c, the 5b.A hunk) will notice the tiling and
     * program pte_kind / tile_mode accordingly.
     */
+   /* Mark the image as a scanout target.  NVK keys can_compress off
+    * vk_image::wsi_legacy_scanout, so this keeps swapchain images
+    * uncompressed — the Horizon compositor scans out raw block-linear and
+    * cannot decode GPU compression tags. */
+   const struct wsi_image_create_info wsi_image_info = {
+      .sType = VK_STRUCTURE_TYPE_WSI_IMAGE_CREATE_INFO_MESA,
+      .scanout = true,
+   };
    const VkImageCreateInfo image_info = {
       .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+      .pNext = &wsi_image_info,
       .imageType = VK_IMAGE_TYPE_2D,
       .format = pCreateInfo->imageFormat,
       .extent = {
@@ -743,15 +695,12 @@ wsi_switch_swapchain_acquire_next_image(struct wsi_swapchain *wsi_chain,
    VkResult dq = wsi_switch_dequeue_buffer(chain->nw, info->timeout,
                                            &slot, &acquire_mf);
    if (dq != VK_SUCCESS) {
-      wsi_switch_stats.dequeue_fails++;
-      wsi_switch_stats_maybe_log();
       WSI_SWITCH_PRESENT_TRACE("acquire: nw=%p dequeue failed result=%d "
                                "timeout=%" PRIu64,
                                (void *)chain->nw, dq, info->timeout);
       return dq;
    }
 
-   wsi_switch_stats.acquires++;
    WSI_SWITCH_PRESENT_TRACE("acquire: nw=%p slot=%d image_count=%u",
                             (void *)chain->nw, slot, chain->base.image_count);
 
@@ -768,10 +717,8 @@ wsi_switch_swapchain_acquire_next_image(struct wsi_swapchain *wsi_chain,
          if (valid_fence_count > 0) {
             chain->images[i].acquire_fence = compact_mf;
             chain->images[i].have_acquire_fence = true;
-            wsi_switch_stats.acquire_fences++;
          }
 
-         wsi_switch_stats_maybe_log();
          *image_index = i;
          chain->images[i].busy_on_host = true;
          chain->images[i].busy_on_device = true;
@@ -852,11 +799,9 @@ wsi_switch_swapchain_queue_present(struct wsi_swapchain *wsi_chain,
    }
 
    if (have_multifence) {
-      wsi_switch_stats.native_presents++;
       WSI_SWITCH_PRESENT_TRACE("present: image=%u using native fence payload num_fences=%u",
                                image_index, mf.num_fences);
    } else if (vk_fence != VK_NULL_HANDLE) {
-      wsi_switch_stats.host_wait_presents++;
       /* The active sync isn't a native NvFence (or the kickoff hasn't
        * imported a fence yet). Block host-side so we never hand the
        * compositor a buffer the GPU is still writing.
@@ -870,25 +815,19 @@ wsi_switch_swapchain_queue_present(struct wsi_swapchain *wsi_chain,
                                image_index, wait);
       if (wait != VK_SUCCESS)
          return wait;
-   } else {
-      wsi_switch_stats.null_fence_presents++;
    }
 
-   wsi_switch_stats.presents++;
    Result rc = nwindowQueueBuffer(chain->nw, img->slot,
                                   have_multifence ? &mf : NULL);
    WSI_SWITCH_PRESENT_TRACE("present: image=%u queue slot=%d have_native_fence=%d rc=0x%x",
                             image_index, img->slot, have_multifence ? 1 : 0,
                             (unsigned)rc);
    if (R_FAILED(rc)) {
-      wsi_switch_stats.queue_fails++;
-      wsi_switch_stats_maybe_log();
       return VK_ERROR_SURFACE_LOST_KHR;
    }
 
    img->busy_on_host = false;
    img->busy_on_device = false;
-   wsi_switch_stats_maybe_log();
    WSI_SWITCH_PRESENT_TRACE("present: image=%u complete", image_index);
 
    return VK_SUCCESS;

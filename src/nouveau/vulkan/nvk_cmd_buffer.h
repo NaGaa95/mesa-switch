@@ -190,6 +190,9 @@ struct nvk_rendering_state {
 
    /* True if all the conditions are met to allow rendering to linear */
    bool linear;
+
+   /* Switch-only: true while GM20B tiled cache is enabled for this render. */
+   bool tiled_cache_enabled;
 };
 
 struct nvk_graphics_state {
@@ -303,6 +306,11 @@ nvk_cmd_buffer_push(struct nvk_cmd_buffer *cmd, uint32_t dw_count)
 void
 nvk_cmd_buffer_push_indirect(struct nvk_cmd_buffer *cmd,
                              uint64_t addr, uint32_t dw_count);
+
+#ifdef HAVE_SWITCH_PLATFORM
+void
+nvk_cmd_buffer_switch_sync_host(struct nvk_cmd_buffer *cmd);
+#endif
 
 void nvk_cmd_buffer_begin_graphics(struct nvk_cmd_buffer *cmd,
                                    const VkCommandBufferBeginInfo *pBeginInfo);
@@ -429,6 +437,10 @@ VkResult nvk_cmd_flush_cs_qmd(struct nvk_cmd_buffer *cmd,
 void nvk_cmd_flush_gfx_dynamic_state(struct nvk_cmd_buffer *cmd);
 void nvk_cmd_flush_gfx_shaders(struct nvk_cmd_buffer *cmd);
 void nvk_cmd_flush_gfx_cbufs(struct nvk_cmd_buffer *cmd);
+
+#ifdef HAVE_SWITCH_PLATFORM
+void nvk_switch_tiled_cache_barrier(struct nvk_cmd_buffer *cmd);
+#endif
 
 void nvk_cmd_dispatch_shader(struct nvk_cmd_buffer *cmd,
                              struct nvk_shader *shader,

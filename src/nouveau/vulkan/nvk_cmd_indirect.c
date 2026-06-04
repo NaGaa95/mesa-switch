@@ -1112,8 +1112,13 @@ nvk_CmdExecuteGeneratedCommandsEXT(VkCommandBuffer commandBuffer,
          P_IMMD(p, NVB1C0, INVALIDATE_SKED_CACHES, 0);
       if (pdev->info.cls_eng3d >= HOPPER_A)
          P_IMMD(p, NVC86F, WFI, 0);
-      else
+      else {
+#ifdef HAVE_SWITCH_PLATFORM
+         nvk_cmd_buffer_switch_sync_host(cmd);
+#else
          __push_immd(p, SUBC_NV9097, NV906F_SET_REFERENCE, 0);
+#endif
+      }
    }
 
    if (layout->stages & VK_SHADER_STAGE_COMPUTE_BIT) {
@@ -1332,9 +1337,13 @@ nvk_CmdCopyMemoryIndirectKHR(VkCommandBuffer commandBuffer,
       struct nv_push *p = nvk_cmd_buffer_push(cmd, 1);
       P_IMMD_WORD(p, NVC86F, WFI, 0);
    } else {
-      struct nv_push *p = nvk_cmd_buffer_push(cmd, 2);
+      struct nv_push *p = nvk_cmd_buffer_push(cmd, 1);
       P_IMMD_WORD(p, NVA0C0, WAIT_FOR_IDLE, 0);
+#ifdef HAVE_SWITCH_PLATFORM
+      nvk_cmd_buffer_switch_sync_host(cmd);
+#else
       __push_immd(p, SUBC_NV9097, NV906F_SET_REFERENCE, 0);
+#endif
    }
 
    for (int i = 0; i < info->copyCount; i += cmds_per_buffer) {

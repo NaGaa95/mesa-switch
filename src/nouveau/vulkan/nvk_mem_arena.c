@@ -183,6 +183,22 @@ nvk_mem_arena_flush_map(struct nvk_device *dev,
    simple_mtx_unlock(&arena->mutex);
 }
 
+static void
+nvk_mem_arena_sync_written_range(struct nvkmd_mem *mem,
+                                 uint64_t offset_B, uint64_t range_B)
+{
+   if (range_B == 0)
+      return;
+
+   const uint32_t atom_size_B = mem->dev->pdev->dev_info.nc_atom_size_B;
+   const uint64_t start_B = ROUND_DOWN_TO(offset_B, atom_size_B);
+   const uint64_t end_B =
+      MIN2(align(offset_B + range_B, atom_size_B), mem->size_B);
+
+   if (end_B > start_B)
+      nvkmd_mem_sync_map_to_gpu(mem, start_B, end_B - start_B);
+}
+
 void
 nvk_mem_arena_copy_to_gpu(struct nvk_mem_arena *arena,
                           uint64_t dst_addr, const void *src, size_t size_B)
@@ -202,11 +218,10 @@ nvk_mem_arena_copy_to_gpu(struct nvk_mem_arena *arena,
       const size_t copy_size_B = MIN2(size_B, mem_size_B - mem_offset_B);
 
       memcpy(mem->mem->map + mem_offset_B, src, copy_size_B);
+      nvk_mem_arena_sync_written_range(mem->mem, mem_offset_B, copy_size_B);
 
       dst_addr += copy_size_B;
       src += copy_size_B;
       size_B -= copy_size_B;
    }
-
-   nvk_mem_arena_set_map_dirty(arena);
 }

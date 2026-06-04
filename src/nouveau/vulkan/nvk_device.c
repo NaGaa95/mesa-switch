@@ -178,6 +178,53 @@ nvk_device_get_timestamp(struct vk_device *vk_dev, uint64_t *timestamp)
    return VK_SUCCESS;
 }
 
+/* The Switch links NVK directly and relies on these common implementations
+ * being present in nvk_device_entrypoints: the generated entrypoint table
+ * uses weak symbols, and vk_common_device_entrypoints does not carry
+ * CreateFramebuffer / CreatePipelineLayout, so without these explicit
+ * wrappers vkGetDeviceProcAddr("vkCreateFramebuffer") returns NULL. */
+VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
+nvk_GetDeviceProcAddr(VkDevice device, const char *pName)
+{
+   return vk_common_GetDeviceProcAddr(device, pName);
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL
+nvk_CreateFramebuffer(VkDevice device,
+                      const VkFramebufferCreateInfo *pCreateInfo,
+                      const VkAllocationCallbacks *pAllocator,
+                      VkFramebuffer *pFramebuffer)
+{
+   return vk_common_CreateFramebuffer(device, pCreateInfo,
+                                      pAllocator, pFramebuffer);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+nvk_DestroyFramebuffer(VkDevice device,
+                       VkFramebuffer framebuffer,
+                       const VkAllocationCallbacks *pAllocator)
+{
+   vk_common_DestroyFramebuffer(device, framebuffer, pAllocator);
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL
+nvk_CreatePipelineLayout(VkDevice device,
+                         const VkPipelineLayoutCreateInfo *pCreateInfo,
+                         const VkAllocationCallbacks *pAllocator,
+                         VkPipelineLayout *pPipelineLayout)
+{
+   return vk_common_CreatePipelineLayout(device, pCreateInfo,
+                                         pAllocator, pPipelineLayout);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+nvk_DestroyPipelineLayout(VkDevice device,
+                          VkPipelineLayout pipelineLayout,
+                          const VkAllocationCallbacks *pAllocator)
+{
+   vk_common_DestroyPipelineLayout(device, pipelineLayout, pAllocator);
+}
+
 struct dispatch_table_builder {
    struct vk_device_dispatch_table *tables[NVK_DISPATCH_TABLE_COUNT];
    bool used[NVK_DISPATCH_TABLE_COUNT];

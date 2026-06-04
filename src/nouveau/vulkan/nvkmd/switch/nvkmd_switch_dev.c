@@ -25,26 +25,47 @@
 #define NVKMD_DBG(...) do { \
 } while (0)
 
-struct nvkmd_switch_stats {
-   uint64_t last_ns;
-   uint64_t exec_dwords;
-   uint32_t kickoffs;
-   uint32_t exec_entries;
-   uint32_t wait_entries;
-   uint32_t wait_dwords;
-   uint32_t flush_appends;
-   uint32_t fence_dwords;
-};
+static bool
+nvkmd_switch_file_toggle_enabled(const char *path)
+{
+   FILE *f = fopen(path, "r");
+   if (f == NULL)
+      return false;
 
-static struct nvkmd_switch_stats nvkmd_switch_stats;
+   fclose(f);
+   return true;
+}
 
 static bool
-nvkmd_switch_stats_enabled(void)
+nvkmd_switch_prefetch_invalidate_enabled(void)
 {
    static int enabled = -1;
 
-   if (enabled < 0)
-      enabled = debug_get_bool_option("NVK_SWITCH_STATS", false) ? 1 : 0;
+   if (enabled < 0) {
+      enabled =
+         debug_get_bool_option("NVK_SWITCH_PREFETCH_INVALIDATE", false) ? 1 : 0;
+      if (!enabled &&
+          nvkmd_switch_file_toggle_enabled(
+             "sdmc:/nvk_switch_prefetch_invalidate.enable"))
+         enabled = 1;
+   }
+
+   return enabled != 0;
+}
+
+static bool
+nvkmd_switch_signal_payload_enabled(void)
+{
+   static int enabled = -1;
+
+   if (enabled < 0) {
+      enabled =
+         debug_get_bool_option("NVK_SWITCH_SIGNAL_PAYLOAD", false) ? 1 : 0;
+      if (!enabled &&
+          nvkmd_switch_file_toggle_enabled(
+             "sdmc:/nvk_switch_signal_payload.enable"))
+         enabled = 1;
+   }
 
    return enabled != 0;
 }
@@ -61,49 +82,23 @@ nvkmd_switch_skip_post_fence_flush(void)
    return enabled != 0;
 }
 
-static void
-nvkmd_switch_stats_maybe_log(void)
-{
-   if (!nvkmd_switch_stats_enabled())
-      return;
-
-   const uint64_t now_ns = os_time_get_nano();
-   if (nvkmd_switch_stats.last_ns == 0) {
-      nvkmd_switch_stats.last_ns = now_ns;
-      return;
-   }
-
-   const uint64_t elapsed_ns = now_ns - nvkmd_switch_stats.last_ns;
-   if (elapsed_ns < 1000000000ull)
-      return;
-
-   mesa_logi("nvk-switch stats: kickoffs=%u exec_entries=%u exec_kdw=%" PRIu64
-             " wait_entries=%u wait_dwords=%u flush_appends=%u fence_dwords=%u"
-             " skip_post_fence_flush=%u",
-             nvkmd_switch_stats.kickoffs,
-             nvkmd_switch_stats.exec_entries,
-             nvkmd_switch_stats.exec_dwords / 1024,
-             nvkmd_switch_stats.wait_entries,
-             nvkmd_switch_stats.wait_dwords,
-             nvkmd_switch_stats.flush_appends,
-             nvkmd_switch_stats.fence_dwords,
-             nvkmd_switch_skip_post_fence_flush() ? 1 : 0);
-
-   nvkmd_switch_stats = (struct nvkmd_switch_stats) {
-      .last_ns = now_ns,
-   };
-}
-
 /* Small internal command ring for per-submit native wait packets. We keep
  * several fixed slices so back-to-back submissions can reuse the buffer
  * without overwriting commands the GPU hasn't consumed yet.
  */
-#define NVKMD_SWITCH_WAIT_SLICE_COUNT 8
+#define NVKMD_SWITCH_WAIT_SLICE_COUNT 64
 #define NVKMD_SWITCH_WAIT_SLICE_WORDS 128
 #define NVKMD_SWITCH_WAIT_CMD_WORDS_PER_FENCE 3
-#define NVKMD_SWITCH_BUILTIN_CMDBUF_SIZE_B 0x2000
+#define NVKMD_SWITCH_SIGNAL_SLICE_COUNT 64
+#define NVKMD_SWITCH_SIGNAL_SLICE_WORDS 128
+#define NVKMD_SWITCH_SIGNAL_CMD_WORDS_PER_PAYLOAD 5
+#define NVKMD_SWITCH_BUILTIN_CMDBUF_SIZE_B 0x20000
+#define NVKMD_SWITCH_GPFIFO_FINAL_SKID_ENTRIES 4
 #define NVKMD_SWITCH_MAX_MULTIFENCE_FENCES 4
 #define NVKMD_SWITCH_SVC_INVALIDATE_PROCESS_DATA_CACHE 0x5d
+#define NVKMD_SWITCH_MEM_OP_L2_FLUSH_DIRTY 0x80000000
+#define NVKMD_SWITCH_MEM_OP_L2_SYSMEM_INVALIDATE 0x70000000
+#define NVKMD_SWITCH_SEMAPHORE_RELEASE 0x01100002
 
 struct nvkmd_switch_mem {
    struct nvkmd_mem base;
@@ -136,6 +131,7 @@ struct nvkmd_switch_ctx {
    bool uses_gpu_channel;
    bool pending_execs;
    bool has_last_fence;
+   bool prefetch_invalidate_emitted;
 
    NvGpuChannel gpu_channel;
    NvFence last_fence;
@@ -144,6 +140,8 @@ struct nvkmd_switch_ctx {
    void *builtin_cmdbuf_cpu;
    uint64_t builtin_cmdbuf_addr;
    uint32_t static_cmd_offset_words;
+   uint32_t prefetch_invalidate_offset_words;
+   uint32_t prefetch_invalidate_num_cmds;
    uint32_t fence_num_cmds;
    uint32_t flush_num_cmds;
 
@@ -153,9 +151,20 @@ struct nvkmd_switch_ctx {
    uint32_t pending_wait_words;
    bool pending_wait_emitted;
 
+   NvFence signal_slice_fences[NVKMD_SWITCH_SIGNAL_SLICE_COUNT];
+   uint32_t signal_slice_offset_words;
+   uint32_t next_signal_slice;
+   int32_t pending_signal_slice;
+
    NvMap zcull_ctx_map;
    void *zcull_ctx_cpu;
    uint64_t zcull_ctx_addr;
+};
+
+struct nvkmd_switch_signal_payload {
+   struct vk_sync *sync;
+   uint64_t addr;
+   uint32_t value;
 };
 
 static struct nvkmd_switch_dev *
@@ -407,13 +416,29 @@ nvkmd_switch_generate_fence_cmdlist(uint32_t *buf_start, uint32_t syncpt_id)
 }
 
 static uint32_t
+nvkmd_switch_generate_prefetch_invalidate_cmdlist(uint32_t *buf_start)
+{
+   uint32_t *cmd = buf_start;
+
+   /* Public deko3d uses a post-flush cache-invalidate command list followed
+    * by a sync/no-prefetch GPFIFO split.  Do the same kind of ordering before
+    * later command-buffer segments can be fetched from memory that may have
+    * stale L2 lines from earlier reuse.
+    */
+   *cmd++ = 0x00B | (6 << 13) | (1 << 16) | (1 << 29);
+   *cmd++ = NVKMD_SWITCH_MEM_OP_L2_SYSMEM_INVALIDATE;
+
+   return cmd - buf_start;
+}
+
+static uint32_t
 nvkmd_switch_generate_flush_cmdlist(uint32_t *buf_start)
 {
    uint32_t *cmd = buf_start;
    *cmd++ = 0x00B | (6 << 13) | (1 << 16) | (1 << 29);
-   *cmd++ = 0x80000000;
+   *cmd++ = NVKMD_SWITCH_MEM_OP_L2_FLUSH_DIRTY;
    *cmd++ = 0x00B | (6 << 13) | (1 << 16) | (1 << 29);
-   *cmd++ = 0x70000000;
+   *cmd++ = NVKMD_SWITCH_MEM_OP_L2_SYSMEM_INVALIDATE;
    *cmd++ = 0x4A2 | (0 << 13) | (0 << 16) | (4 << 29);
    *cmd++ = 0x369 | (0 << 13) | (0x1011 << 16) | (4 << 29);
    *cmd++ = 0x50A | (0 << 13) | (0 << 16) | (4 << 29);
@@ -473,6 +498,25 @@ nvkmd_switch_ctx_wait_slice_addr(struct nvkmd_switch_ctx *ctx,
           (uint64_t)slice * NVKMD_SWITCH_WAIT_SLICE_WORDS * sizeof(uint32_t);
 }
 
+static uint32_t *
+nvkmd_switch_ctx_signal_slice_cpu(struct nvkmd_switch_ctx *ctx,
+                                  uint32_t slice)
+{
+   return (uint32_t *)ctx->builtin_cmdbuf_cpu +
+          ctx->signal_slice_offset_words +
+          slice * NVKMD_SWITCH_SIGNAL_SLICE_WORDS;
+}
+
+static uint64_t
+nvkmd_switch_ctx_signal_slice_addr(struct nvkmd_switch_ctx *ctx,
+                                   uint32_t slice)
+{
+   return ctx->builtin_cmdbuf_addr +
+          (uint64_t)(ctx->signal_slice_offset_words +
+                     slice * NVKMD_SWITCH_SIGNAL_SLICE_WORDS) *
+          sizeof(uint32_t);
+}
+
 static VkResult
 nvkmd_switch_ctx_wait_slice_ready(struct nvkmd_switch_ctx *ctx,
                                   struct vk_object_base *log_obj,
@@ -487,6 +531,27 @@ nvkmd_switch_ctx_wait_slice_ready(struct nvkmd_switch_ctx *ctx,
    if (R_FAILED(rc)) {
       return vk_errorf(log_obj, VK_ERROR_DEVICE_LOST,
                        "nvkmd-switch: wait-slice fence wait failed: 0x%x",
+                       rc);
+   }
+
+   nvkmd_switch_reset_nvfence(fence);
+   return VK_SUCCESS;
+}
+
+static VkResult
+nvkmd_switch_ctx_signal_slice_ready(struct nvkmd_switch_ctx *ctx,
+                                    struct vk_object_base *log_obj,
+                                    uint32_t slice)
+{
+   NvFence *fence = &ctx->signal_slice_fences[slice];
+
+   if ((int32_t)fence->id < 0)
+      return VK_SUCCESS;
+
+   Result rc = nvFenceWait(fence, -1);
+   if (R_FAILED(rc)) {
+      return vk_errorf(log_obj, VK_ERROR_DEVICE_LOST,
+                       "nvkmd-switch: signal-slice fence wait failed: 0x%x",
                        rc);
    }
 
@@ -515,43 +580,226 @@ nvkmd_switch_ctx_reserve_wait_slice(struct nvkmd_switch_ctx *ctx,
    return VK_SUCCESS;
 }
 
-/* Append a GPFIFO entry, draining the channel with an intermediate kickoff
- * if libnx's userspace entry ring is full.  libnx accumulates entries until
- * nvGpuChannelKickoff() submits them; a submission large enough to fill the
- * ring before the fence cmdlist is appended would otherwise have entries
- * silently dropped and run a truncated command stream.  Channel execution is
- * in-order, so splitting one submit across several kickoffs is safe: the
- * final fence still completes after every entry submitted before it.
- *
- * Callers must not have any pending nvGpuChannelIncrFence() bookkeeping when
- * this is invoked, since the intermediate kickoff submits the channel.
+static VkResult
+nvkmd_switch_ctx_reserve_signal_slice(struct nvkmd_switch_ctx *ctx,
+                                      struct vk_object_base *log_obj,
+                                      uint32_t *slice_out)
+{
+   assert(ctx->pending_signal_slice < 0);
+
+   const uint32_t slice = ctx->next_signal_slice;
+   ctx->next_signal_slice = (ctx->next_signal_slice + 1) %
+                            NVKMD_SWITCH_SIGNAL_SLICE_COUNT;
+
+   VkResult result = nvkmd_switch_ctx_signal_slice_ready(ctx, log_obj, slice);
+   if (result != VK_SUCCESS)
+      return result;
+
+   ctx->pending_signal_slice = (int32_t)slice;
+   *slice_out = slice;
+   return VK_SUCCESS;
+}
+
+static uint32_t
+nvkmd_switch_generate_semaphore_release_cmdlist(
+   uint32_t *buf_start,
+   uint32_t syncpt_id,
+   const struct nvkmd_switch_signal_payload *payloads,
+   uint32_t payload_count)
+{
+   uint32_t *cmd = buf_start;
+
+   cmd += nvkmd_switch_generate_fence_cmdlist(cmd, syncpt_id);
+
+   for (uint32_t i = 0; i < payload_count; i++) {
+      const uint64_t addr = payloads[i].addr;
+
+      *cmd++ = 0x004 | (6 << 13) | (4 << 16) | (1 << 29);
+      *cmd++ = addr >> 32;
+      *cmd++ = addr;
+      *cmd++ = payloads[i].value;
+      *cmd++ = NVKMD_SWITCH_SEMAPHORE_RELEASE;
+   }
+
+   return cmd - buf_start;
+}
+
+static VkResult
+nvkmd_switch_ctx_intermediate_kickoff(struct nvkmd_switch_ctx *ctx,
+                                      struct vk_object_base *log_obj,
+                                      const char *reason)
+{
+   if (ctx->gpu_channel.num_entries == 0)
+      return VK_SUCCESS;
+
+   Result rc = nvGpuChannelKickoff(&ctx->gpu_channel);
+   if (R_FAILED(rc)) {
+      return vk_errorf(log_obj, VK_ERROR_DEVICE_LOST,
+                       "nvkmd-switch: intermediate kickoff failed while %s: "
+                       "0x%x (entries=%u)", reason, rc,
+                       ctx->gpu_channel.num_entries);
+   }
+
+   /* A kickoff ends the current prefetch window.  Emit the public deko3d-style
+    * invalidate/no-prefetch split again before the next executable entry. */
+   ctx->prefetch_invalidate_emitted = false;
+   return VK_SUCCESS;
+}
+
+static VkResult
+nvkmd_switch_ctx_ensure_gpfifo_space(struct nvkmd_switch_ctx *ctx,
+                                     struct vk_object_base *log_obj,
+                                     uint32_t entries_needed,
+                                     uint32_t skid_entries,
+                                     bool allow_flush,
+                                     const char *reason)
+{
+   assert(entries_needed > 0);
+
+   if (entries_needed + skid_entries > GPFIFO_QUEUE_SIZE) {
+      return vk_errorf(log_obj, VK_ERROR_DEVICE_LOST,
+                       "nvkmd-switch: GPFIFO reservation too large while %s "
+                       "(need=%u, skid=%u, queue=%u)", reason,
+                       entries_needed, skid_entries, GPFIFO_QUEUE_SIZE);
+   }
+
+   if (ctx->gpu_channel.num_entries + entries_needed + skid_entries <=
+       GPFIFO_QUEUE_SIZE)
+      return VK_SUCCESS;
+
+   if (!allow_flush) {
+      return vk_errorf(log_obj, VK_ERROR_DEVICE_LOST,
+                       "nvkmd-switch: GPFIFO skid exhausted while %s "
+                       "(entries=%u, need=%u, skid=%u, queue=%u)", reason,
+                       ctx->gpu_channel.num_entries, entries_needed,
+                       skid_entries, GPFIFO_QUEUE_SIZE);
+   }
+
+   VkResult result =
+      nvkmd_switch_ctx_intermediate_kickoff(ctx, log_obj, reason);
+   if (result != VK_SUCCESS)
+      return result;
+
+   if (ctx->gpu_channel.num_entries + entries_needed + skid_entries >
+       GPFIFO_QUEUE_SIZE) {
+      return vk_errorf(log_obj, VK_ERROR_DEVICE_LOST,
+                       "nvkmd-switch: GPFIFO still full after kickoff while %s "
+                       "(entries=%u, need=%u, skid=%u, queue=%u)", reason,
+                       ctx->gpu_channel.num_entries, entries_needed,
+                       skid_entries, GPFIFO_QUEUE_SIZE);
+   }
+
+   return VK_SUCCESS;
+}
+
+/* Append a GPFIFO entry into libnx's userspace queue-control memory.  The
+ * caller tells us whether a pre-append kickoff is legal and how many entries
+ * must remain after the append.  This mirrors the public deko3d queue shape:
+ * accumulate entries in control memory, keep skid space for mandatory tail
+ * commands, and only kick when queue pressure makes that safe and necessary.
  */
 static VkResult
 nvkmd_switch_ctx_append_entry(struct nvkmd_switch_ctx *ctx,
                               struct vk_object_base *log_obj,
-                              uint64_t addr, uint32_t num_cmds, uint32_t flags)
+                              uint64_t addr, uint32_t num_cmds,
+                              uint32_t flags, bool allow_flush,
+                              uint32_t skid_entries,
+                              const char *reason)
 {
+   VkResult result =
+      nvkmd_switch_ctx_ensure_gpfifo_space(ctx, log_obj, 1, skid_entries,
+                                           allow_flush, reason);
+   if (result != VK_SUCCESS)
+      return result;
+
    Result rc = nvGpuChannelAppendEntry(&ctx->gpu_channel, addr, num_cmds,
                                        flags, 0);
    if (R_SUCCEEDED(rc))
       return VK_SUCCESS;
 
-   /* Ring full: submit what is already queued to drain it, then retry. */
-   Result kick_rc = nvGpuChannelKickoff(&ctx->gpu_channel);
-   if (R_FAILED(kick_rc)) {
+   if (!allow_flush) {
       return vk_errorf(log_obj, VK_ERROR_DEVICE_LOST,
-                       "nvkmd-switch: intermediate kickoff failed: 0x%x "
-                       "(append rc=0x%x)", kick_rc, rc);
+                       "nvkmd-switch: GPFIFO append failed while %s: 0x%x",
+                       reason, rc);
    }
+
+   result = nvkmd_switch_ctx_intermediate_kickoff(ctx, log_obj, reason);
+   if (result != VK_SUCCESS)
+      return result;
+
+   result =
+      nvkmd_switch_ctx_ensure_gpfifo_space(ctx, log_obj, 1, skid_entries,
+                                           false, reason);
+   if (result != VK_SUCCESS)
+      return result;
 
    rc = nvGpuChannelAppendEntry(&ctx->gpu_channel, addr, num_cmds, flags, 0);
    if (R_FAILED(rc)) {
       return vk_errorf(log_obj, VK_ERROR_DEVICE_LOST,
-                       "nvkmd-switch: GPFIFO append failed after drain: 0x%x",
-                       rc);
+                       "nvkmd-switch: GPFIFO append failed after kickoff "
+                       "while %s: 0x%x", reason, rc);
    }
 
    return VK_SUCCESS;
+}
+
+static VkResult
+nvkmd_switch_ctx_emit_prefetch_invalidate(struct nvkmd_switch_ctx *ctx,
+                                          struct vk_object_base *log_obj,
+                                          uint32_t skid_entries)
+{
+   if (!nvkmd_switch_prefetch_invalidate_enabled() ||
+       ctx->prefetch_invalidate_emitted ||
+       ctx->prefetch_invalidate_num_cmds == 0)
+      return VK_SUCCESS;
+
+   VkResult result =
+      nvkmd_switch_ctx_append_entry(ctx, log_obj,
+                                    ctx->builtin_cmdbuf_addr +
+                                    4ull * ctx->prefetch_invalidate_offset_words,
+                                    ctx->prefetch_invalidate_num_cmds,
+                                    GPFIFO_ENTRY_NOT_MAIN |
+                                    GPFIFO_ENTRY_NO_PREFETCH,
+                                    false, skid_entries,
+                                    "emitting prefetch invalidate");
+   if (result != VK_SUCCESS)
+      return result;
+
+   ctx->prefetch_invalidate_emitted = true;
+   return VK_SUCCESS;
+}
+
+static VkResult
+nvkmd_switch_ctx_append_exec_entry(struct nvkmd_switch_ctx *ctx,
+                                   struct vk_object_base *log_obj,
+                                   uint64_t addr, uint32_t num_cmds,
+                                   uint32_t flags, bool allow_flush,
+                                   uint32_t reserve_after_exec)
+{
+   const bool emit_prefetch =
+      nvkmd_switch_prefetch_invalidate_enabled() &&
+      !ctx->prefetch_invalidate_emitted &&
+      ctx->prefetch_invalidate_num_cmds > 0;
+   const uint32_t entries_needed = 1 + (emit_prefetch ? 1 : 0);
+   const uint32_t tail_skid =
+      NVKMD_SWITCH_GPFIFO_FINAL_SKID_ENTRIES + reserve_after_exec;
+
+   VkResult result =
+      nvkmd_switch_ctx_ensure_gpfifo_space(ctx, log_obj, entries_needed,
+                                           tail_skid, allow_flush,
+                                           "appending exec entry");
+   if (result != VK_SUCCESS)
+      return result;
+
+   result =
+      nvkmd_switch_ctx_emit_prefetch_invalidate(ctx, log_obj,
+                                                tail_skid + 1);
+   if (result != VK_SUCCESS)
+      return result;
+
+   return nvkmd_switch_ctx_append_entry(ctx, log_obj, addr, num_cmds, flags,
+                                        false, tail_skid,
+                                        "appending exec entry");
 }
 
 static VkResult
@@ -573,13 +821,12 @@ nvkmd_switch_ctx_emit_pending_waits(struct nvkmd_switch_ctx *ctx,
                                        ctx, ctx->pending_wait_slice),
                                     ctx->pending_wait_words,
                                     GPFIFO_ENTRY_NOT_MAIN |
-                                    GPFIFO_ENTRY_NO_PREFETCH);
+                                    GPFIFO_ENTRY_NO_PREFETCH,
+                                    true,
+                                    NVKMD_SWITCH_GPFIFO_FINAL_SKID_ENTRIES,
+                                    "emitting native wait packet");
    if (result != VK_SUCCESS)
       return result;
-
-   nvkmd_switch_stats.wait_entries++;
-   nvkmd_switch_stats.wait_dwords += ctx->pending_wait_words;
-   nvkmd_switch_stats_maybe_log();
 
    ctx->pending_wait_emitted = true;
    ctx->pending_execs = true;
@@ -666,7 +913,9 @@ nvkmd_switch_ctx_wait_last_fence(struct nvkmd_switch_ctx *ctx,
 
 static VkResult
 nvkmd_switch_ctx_kickoff(struct nvkmd_switch_ctx *ctx,
-                         struct vk_object_base *log_obj)
+                         struct vk_object_base *log_obj,
+                         const struct nvkmd_switch_signal_payload *payloads,
+                         uint32_t payload_count)
 {
    VkResult result = nvkmd_switch_ctx_emit_pending_waits(ctx, log_obj);
    if (result != VK_SUCCESS)
@@ -678,12 +927,12 @@ nvkmd_switch_ctx_kickoff(struct nvkmd_switch_ctx *ctx,
    /* GPU L2 cache flush after rendering commands, before the fence: ensures
     * GPU writes are in main RAM when the syncpoint fires.  Push data entries
     * were already appended by nvkmd_switch_ctx_exec().
-    * Order in GPFIFO: [push data...] [flush] [fence increment]
+    * Order in GPFIFO: [push data...] [flush] [fence increment].
     *
-    * Both appends may drain the channel with an intermediate kickoff if
-    * libnx's entry ring filled up during exec.  IncrFence is deliberately
-    * deferred until after every append so an intermediate kickoff can never
-    * land between the fence-value bookkeeping and the fence cmdlist submit.
+    * We keep enough GPFIFO skid space for this tail while appending execs.
+    * IncrFence is deliberately deferred until after every tail entry is
+    * appended, so even a safe pre-tail kickoff can never land between fence
+    * bookkeeping and the fence cmdlist.
     */
    const bool append_flush =
       ctx->flush_num_cmds > 0 && !nvkmd_switch_skip_post_fence_flush();
@@ -693,27 +942,53 @@ nvkmd_switch_ctx_kickoff(struct nvkmd_switch_ctx *ctx,
                                              4ull * (ctx->static_cmd_offset_words +
                                                      ctx->fence_num_cmds),
                                              ctx->flush_num_cmds,
-                                             GPFIFO_ENTRY_NOT_MAIN);
+                                             GPFIFO_ENTRY_NOT_MAIN,
+                                             true, 1,
+                                             "appending post-submit flush");
       if (result != VK_SUCCESS)
          return result;
-      nvkmd_switch_stats.flush_appends++;
    }
 
-   result = nvkmd_switch_ctx_append_entry(ctx, log_obj,
-                                          ctx->builtin_cmdbuf_addr +
-                                          4ull * ctx->static_cmd_offset_words,
-                                          ctx->fence_num_cmds,
-                                          GPFIFO_ENTRY_NOT_MAIN |
-                                          GPFIFO_ENTRY_NO_PREFETCH);
-   if (result != VK_SUCCESS)
-      return result;
+   if (payload_count > 0) {
+      uint32_t slice;
+      result = nvkmd_switch_ctx_reserve_signal_slice(ctx, log_obj, &slice);
+      if (result != VK_SUCCESS)
+         return result;
+
+      uint32_t *slice_cpu = nvkmd_switch_ctx_signal_slice_cpu(ctx, slice);
+      const uint32_t signal_words =
+         nvkmd_switch_generate_semaphore_release_cmdlist(
+            slice_cpu,
+            nvGpuChannelGetSyncpointId(&ctx->gpu_channel),
+            payloads, payload_count);
+      assert(signal_words <= NVKMD_SWITCH_SIGNAL_SLICE_WORDS);
+      armDCacheFlush(slice_cpu, signal_words * sizeof(uint32_t));
+
+      result = nvkmd_switch_ctx_append_entry(ctx, log_obj,
+                                             nvkmd_switch_ctx_signal_slice_addr(
+                                                ctx, slice),
+                                             signal_words,
+                                             GPFIFO_ENTRY_NOT_MAIN |
+                                             GPFIFO_ENTRY_NO_PREFETCH,
+                                             true, 0,
+                                             "appending fence/payload signal");
+      if (result != VK_SUCCESS)
+         return result;
+   } else {
+      result = nvkmd_switch_ctx_append_entry(ctx, log_obj,
+                                             ctx->builtin_cmdbuf_addr +
+                                             4ull * ctx->static_cmd_offset_words,
+                                             ctx->fence_num_cmds,
+                                             GPFIFO_ENTRY_NOT_MAIN |
+                                             GPFIFO_ENTRY_NO_PREFETCH,
+                                             true, 0,
+                                             "appending fence signal");
+      if (result != VK_SUCCESS)
+         return result;
+   }
 
    nvGpuChannelIncrFence(&ctx->gpu_channel);
    nvGpuChannelIncrFence(&ctx->gpu_channel);
-
-   nvkmd_switch_stats.kickoffs++;
-   nvkmd_switch_stats.fence_dwords += ctx->fence_num_cmds;
-   nvkmd_switch_stats_maybe_log();
 
    NVKMD_DBG("[nvkmd-dbg] kickoff: entries=%u, "
            "builtin_cmdbuf_addr=0x%" PRIx64 ", "
@@ -747,6 +1022,7 @@ nvkmd_switch_ctx_kickoff(struct nvkmd_switch_ctx *ctx,
 
    nvGpuChannelGetFence(&ctx->gpu_channel, &ctx->last_fence);
    ctx->has_last_fence = (int32_t)ctx->last_fence.id >= 0;
+   ctx->prefetch_invalidate_emitted = false;
 
    if (ctx->pending_wait_slice >= 0) {
       if (ctx->has_last_fence)
@@ -758,6 +1034,16 @@ nvkmd_switch_ctx_kickoff(struct nvkmd_switch_ctx *ctx,
       ctx->pending_wait_slice = -1;
       ctx->pending_wait_words = 0;
       ctx->pending_wait_emitted = false;
+   }
+
+   if (ctx->pending_signal_slice >= 0) {
+      if (ctx->has_last_fence)
+         ctx->signal_slice_fences[ctx->pending_signal_slice] = ctx->last_fence;
+      else
+         nvkmd_switch_reset_nvfence(
+            &ctx->signal_slice_fences[ctx->pending_signal_slice]);
+
+      ctx->pending_signal_slice = -1;
    }
 
    ctx->pending_execs = false;
@@ -899,6 +1185,8 @@ nvkmd_switch_ctx_exec(struct nvkmd_ctx *_ctx,
    if (result != VK_SUCCESS)
       return result;
 
+   bool continuation_pending = false;
+
    for (uint32_t i = 0; i < exec_count; i++) {
       if ((execs[i].addr & 3) != 0 || (execs[i].size_B & 3) != 0) {
          return vk_errorf(log_obj, VK_ERROR_INITIALIZATION_FAILED,
@@ -917,18 +1205,28 @@ nvkmd_switch_ctx_exec(struct nvkmd_ctx *_ctx,
       if (execs[i].no_prefetch)
          flags |= GPFIFO_ENTRY_NO_PREFETCH;
 
-      result = nvkmd_switch_ctx_append_entry(ctx, log_obj,
-                                             execs[i].addr,
-                                             execs[i].size_B / 4,
-                                             flags);
+      if (execs[i].incomplete && i + 1 == exec_count) {
+         return vk_errorf(log_obj, VK_ERROR_DEVICE_LOST,
+                          "nvkmd-switch: incomplete push buffer without "
+                          "continuation");
+      }
+
+      /* An incomplete method may span two adjacent GPFIFO entries.  Once the
+       * first half is appended, we must not kickoff until at least the next
+       * entry is also queued.  Reserve that continuation entry up front; if
+       * the ring is tight, kick before appending the incomplete entry. */
+      result = nvkmd_switch_ctx_append_exec_entry(ctx, log_obj,
+                                                  execs[i].addr,
+                                                  execs[i].size_B / 4,
+                                                  flags,
+                                                  !continuation_pending,
+                                                  execs[i].incomplete ? 1 : 0);
       if (result != VK_SUCCESS)
          return result;
-      nvkmd_switch_stats.exec_entries++;
-      nvkmd_switch_stats.exec_dwords += execs[i].size_B / 4;
+
+      continuation_pending = execs[i].incomplete;
       ctx->pending_execs = true;
    }
-
-   nvkmd_switch_stats_maybe_log();
 
    return VK_SUCCESS;
 }
@@ -956,9 +1254,38 @@ nvkmd_switch_ctx_signal(struct nvkmd_ctx *_ctx,
                        "nvkmd-switch: missing vk_device for context signal");
    }
 
-   VkResult result = nvkmd_switch_ctx_kickoff(ctx, log_obj);
+   const uint32_t max_payloads =
+      ctx->fence_num_cmds < NVKMD_SWITCH_SIGNAL_SLICE_WORDS ?
+      (NVKMD_SWITCH_SIGNAL_SLICE_WORDS - ctx->fence_num_cmds) /
+         NVKMD_SWITCH_SIGNAL_CMD_WORDS_PER_PAYLOAD : 0;
+   STACK_ARRAY(struct nvkmd_switch_signal_payload, payloads,
+               MIN2(signal_count, max_payloads));
+   uint32_t payload_count = 0;
+   const bool use_payloads = nvkmd_switch_signal_payload_enabled();
+
+   if (use_payloads &&
+       ctx->uses_gpu_channel && ctx->pending_execs && max_payloads > 0) {
+      for (uint32_t i = 0; i < signal_count && payload_count < max_payloads;
+           i++) {
+         struct vk_sync *sync = signals[i].sync;
+
+         if (sync == NULL || !nvkmd_switch_sync_is_nvfence(sync->type))
+            continue;
+
+         struct nvkmd_switch_signal_payload *payload =
+            &payloads[payload_count];
+         if (nvkmd_switch_sync_prepare_payload_signal(sync, &payload->addr,
+                                                      &payload->value)) {
+            payload->sync = sync;
+            payload_count++;
+         }
+      }
+   }
+
+   VkResult result =
+      nvkmd_switch_ctx_kickoff(ctx, log_obj, payloads, payload_count);
    if (result != VK_SUCCESS)
-      return result;
+      goto done;
 
    /* Attach the just-kicked-off fence to every native binary signal. That
     * makes downstream CPU waits (vkWaitForFences) and WSI present handoff
@@ -970,12 +1297,30 @@ nvkmd_switch_ctx_signal(struct nvkmd_ctx *_ctx,
    if (ctx->has_last_fence) {
       for (uint32_t i = 0; i < signal_count; i++) {
          struct vk_sync *sync = signals[i].sync;
-         if (sync != NULL && nvkmd_switch_sync_is_nvfence(sync->type))
+         if (sync == NULL || !nvkmd_switch_sync_is_nvfence(sync->type))
+            continue;
+
+         bool imported_payload = false;
+         for (uint32_t j = 0; j < payload_count; j++) {
+            if (payloads[j].sync == sync) {
+               nvkmd_switch_sync_import_nvfence_payload(sync,
+                                                        &ctx->last_fence,
+                                                        payloads[j].value);
+               imported_payload = true;
+               break;
+            }
+         }
+
+         if (!imported_payload)
             nvkmd_switch_sync_import_nvfence(sync, &ctx->last_fence);
       }
    }
 
-   return vk_sync_signal_many(device, signal_count, signals);
+   result = vk_sync_signal_many(device, signal_count, signals);
+
+done:
+   STACK_ARRAY_FINISH(payloads);
+   return result;
 }
 
 static VkResult
@@ -987,7 +1332,7 @@ nvkmd_switch_ctx_flush(struct nvkmd_ctx *_ctx,
    /* Flush is asynchronous: kick the GPU off and return. Any caller that
     * needs to observe completion must either wait on a signaled sync or
     * call ctx_sync() explicitly. */
-   return nvkmd_switch_ctx_kickoff(ctx, log_obj);
+   return nvkmd_switch_ctx_kickoff(ctx, log_obj, NULL, 0);
 }
 
 static VkResult
@@ -999,7 +1344,7 @@ nvkmd_switch_ctx_sync(struct nvkmd_ctx *_ctx,
    /* Sync is the vkDeviceWaitIdle primitive: kick off, then block on the
     * resulting fence. This is the only remaining intentional CPU stall in
     * the submit path. */
-   VkResult result = nvkmd_switch_ctx_kickoff(ctx, log_obj);
+   VkResult result = nvkmd_switch_ctx_kickoff(ctx, log_obj, NULL, 0);
    if (result != VK_SUCCESS)
       return result;
 
@@ -1618,9 +1963,20 @@ nvkmd_switch_dev_create_ctx(struct nvkmd_dev *_dev,
       }
 
       uint32_t *cmds = (uint32_t *)ctx->builtin_cmdbuf_cpu;
-      ctx->static_cmd_offset_words =
+      const uint32_t wait_slice_words =
          NVKMD_SWITCH_WAIT_SLICE_COUNT * NVKMD_SWITCH_WAIT_SLICE_WORDS;
-      cmds += ctx->static_cmd_offset_words;
+      const uint32_t signal_slice_words =
+         NVKMD_SWITCH_SIGNAL_SLICE_COUNT * NVKMD_SWITCH_SIGNAL_SLICE_WORDS;
+      ctx->signal_slice_offset_words = wait_slice_words;
+      cmds += wait_slice_words + signal_slice_words;
+      ctx->prefetch_invalidate_offset_words =
+         wait_slice_words + signal_slice_words;
+      ctx->prefetch_invalidate_num_cmds =
+         nvkmd_switch_generate_prefetch_invalidate_cmdlist(cmds);
+      cmds += ctx->prefetch_invalidate_num_cmds;
+      ctx->static_cmd_offset_words =
+         wait_slice_words + signal_slice_words +
+         ctx->prefetch_invalidate_num_cmds;
       ctx->fence_num_cmds =
          nvkmd_switch_generate_fence_cmdlist(cmds,
                                              nvGpuChannelGetSyncpointId(
@@ -1643,6 +1999,10 @@ nvkmd_switch_dev_create_ctx(struct nvkmd_dev *_dev,
    ctx->next_wait_slice = 0;
    for (uint32_t i = 0; i < NVKMD_SWITCH_WAIT_SLICE_COUNT; i++)
       nvkmd_switch_reset_nvfence(&ctx->wait_slice_fences[i]);
+   ctx->pending_signal_slice = -1;
+   ctx->next_signal_slice = 0;
+   for (uint32_t i = 0; i < NVKMD_SWITCH_SIGNAL_SLICE_COUNT; i++)
+      nvkmd_switch_reset_nvfence(&ctx->signal_slice_fences[i]);
 
    *ctx_out = &ctx->base;
    return VK_SUCCESS;

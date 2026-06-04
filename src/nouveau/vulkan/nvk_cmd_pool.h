@@ -16,6 +16,7 @@ struct nvkmd_mem;
 /* Recyclable command buffer BO, used for both push buffers and upload */
 struct nvk_cmd_mem {
    struct nvkmd_mem *mem;
+   uint32_t dirty_end_B;
 
    /** Link in nvk_cmd_pool::free_bos or nvk_cmd_buffer::bos */
    struct list_head link;

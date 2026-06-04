@@ -61,6 +61,14 @@ VkResult nvk_mem_stream_flush(struct nvk_device *dev,
                               struct nvkmd_ctx *ctx,
                               uint64_t *time_point_out);
 
+/* Flush CPU writes to stream memory without signaling the stream timeline.
+ *
+ * This is useful when the caller has appended stream-backed push buffers to a
+ * context but wants a later, separate signal to own the submission lifetime.
+ */
+void nvk_mem_stream_flush_cpu(struct nvk_device *dev,
+                              struct nvk_mem_stream *stream);
+
 /* An alloc, memcpy(), push, and flush, all wrapped up into one */
 VkResult nvk_mem_stream_push(struct nvk_device *dev,
                              struct nvk_mem_stream *stream,

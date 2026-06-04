@@ -205,7 +205,7 @@ if host_machine.system() == 'horizon'
     _libnil_format_table,
     _libnouveau_mme,
     libnouveau_ws,
-    _libnvidia_headers,
+    libnvidia_headers,
     _libnir,
     libcompiler,
     _libcompiler_c,

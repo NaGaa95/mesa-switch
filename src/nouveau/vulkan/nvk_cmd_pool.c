@@ -153,6 +153,7 @@ nvk_cmd_pool_alloc_mem(struct nvk_cmd_pool *pool, bool force_gart,
       memset(mem->mem->map, 0xF1, mem->mem->size_B);
    }
 
+   mem->dirty_end_B = 0;
    *mem_out = mem;
    return VK_SUCCESS;
 }

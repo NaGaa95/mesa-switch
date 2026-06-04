@@ -176,6 +176,27 @@ nvk_AllocateMemory(VkDevice device,
 
       mem->dedicated_image = image;
 
+#ifdef __SWITCH__
+      /* Switch (GM20B): no DRM format modifiers and no discrete VRAM.  Any
+       * dedicated block-linear image is bound with NIL's pte_kind/tile_mode
+       * so the GPU MMU is programmed correctly; WSI scanout images carry the
+       * uncompressed pte_kind (can_compress is false for them).  When the
+       * image is compressible, NIL's compressed_pte_kind selects the
+       * compressed mapping kind and lets nvgpu track the backing compression
+       * metadata.  struct vk_image also has no drm_format_mod field on this
+       * platform.
+       */
+      if (image->vk.tiling == VK_IMAGE_TILING_OPTIMAL &&
+          image->plane_count == 1 &&
+          image->planes[0].nil.pte_kind != 0) {
+         alignment = MAX2(alignment, image->planes[0].nil.align_B);
+         tile_mode = image->planes[0].nil.tile_mode;
+         if (image->can_compress && not_shared)
+            pte_kind = image->planes[0].nil.compressed_pte_kind;
+         else
+            pte_kind = image->planes[0].nil.pte_kind;
+      }
+#else
       if (image->vk.tiling == VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT &&
           image->vk.drm_format_mod != DRM_FORMAT_MOD_LINEAR) {
          /* This image might be shared with GL so we need to set the BO flags
@@ -204,20 +225,6 @@ nvk_AllocateMemory(VkDevice device,
             alignment = (1ULL << 21);
          else
             alignment = (1ULL << 16);
-      }
-#ifdef __SWITCH__
-      /* On Switch, dedicated optimal tiled images need the backing NvMap to be
-       * created with the same pte_kind/tile_mode that NIL selected for the
-       * image.  This covers WSI scanout and explicit dedicated app image
-       * allocations.  The DRM modifier path above doesn't fire on Switch, and
-       * can_compress targets desktop discrete VRAM, so we need a separate path.
-       */
-      else if (image->vk.tiling == VK_IMAGE_TILING_OPTIMAL &&
-               image->plane_count == 1 &&
-               image->planes[0].nil.pte_kind != 0) {
-         alignment = MAX2(alignment, image->planes[0].nil.align_B);
-         pte_kind = image->planes[0].nil.pte_kind;
-         tile_mode = image->planes[0].nil.tile_mode;
       }
 #endif
    }

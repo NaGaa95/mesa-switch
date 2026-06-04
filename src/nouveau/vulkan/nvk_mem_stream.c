@@ -15,6 +15,9 @@ struct nvk_mem_stream_chunk {
 
    /** Time point at which point this BO will be idle */
    uint64_t idle_time_point;
+
+   /** Bytes written by the CPU since the last cache clean */
+   uint32_t flush_end_B;
 };
 
 static const struct vk_sync_type *
@@ -184,19 +187,61 @@ nvk_mem_stream_alloc(struct nvk_device *dev,
       stream->chunk_alloc_B = 0;
    }
 
+   const uint32_t alloc_start_B = stream->chunk_alloc_B;
+   const uint32_t alloc_end_B = alloc_start_B + size_B;
+
    /* Mark the chunk as not being idle until next_time_point */
    assert(stream->chunk->idle_time_point <= stream->next_time_point);
    stream->chunk->idle_time_point = stream->next_time_point;
+   stream->chunk->flush_end_B = MAX2(stream->chunk->flush_end_B, alloc_end_B);
 
    /* The stream needs to be flushed */
    stream->needs_flush = true;
 
-   assert(stream->chunk_alloc_B + size_B <= NVK_MEM_STREAM_MAX_ALLOC_SIZE);
-   *addr_out = stream->chunk->mem->va->addr + stream->chunk_alloc_B;
-   *map_out = stream->chunk->mem->map + stream->chunk_alloc_B;
-   stream->chunk_alloc_B += size_B;
+   assert(alloc_end_B <= NVK_MEM_STREAM_MAX_ALLOC_SIZE);
+   *addr_out = stream->chunk->mem->va->addr + alloc_start_B;
+   *map_out = stream->chunk->mem->map + alloc_start_B;
+   stream->chunk_alloc_B = alloc_end_B;
 
    return VK_SUCCESS;
+}
+
+static void
+nvk_mem_stream_flush_chunk(struct nvk_device *dev,
+                           struct nvk_mem_stream_chunk *chunk)
+{
+   if (chunk->flush_end_B == 0)
+      return;
+
+   const uint32_t atom_size_B =
+      dev->nvkmd->pdev->dev_info.nc_atom_size_B;
+   const uint64_t flush_size_B =
+      MIN2(align(chunk->flush_end_B, atom_size_B),
+           NVK_MEM_STREAM_MAX_ALLOC_SIZE);
+
+   nvkmd_mem_sync_map_to_gpu(chunk->mem, 0, flush_size_B);
+   chunk->flush_end_B = 0;
+}
+
+void
+nvk_mem_stream_flush_cpu(struct nvk_device *dev,
+                         struct nvk_mem_stream *stream)
+{
+   if (stream->chunk != NULL) {
+      struct nvk_mem_stream_chunk *chunk = stream->chunk;
+      assert(chunk->idle_time_point <= stream->next_time_point);
+      if (chunk->idle_time_point == stream->next_time_point)
+         nvk_mem_stream_flush_chunk(dev, chunk);
+   }
+
+   list_for_each_entry_rev(struct nvk_mem_stream_chunk, chunk,
+                           &stream->recycle, link) {
+      assert(chunk->idle_time_point <= stream->next_time_point);
+      if (chunk->idle_time_point < stream->next_time_point)
+         break;
+
+      nvk_mem_stream_flush_chunk(dev, chunk);
+   }
 }
 
 VkResult
@@ -214,28 +259,8 @@ nvk_mem_stream_flush(struct nvk_device *dev,
    if (stream->next_time_point == UINT64_MAX)
       abort();
 
-   /* Flush any chunks with idle_time_point == next_time_point, including
-    * those on the recycle list.  We can assume that anything with
-    * idle_time_point < next_time_point is already flushed by a previous call
-    * to nvk_mem_stream_flush().
-    */
-   if (stream->chunk != NULL) {
-      struct nvk_mem_stream_chunk *chunk = stream->chunk;
-      assert(chunk->idle_time_point <= stream->next_time_point);
-      if (chunk->idle_time_point == stream->next_time_point) {
-         nvkmd_mem_sync_map_to_gpu(stream->chunk->mem, 0,
-                                   NVK_MEM_STREAM_MAX_ALLOC_SIZE);
-      }
-   }
-
-   list_for_each_entry_rev(struct nvk_mem_stream_chunk, chunk,
-                           &stream->recycle, link) {
-      assert(chunk->idle_time_point <= stream->next_time_point);
-      if (chunk->idle_time_point < stream->next_time_point)
-         break;
-
-      nvkmd_mem_sync_map_to_gpu(chunk->mem, 0, NVK_MEM_STREAM_MAX_ALLOC_SIZE);
-   }
+   /* Flush CPU writes before signaling the stream lifetime. */
+   nvk_mem_stream_flush_cpu(dev, stream);
 
    const struct vk_sync_signal signal = {
       .sync = stream->sync,

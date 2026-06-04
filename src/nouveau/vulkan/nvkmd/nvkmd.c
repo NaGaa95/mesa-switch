@@ -474,6 +474,13 @@ nvkmd_mem_sync_to_gpu(struct nvkmd_mem *mem, bool client_map,
    assert(util_is_aligned(offset_B, atom_size_B));
    assert(util_is_aligned(range_B, atom_size_B));
 
+#ifdef __SWITCH__
+   if (mem->ops->sync_to_gpu != NULL) {
+      mem->ops->sync_to_gpu(mem, offset_B, range_B);
+      return;
+   }
+#endif
+
    if (util_has_cache_ops()) {
       void *map = client_map ? mem->client_map : mem->map;
       util_flush_range(map + offset_B, range_B);
@@ -492,6 +499,13 @@ nvkmd_mem_sync_from_gpu(struct nvkmd_mem *mem, bool client_map,
    const uint32_t atom_size_B = mem->dev->pdev->dev_info.nc_atom_size_B;
    assert(util_is_aligned(offset_B, atom_size_B));
    assert(util_is_aligned(range_B, atom_size_B));
+
+#ifdef __SWITCH__
+   if (mem->ops->sync_from_gpu != NULL) {
+      mem->ops->sync_from_gpu(mem, offset_B, range_B);
+      return;
+   }
+#endif
 
    if (util_has_cache_ops()) {
       void *map = client_map ? mem->client_map : mem->map;

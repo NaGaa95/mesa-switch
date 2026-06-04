@@ -32,6 +32,17 @@ macro_rules! set_enum {
     };
 }
 
+fn nvb097_sector_promotion(
+    dev: &nil_rs_bindings::nv_device_info,
+    is_tiled: bool,
+) -> u32 {
+    if is_tiled && dev.type_ == NV_DEVICE_TYPE_SOC {
+        clb097::TEXHEAD_BL_SECTOR_PROMOTION_PROMOTE_TO_2_V
+    } else {
+        clb097::TEXHEAD_BL_SECTOR_PROMOTION_NO_PROMOTION
+    }
+}
+
 trait SetUFixed {
     fn set_ufixed(&mut self, range: Range<usize>, val: f32);
 }
@@ -521,7 +532,10 @@ fn nvb097_fill_image_view_desc(
 
     th.set_field(clb097::TEXHEAD_BL_S_R_G_B_CONVERSION, view.format.is_srgb());
 
-    set_enum!(th, clb097, TEXHEAD_BL_SECTOR_PROMOTION, NO_PROMOTION);
+    th.set_field(
+        clb097::TEXHEAD_BL_SECTOR_PROMOTION,
+        nvb097_sector_promotion(dev, tiling.is_tiled()),
+    );
     set_enum!(th, clb097, TEXHEAD_BL_BORDER_SIZE, BORDER_SAMPLER_COLOR);
 
     // In the sampler, the two options for FLOAT_COORD_NORMALIZATION are:

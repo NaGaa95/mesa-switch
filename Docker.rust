@@ -12,6 +12,19 @@ RUN apt-get update && \
 # Pre-install all Python packages
 RUN pip3 install --break-system-packages meson mako
 
+# Build and install the in-tree libnx over the base image copy.  This keeps
+# fresh containers (including downstream app builds that reuse this image) on
+# the same libnx ABI/implementation as the Mesa Switch port.
+COPY libnx /tmp/libnx
+RUN cd /tmp/libnx && \
+    DEVKITPRO=/opt/devkitpro make clean && \
+    DEVKITPRO=/opt/devkitpro make -j$(nproc) && \
+    DEVKITPRO=/opt/devkitpro make install && \
+    grep -q "nvioctlChannel_KickoffPbRetry" /opt/devkitpro/libnx/include/switch/nvidia/ioctl.h && \
+    /opt/devkitpro/devkitA64/bin/aarch64-none-elf-nm /opt/devkitpro/libnx/lib/libnx.a | \
+        grep -q "nvioctlChannel_KickoffPbRetry" && \
+    rm -rf /tmp/libnx
+
 # Build and install libdrm_nouveau
 COPY libdrm-nouveau /tmp/libdrm-nouveau
 RUN cd /tmp/libdrm-nouveau && \

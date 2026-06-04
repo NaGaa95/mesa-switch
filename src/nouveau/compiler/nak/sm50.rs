@@ -1769,7 +1769,12 @@ impl SM50Op for OpF2F {
             }
             SrcRef::Imm32(imm32) => {
                 e.set_opcode(0x38a8);
-                e.set_src_imm_i20(20..39, 56, *imm32);
+                // F2F converts a float, so its immediate is a float bit
+                // pattern and must use the f20 packer (top 20 bits of the
+                // f32), like OpF2I below. The i20 integer packer asserts a
+                // sign-extended 20-bit int, which panics for normal float
+                // immediates (and mis-encodes the rare ones that pass).
+                e.set_src_imm_f20(20..39, 56, *imm32);
                 assert!(src.is_unmodified());
             }
             SrcRef::CBuf(_) => {

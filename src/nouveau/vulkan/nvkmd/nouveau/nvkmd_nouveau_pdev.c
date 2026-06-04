@@ -14,7 +14,12 @@
 #include <fcntl.h>
 #include <string.h>
 #include <sys/stat.h>
+#ifndef __SWITCH__
+/* On Switch the complete libdrm stub already arrives via drm_is_nouveau.h ->
+ * util/libdrm.h above; also pulling portlibs' own <xf86drm.h> would redefine
+ * drmGetRenderDeviceNameFromFd and friends. */
 #include <xf86drm.h>
+#endif
 
 #include "clc697.h"
 

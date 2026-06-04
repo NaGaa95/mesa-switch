@@ -68,6 +68,13 @@ void nvkmd_switch_sync_import_nvfence(struct vk_sync *sync,
                                       const NvFence *fence);
 void nvkmd_switch_sync_import_nvmultifence(struct vk_sync *sync,
                                            const NvMultiFence *fence);
+void nvkmd_switch_sync_import_nvfence_payload(struct vk_sync *sync,
+                                              const NvFence *fence,
+                                              uint32_t payload_value);
+
+bool nvkmd_switch_sync_prepare_payload_signal(struct vk_sync *sync,
+                                              uint64_t *addr_out,
+                                              uint32_t *value_out);
 
 /* Whether the given sync type is the Switch nvfence binary sync. Lets
  * the ctx layer skip non-native sync objects (e.g. timeline wrappers,

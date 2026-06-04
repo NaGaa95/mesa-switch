@@ -43,6 +43,11 @@ nvk_push_dispatch_state_init(struct nvk_queue *queue, struct nv_push *p)
    if (pdev->info.cls_compute == MAXWELL_COMPUTE_A)
       P_IMMD(p, NVB0C0, SET_SELECT_MAXWELL_TEXTURE_HEADERS, V_TRUE);
 
+#ifdef HAVE_SWITCH_PLATFORM
+   /* Keep GM20B shader exception handling off for compute init. */
+   P_IMMD(p, NVA0C0, SET_SHADER_EXCEPTIONS, ENABLE_FALSE);
+#endif
+
    if (pdev->info.cls_compute < VOLTA_COMPUTE_A) {
       uint64_t shader_base_addr =
          nvk_heap_contiguous_base_address(&dev->shader_heap);
@@ -601,7 +606,12 @@ nvk_CmdDispatchIndirect(VkCommandBuffer commandBuffer,
       if (pdev->info.cls_compute >= HOPPER_COMPUTE_A) {
          P_IMMD(p, NVC86F, WFI, 0);
       } else {
+#ifdef HAVE_SWITCH_PLATFORM
+         nvk_cmd_buffer_switch_sync_host(cmd);
+         p = nvk_cmd_buffer_push(cmd, 5);
+#else
          __push_immd(p, SUBC_NV9097, NV906F_SET_REFERENCE, 0);
+#endif
       }
 
       P_1INC(p, NV9097, CALL_MME_MACRO(NVK_MME_DISPATCH_INDIRECT));

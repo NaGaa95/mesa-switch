@@ -125,11 +125,11 @@ disk_cache_get_function_identifier(void *ptr, blake3_hasher *ctx)
 }
 #elif defined(__SWITCH__)
 static inline bool
-disk_cache_get_function_identifier(void *ptr, struct mesa_sha1 *ctx)
+disk_cache_get_function_identifier(void *ptr, blake3_hasher *ctx)
 {
    (void)ptr;
    const char build_id[] = PACKAGE_VERSION MESA_GIT_SHA1;
-   _mesa_sha1_update(ctx, build_id, strlen(build_id));
+   _mesa_blake3_update(ctx, build_id, sizeof(build_id) - 1);
    return true;
 }
 #elif DETECT_OS_WINDOWS

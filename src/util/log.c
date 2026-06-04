@@ -30,10 +30,10 @@
 #include "util/log.h"
 #include "util/ralloc.h"
 #include "util/u_debug.h"
+#include "util/u_process.h"
 
 #if DETECT_OS_POSIX
 #include <syslog.h>
-#include "util/u_process.h"
 #endif
 
 #if DETECT_OS_ANDROID

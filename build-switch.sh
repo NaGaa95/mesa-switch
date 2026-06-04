@@ -57,6 +57,25 @@ cp /project/libdrm-nouveau/include/*.h /opt/devkitpro/portlibs/switch/include/ 2
 cp /project/src/nouveau/headers/nv_device_info.h /opt/devkitpro/portlibs/switch/include/ 2>/dev/null || true
 '
 
+# ── Step 1.65: Build and install the in-tree libnx ─────────────────────
+# Mesa links against libnx through the devkitPro prefix in switch_cross_file.txt.
+# Rebuild our checked-out libnx and install it over the container's stock copy
+# before Meson configures, so headers and libnx.a both contain local changes.
+echo "=== Building and installing local libnx ==="
+run '
+set -e
+export DEVKITPRO=/opt/devkitpro
+make -C /project/libnx clean
+make -C /project/libnx -j"$(nproc)"
+make -C /project/libnx install
+
+grep -q "nvioctlChannel_KickoffPbRetry" \
+    /opt/devkitpro/libnx/include/switch/nvidia/ioctl.h
+/opt/devkitpro/devkitA64/bin/aarch64-none-elf-nm \
+    /opt/devkitpro/libnx/lib/libnx.a | \
+    grep -q "nvioctlChannel_KickoffPbRetry"
+'
+
 # ── Step 1.7: Make clang resource dir discoverable by mesa_clc ─────────
 # mesa_clc looks for headers under <llvm_libdir>/clang/<major>/include
 # but Debian ships them under <llvm_libdir>/clang/<full_version>/include.
@@ -112,7 +131,7 @@ cd /project && meson setup builddir-switch --wipe \
     --cross-file switch_cross_file.txt \
     --buildtype=release \
     -Doptimization=1 \
-    -Db_lto=true \
+    -Db_lto=false \
     -Db_ndebug=true \
     -Dvulkan-drivers=nouveau \
     -Dgallium-drivers=nouveau \
@@ -146,7 +165,7 @@ ninja -C /project/builddir-switch \
     src/util/libxmlconfig.a \
     src/nouveau/compiler/libnak.a \
     src/nouveau/compiler/libnak_rs.a \
-    src/nouveau/nil/liblibnil.a \
+    src/nouveau/nil/libnil.a \
     src/nouveau/nil/liblibnil_format_table.a \
     src/nouveau/mme/libnouveau_mme.a \
     src/nouveau/winsys/libnouveau_ws.a \
