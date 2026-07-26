@@ -20,10 +20,6 @@
 #include "vk_pipeline_layout.h"
 #include "vk_synchronization.h"
 #include "util/compiler.h"
-#ifdef HAVE_SWITCH_PLATFORM
-#include "util/u_debug.h"
-#include <stdio.h>
-#endif
 
 #include "clb097.h"
 #include "clb197.h"
@@ -42,44 +38,6 @@
 
 static uint8_t
 nvk_cmd_buffer_subchannel_mask(struct nvk_cmd_buffer *cmd);
-
-#ifdef HAVE_SWITCH_PLATFORM
-#define NVK_NVB097_TILED_CACHE_INVALIDATE_TEXTURE_DATA 0x0f74
-
-static bool
-nvk_switch_file_toggle_enabled(const char *path)
-{
-   FILE *f = fopen(path, "r");
-   if (f == NULL)
-      return false;
-
-   fclose(f);
-   return true;
-}
-
-static bool
-nvk_switch_zcull_invalidate_enabled(void)
-{
-   static int enabled = -1;
-
-   if (enabled < 0) {
-      enabled =
-         debug_get_bool_option("NVK_SWITCH_ZCULL_INVALIDATE", false) ? 1 : 0;
-      if (!enabled &&
-          nvk_switch_file_toggle_enabled(
-             "sdmc:/nvk_switch_zcull_invalidate.enable"))
-         enabled = 1;
-   }
-
-   return enabled != 0;
-}
-#else
-static bool
-nvk_switch_zcull_invalidate_enabled(void)
-{
-   return true;
-}
-#endif
 
 static void
 nvk_descriptor_state_fini(struct nvk_cmd_buffer *cmd,
@@ -174,6 +132,9 @@ nvk_reset_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer,
 
    util_dynarray_clear(&cmd->pushes);
    util_dynarray_clear(&cmd->copy_memory_indirect_temps);
+#ifdef HAVE_SWITCH_PLATFORM
+   cmd->switch_mme_sync_pending = false;
+#endif
 
    memset(&cmd->state, 0, sizeof(cmd->state));
 }
@@ -271,8 +232,13 @@ nvk_cmd_buffer_flush_push_flags(struct nvk_cmd_buffer *cmd,
          if (cmd->pushes.size >= sizeof(struct nvk_cmd_push)) {
             struct nvk_cmd_push *last =
                util_dynarray_top_ptr(&cmd->pushes, struct nvk_cmd_push);
-            if (!last->no_prefetch &&
-                !push.no_prefetch &&
+            /* A SYNC/no-prefetch bit belongs to the beginning of a GPFIFO
+             * entry.  It is safe and correct to extend an existing
+             * SYNC entry with following contiguous commands: the combined
+             * entry still cannot be fetched early.  A new SYNC segment must
+             * remain a boundary and therefore may not be folded backward.
+             */
+            if (!push.no_prefetch &&
                 last->map != NULL &&
                 (char *)last->map + last->range == push.map &&
                 last->addr + last->range == push.addr) {
@@ -336,6 +302,11 @@ void
 nvk_cmd_buffer_push_indirect(struct nvk_cmd_buffer *cmd,
                              uint64_t addr, uint32_t range)
 {
+#ifdef HAVE_SWITCH_PLATFORM
+   if (range > 0)
+      nvk_cmd_buffer_switch_mme_consumer(cmd);
+#endif
+
    nvk_cmd_buffer_flush_push(cmd, true);
 
    struct nvk_cmd_push push = {
@@ -444,6 +415,27 @@ nvk_cmd_buffer_switch_report_semaphore(struct nvk_cmd_buffer *cmd,
    }
 }
 
+static void
+nvk_cmd_buffer_switch_defer_mme_sync(struct nvk_cmd_buffer *cmd)
+{
+   cmd->switch_mme_sync_pending = true;
+}
+
+static void
+nvk_cmd_buffer_switch_flush_pending_mme_sync(struct nvk_cmd_buffer *cmd)
+{
+   if (!cmd->switch_mme_sync_pending)
+      return;
+
+   nvk_cmd_buffer_switch_sync_host(cmd);
+}
+
+void
+nvk_cmd_buffer_switch_mme_consumer(struct nvk_cmd_buffer *cmd)
+{
+   nvk_cmd_buffer_switch_flush_pending_mme_sync(cmd);
+}
+
 void
 nvk_cmd_buffer_switch_sync_host(struct nvk_cmd_buffer *cmd)
 {
@@ -457,6 +449,8 @@ nvk_cmd_buffer_switch_sync_host(struct nvk_cmd_buffer *cmd)
    }
 
    *(uint32_t *)map = 0;
+
+   cmd->switch_mme_sync_pending = false;
 
    /* Use a semaphore release/acquire pair followed by a GPFIFO
     * sync/no-prefetch split.  This avoids the channel host-WFI from
@@ -584,6 +578,14 @@ nvk_EndCommandBuffer(VkCommandBuffer commandBuffer)
 {
    VK_FROM_HANDLE(nvk_cmd_buffer, cmd, commandBuffer);
 
+#ifdef HAVE_SWITCH_PLATFORM
+   /* A barrier at the end of one command buffer may synchronize a consumer
+    * in a later command buffer.  Keep that cross-buffer case conservative;
+    * the common in-buffer case is still deferred to its first real consumer.
+    */
+   nvk_cmd_buffer_switch_flush_pending_mme_sync(cmd);
+#endif
+
    nvk_cmd_buffer_flush_push(cmd, false);
 
    /* We only need to flush the memory objects we own because, if there are
@@ -606,6 +608,13 @@ nvk_CmdExecuteCommands(VkCommandBuffer commandBuffer,
    if (commandBufferCount == 0)
       return;
 
+#ifdef HAVE_SWITCH_PLATFORM
+   /* A secondary may begin with an indirect consumer.  Its recorded pushes
+    * cannot observe pending primary state, so close that boundary first.
+    */
+   nvk_cmd_buffer_switch_flush_pending_mme_sync(cmd);
+#endif
+
    nvk_cmd_buffer_flush_push(cmd, false);
 
    for (uint32_t i = 0; i < commandBufferCount; i++) {
@@ -625,6 +634,9 @@ nvk_CmdExecuteCommands(VkCommandBuffer commandBuffer,
        * do with it is reset it.  vkResetCommandPool() has similar language.
        */
       util_dynarray_append_dynarray(&cmd->pushes, &other->pushes);
+#ifdef HAVE_SWITCH_PLATFORM
+      assert(!other->switch_mme_sync_pending);
+#endif
 
       cmd->prev_subc = nvk_cmd_buffer_last_subchannel(other);
    }
@@ -646,7 +658,7 @@ nvk_CmdExecuteCommands(VkCommandBuffer commandBuffer,
     * after the secondary executes.  However, if we're doing any internal
     * dirty tracking, we may miss the fact that a secondary has messed with
     * GPU state if we don't invalidate all our internal tracking.
-    */
+   */
    nvk_cmd_invalidate_graphics_state(cmd);
    nvk_cmd_invalidate_compute_state(cmd);
 }
@@ -662,23 +674,75 @@ enum nvk_barrier {
    NVK_BARRIER_INVALIDATE_RASTER_CACHE    = 1 << 7,
    NVK_BARRIER_HOST_WFI_INVALIDATE_SYSMEM = 1 << 8,
    NVK_BARRIER_HOST_WFI_FLUSH_SYSMEM      = 1 << 9,
-   NVK_BARRIER_INVALIDATE_ZCULL           = 1 << 10,
-   NVK_BARRIER_TILED_CACHE                 = 1 << 11,
 };
 
-static bool
-nvk_image_barrier_invalidates_zcull(const VkImageMemoryBarrier2 *bar)
+#ifdef HAVE_SWITCH_PLATFORM
+#define NVK_SWITCH_MME_ACCESS_FLAGS \
+   (VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT | \
+    VK_ACCESS_2_TRANSFORM_FEEDBACK_COUNTER_READ_BIT_EXT | \
+    VK_ACCESS_2_CONDITIONAL_RENDERING_READ_BIT_EXT | \
+    VK_ACCESS_2_DESCRIPTOR_BUFFER_READ_BIT_EXT)
+
+enum nvk_switch_barrier_resource {
+   NVK_SWITCH_BARRIER_MEMORY,
+   NVK_SWITCH_BARRIER_BUFFER,
+   NVK_SWITCH_BARRIER_IMAGE,
+};
+
+/* Generic MEMORY_READ expands according to the destination stages.  That can
+ * legally produce buffer-only access bits for a generic memory barrier, but
+ * those bits are impossible for images and impossible for buffers lacking
+ * the corresponding usage.  Filter only those provably impossible cases.
+ */
+static VkAccessFlags2
+nvk_switch_filter_mme_dst_access(VkPipelineStageFlags2 stages,
+                                 VkAccessFlags2 access,
+                                 enum nvk_switch_barrier_resource resource,
+                                 VkBufferUsageFlags2KHR buffer_usage)
 {
-   if (!(bar->subresourceRange.aspectMask & VK_IMAGE_ASPECT_DEPTH_BIT))
-      return false;
+   stages = vk_expand_dst_stage_flags2(stages);
+   access = vk_filter_dst_access_flags2(stages, access);
 
-   if (bar->oldLayout != VK_IMAGE_LAYOUT_UNDEFINED &&
-       bar->oldLayout != VK_IMAGE_LAYOUT_PREINITIALIZED)
-      return false;
+   const VkAccessFlags2 requested = access & NVK_SWITCH_MME_ACCESS_FLAGS;
+   if (requested == 0)
+      return access;
 
-   VK_FROM_HANDLE(nvk_image, image, bar->image);
-   return image->zcull.nil.size_B > 0;
+   VkAccessFlags2 allowed = requested;
+   switch (resource) {
+   case NVK_SWITCH_BARRIER_MEMORY:
+      break;
+
+   case NVK_SWITCH_BARRIER_IMAGE:
+      allowed = 0;
+      break;
+
+   case NVK_SWITCH_BARRIER_BUFFER: {
+      VkAccessFlags2 usage_access = 0;
+
+      if (buffer_usage & VK_BUFFER_USAGE_2_INDIRECT_BUFFER_BIT_KHR)
+         usage_access |= VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT;
+
+      if (buffer_usage &
+          VK_BUFFER_USAGE_2_TRANSFORM_FEEDBACK_COUNTER_BUFFER_BIT_EXT)
+         usage_access |= VK_ACCESS_2_TRANSFORM_FEEDBACK_COUNTER_READ_BIT_EXT;
+
+      if (buffer_usage & VK_BUFFER_USAGE_2_CONDITIONAL_RENDERING_BIT_EXT)
+         usage_access |= VK_ACCESS_2_CONDITIONAL_RENDERING_READ_BIT_EXT;
+
+      if (buffer_usage &
+          (VK_BUFFER_USAGE_2_SAMPLER_DESCRIPTOR_BUFFER_BIT_EXT |
+           VK_BUFFER_USAGE_2_RESOURCE_DESCRIPTOR_BUFFER_BIT_EXT |
+           VK_BUFFER_USAGE_2_PUSH_DESCRIPTORS_DESCRIPTOR_BUFFER_BIT_EXT))
+         usage_access |= VK_ACCESS_2_DESCRIPTOR_BUFFER_READ_BIT_EXT;
+
+      allowed &= usage_access;
+      break;
+   }
+   }
+
+   return (access & ~NVK_SWITCH_MME_ACCESS_FLAGS) | allowed;
 }
+#endif
 
 static enum nvk_barrier
 nvk_barrier_flushes_waits(VkPipelineStageFlags2 stages,
@@ -701,10 +765,6 @@ nvk_barrier_flushes_waits(VkPipelineStageFlags2 stages,
 
    if (access & VK_ACCESS_2_HOST_WRITE_BIT)
       barriers |= NVK_BARRIER_HOST_WFI_FLUSH_SYSMEM;
-
-   if (access & (VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT |
-                 VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT))
-      barriers |= NVK_BARRIER_TILED_CACHE;
 
    return barriers;
 }
@@ -809,20 +869,8 @@ nvk_cmd_flush_wait_dep(struct nvk_cmd_buffer *cmd,
    if (!(engines & (NVKMD_ENGINE_3D | NVKMD_ENGINE_COMPUTE)))
       barriers &= ~NVK_BARRIER_FLUSH_SHADER_DATA;
 
-#ifdef HAVE_SWITCH_PLATFORM
-   if (!cmd->state.gfx.render.tiled_cache_enabled)
-      barriers &= ~NVK_BARRIER_TILED_CACHE;
-#else
-   barriers &= ~NVK_BARRIER_TILED_CACHE;
-#endif
-
    if (!barriers)
       return;
-
-#ifdef HAVE_SWITCH_PLATFORM
-   if (barriers & NVK_BARRIER_TILED_CACHE)
-      nvk_switch_tiled_cache_barrier(cmd);
-#endif
 
    if (barriers & NVK_BARRIER_FLUSH_SHADER_DATA) {
       struct nv_push *p = nvk_cmd_buffer_push(cmd, 2);
@@ -920,14 +968,27 @@ nvk_cmd_invalidate_deps(struct nvk_cmd_buffer *cmd,
 
       for (uint32_t i = 0; i < dep->memoryBarrierCount; i++) {
          const VkMemoryBarrier2 *bar = &dep->pMemoryBarriers[i];
+         VkAccessFlags2 dst_access = bar->dstAccessMask;
+#ifdef HAVE_SWITCH_PLATFORM
+         dst_access = nvk_switch_filter_mme_dst_access(
+            bar->dstStageMask, dst_access,
+            NVK_SWITCH_BARRIER_MEMORY, 0);
+#endif
          barriers |= nvk_barrier_invalidates(bar->dstStageMask,
-                                             bar->dstAccessMask);
+                                             dst_access);
       }
 
       for (uint32_t i = 0; i < dep->bufferMemoryBarrierCount; i++) {
          const VkBufferMemoryBarrier2 *bar = &dep->pBufferMemoryBarriers[i];
+         VkAccessFlags2 dst_access = bar->dstAccessMask;
+#ifdef HAVE_SWITCH_PLATFORM
+         VK_FROM_HANDLE(nvk_buffer, buffer, bar->buffer);
+         dst_access = nvk_switch_filter_mme_dst_access(
+            bar->dstStageMask, dst_access,
+            NVK_SWITCH_BARRIER_BUFFER, buffer->vk.usage);
+#endif
          barriers |= nvk_barrier_invalidates(bar->dstStageMask,
-                                             bar->dstAccessMask);
+                                             dst_access);
 
          if (bar->dstQueueFamilyIndex == VK_QUEUE_FAMILY_FOREIGN_EXT)
             barriers |= NVK_BARRIER_HOST_WFI_FLUSH_SYSMEM;
@@ -935,15 +996,18 @@ nvk_cmd_invalidate_deps(struct nvk_cmd_buffer *cmd,
 
       for (uint32_t i = 0; i < dep->imageMemoryBarrierCount; i++) {
          const VkImageMemoryBarrier2 *bar = &dep->pImageMemoryBarriers[i];
+         VkAccessFlags2 dst_access = bar->dstAccessMask;
+#ifdef HAVE_SWITCH_PLATFORM
+         dst_access = nvk_switch_filter_mme_dst_access(
+            bar->dstStageMask, dst_access,
+            NVK_SWITCH_BARRIER_IMAGE, 0);
+#endif
          barriers |= nvk_barrier_invalidates(bar->dstStageMask,
-                                             bar->dstAccessMask);
+                                             dst_access);
 
          if (bar->dstQueueFamilyIndex == VK_QUEUE_FAMILY_FOREIGN_EXT)
             barriers |= NVK_BARRIER_HOST_WFI_FLUSH_SYSMEM;
 
-         if (nvk_image_barrier_invalidates_zcull(bar) &&
-             nvk_switch_zcull_invalidate_enabled())
-            barriers |= NVK_BARRIER_INVALIDATE_ZCULL;
       }
    }
 
@@ -958,32 +1022,23 @@ nvk_cmd_invalidate_deps(struct nvk_cmd_buffer *cmd,
                     NVK_BARRIER_INVALIDATE_CONSTANT |
                     NVK_BARRIER_INVALIDATE_MME_DATA);
 
-   if (!(engines & NVKMD_ENGINE_3D))
-      barriers &= ~NVK_BARRIER_INVALIDATE_ZCULL;
-
    if (!(engines & NVKMD_ENGINE_COMPUTE))
       barriers &= ~NVK_BARRIER_INVALIDATE_QMD_DATA;
+
+#ifdef HAVE_SWITCH_PLATFORM
+   if ((barriers & NVK_BARRIER_INVALIDATE_MME_DATA) &&
+       pdev->info.cls_eng3d < HOPPER_A) {
+      nvk_cmd_buffer_switch_defer_mme_sync(cmd);
+      barriers &= ~NVK_BARRIER_INVALIDATE_MME_DATA;
+   }
+#endif
 
    if (!barriers)
       return;
 
-#ifdef HAVE_SWITCH_PLATFORM
-   const bool switch_sync_host_mme =
-      (barriers & NVK_BARRIER_INVALIDATE_MME_DATA) &&
-      pdev->info.cls_eng3d < HOPPER_A;
-   if (switch_sync_host_mme)
-      nvk_cmd_buffer_switch_sync_host(cmd);
-#endif
-
    struct nv_push *p = nvk_cmd_buffer_push(cmd, 32);
 
    if (barriers & NVK_BARRIER_INVALIDATE_TEX_DATA) {
-#ifdef HAVE_SWITCH_PLATFORM
-      if (cmd->state.gfx.render.tiled_cache_enabled) {
-         __push_immd(p, SUBC_NV9097,
-                     NVK_NVB097_TILED_CACHE_INVALIDATE_TEXTURE_DATA, 0);
-      } else
-#endif
       if (pdev->info.cls_eng3d >= MAXWELL_A) {
          if (nvk_cmd_buffer_last_subchannel(cmd) == SUBC_NVA097) {
             P_IMMD(p, NVA097, INVALIDATE_TEXTURE_DATA_CACHE_NO_WFI, {
@@ -1015,16 +1070,6 @@ nvk_cmd_invalidate_deps(struct nvk_cmd_buffer *cmd,
    if (barriers & NVK_BARRIER_INVALIDATE_RASTER_CACHE &&
        dev->vk.enabled_features.pipelineFragmentShadingRate)
       P_IMMD(p, NVC597, INVALIDATE_RASTER_CACHE_NO_WFI, 0);
-
-   if (barriers & NVK_BARRIER_INVALIDATE_ZCULL) {
-      P_IMMD(p, NV9097, CLEAR_ZCULL_REGION, {
-         .z_enable = true,
-         .stencil_enable = true,
-         .use_clear_rect = false,
-         .use_rt_array_index = false,
-         .make_conservative = true,
-      });
-   }
 
    if (barriers & (NVK_BARRIER_INVALIDATE_SHADER_DATA |
                    NVK_BARRIER_INVALIDATE_CONSTANT)) {
@@ -1066,16 +1111,10 @@ nvk_cmd_invalidate_deps(struct nvk_cmd_buffer *cmd,
          P_NVC86F_MEM_OP_D(p, { .operation = OPERATION_MEMBAR });
 
       } else {
-#ifdef HAVE_SWITCH_PLATFORM
-         if (!switch_sync_host_mme) {
-#endif
          __push_immd(p, SUBC_NV9097, NV906F_SET_REFERENCE, 0);
 
          if (pdev->info.cls_eng3d >= TURING_A)
             P_IMMD(p, NVC597, MME_DMA_SYSMEMBAR, 0);
-#ifdef HAVE_SWITCH_PLATFORM
-         }
-#endif
       }
    }
 

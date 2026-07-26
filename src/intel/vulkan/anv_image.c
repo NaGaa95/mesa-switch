@@ -670,12 +670,18 @@ add_aux_state_tracking_buffer(struct anv_device *device,
     * The indirect clear color BO requires 64B-alignment on gfx11+. If we're
     * using a modifier with clear color, then some kernels might require a 4k
     * alignment.
+    *
+    * If it's an aliased image, we can't use private bindings either since
+    * aliased images with the same parameters should be consistent (e.g., they
+    * can't have separate clear colors).
     */
    enum anv_image_memory_binding binding = ANV_IMAGE_MEMORY_BINDING_PRIVATE;
    uint32_t clear_color_alignment = 64;
    if (mod_info && mod_info->supports_clear_color) {
       binding = ANV_IMAGE_MEMORY_BINDING_PLANE_0 + plane;
       clear_color_alignment = 4096;
+   } else if (image->vk.create_flags & VK_IMAGE_CREATE_ALIAS_BIT) {
+      binding = ANV_IMAGE_MEMORY_BINDING_PLANE_0 + plane;
    }
 
    return image_binding_grow(device, image, binding,
@@ -1184,11 +1190,14 @@ check_memory_bindings(const struct anv_device *device,
             isl_drm_modifier_get_info(image->vk.drm_format_mod);
 
          /* If the image is created with a drm modifier that supports clear
-          * color, it will be exported along with main surface. Otherwise,
-          * place the aux-tracking state in a separate, suballocated buffer
-          * to achieve better memory utilization.
+          * color it will be exported along with main surface. If the image is
+          * aliased, it cannot be private since it must be consistent among
+          * all aliases. Otherwise, place the aux-tracking state in a
+          * separate, suballocated buffer to achieve better memory
+          * utilization.
           */
-         if (!mod_info || !mod_info->supports_clear_color)
+         if (!(mod_info && mod_info->supports_clear_color) &&
+             !(image->vk.create_flags & VK_IMAGE_CREATE_ALIAS_BIT))
             binding = ANV_IMAGE_MEMORY_BINDING_PRIVATE;
 
          /* The indirect clear color BO requires 64B-alignment on gfx11+. */
@@ -1655,13 +1664,14 @@ choose_drm_format_mod(const struct anv_physical_device *device,
 }
 
 static VkImageUsageFlags
-anv_image_create_usage(const VkImageCreateInfo *pCreateInfo,
+anv_image_create_usage(const struct anv_device *device,
+                       const VkImageCreateInfo *pCreateInfo,
                        VkImageUsageFlags usage)
 {
-   /* Add TRANSFER_SRC usage for multisample attachment images. This is
-    * because we might internally use the TRANSFER_SRC layout on them for
-    * blorp operations associated with resolving those into other attachments
-    * at the end of a subpass.
+   /* Add TRANSFER_SRC usage for some attachments. This is because we might
+    * internally use the TRANSFER_SRC layout on them for blorp operations
+    * associated with resolving those into other attachments at the end of a
+    * subpass.
     *
     * Without this additional usage, we compute an incorrect AUX state in
     * anv_layout_to_aux_state().
@@ -1670,6 +1680,12 @@ anv_image_create_usage(const VkImageCreateInfo *pCreateInfo,
        (usage & (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
                  VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)))
       usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+
+   if (device->vk.enabled_extensions.ANDROID_external_format_resolve &&
+       pCreateInfo->samples == VK_SAMPLE_COUNT_1_BIT &&
+       (usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT))
+      usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+
    return usage;
 }
 
@@ -1841,9 +1857,10 @@ anv_image_init(struct anv_device *device, struct anv_image *image,
 
    vk_image_init(&device->vk, &image->vk, pCreateInfo);
 
-   image->vk.usage = anv_image_create_usage(pCreateInfo, image->vk.usage);
+   image->vk.usage =
+      anv_image_create_usage(device, pCreateInfo, image->vk.usage);
    image->vk.stencil_usage =
-      anv_image_create_usage(pCreateInfo, image->vk.stencil_usage);
+      anv_image_create_usage(device, pCreateInfo, image->vk.stencil_usage);
 
    isl_surf_usage_flags_t isl_extra_usage_flags =
       create_info->isl_extra_usage_flags;

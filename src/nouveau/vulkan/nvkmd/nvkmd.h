@@ -56,6 +56,14 @@ enum nvkmd_mem_flags {
 
    /** This memory object has coherent CPU maps */
    NVKMD_MEM_COHERENT   = 1 << 5,
+
+   /** Explicitly bypass GPU caches for direct CPU/GPU synchronization
+    * storage.  This flag is for small payloads, such as events and native
+    * synchronization words, which must be visible without GPU cache
+    * maintenance.  A backend may also require uncached GPU mappings for
+    * coherent host memory on platforms without CPU/GPU snooping.
+    */
+   NVKMD_MEM_GPU_UNCACHED = 1 << 6,
 };
 
 #define NVKMD_MEM_PLACEMENT_FLAGS \

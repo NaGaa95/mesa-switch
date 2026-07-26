@@ -526,6 +526,7 @@ radv_shader_spirv_to_nir(struct radv_device *device, struct radv_shader_stage *s
                .force_tex_non_uniform = pdev->cache_key.tex_non_uniform,
                .force_ssbo_non_uniform = pdev->cache_key.ssbo_non_uniform,
                .lower_terminate_to_discard = pdev->cache_key.lower_terminate_to_discard,
+               .force_nan_preserve_min_max = pdev->cache_key.force_nan_preserve_min_max,
             },
          .emit_debug_break = !!device->trap_handler_shader,
          .debug_info = !!(instance->debug_flags & RADV_DEBUG_NIR_DEBUG_INFO),
@@ -905,6 +906,9 @@ radv_shader_spirv_to_nir(struct radv_device *device, struct radv_shader_stage *s
          nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
       }
    }
+
+   free(stage->layout.embedded_samplers.samplers);
+   stage->layout.embedded_samplers.samplers = NULL;
 
    return nir;
 }
@@ -1433,6 +1437,9 @@ radv_free_shader_memory(struct radv_device *device, union radv_shader_arena_bloc
       free(arena);
    } else if (free_list) {
       add_hole(free_list, hole);
+   } else {
+      /* Mark it as a hole, allowing merges when adjacent blocks are freed later. */
+      list_inithead(&hole->freelist);
    }
 
    mtx_unlock(&device->shader_arena_mutex);

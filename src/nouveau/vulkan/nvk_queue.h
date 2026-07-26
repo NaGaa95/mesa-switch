@@ -51,6 +51,11 @@ struct nvk_queue {
 
    /* CB0 for all draw commands on this queue */
    struct nvkmd_mem *draw_cb0;
+
+#ifdef HAVE_SWITCH_PLATFORM
+   /* Reused submission scratch sized to libnx's hardware GPFIFO ring. */
+   struct nvkmd_ctx_exec *submit_execs;
+#endif
 };
 
 static inline struct nvk_device *

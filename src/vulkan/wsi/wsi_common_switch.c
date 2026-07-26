@@ -17,17 +17,13 @@
  * instead of the CPU.
  */
 
-#define MESA_LOG_TAG "wsi-switch"
-
 #include <switch.h>
 
-#include <inttypes.h>
 #include <stdint.h>
 #include <stdlib.h>
 
 #include "util/macros.h"
 #include "util/os_time.h"
-#include "util/u_debug.h"
 #include "vk_util.h"
 #include "vk_instance.h"
 #include "vk_physical_device.h"
@@ -39,23 +35,6 @@
 struct wsi_switch {
    struct wsi_interface base;
 };
-
-static bool
-wsi_switch_present_trace_enabled(void)
-{
-   static int enabled = -1;
-
-   if (enabled < 0)
-      enabled = debug_get_bool_option("MESA_VK_WSI_SWITCH_PRESENT_TRACE", false) ? 1 : 0;
-
-   return enabled != 0;
-}
-
-#define WSI_SWITCH_PRESENT_TRACE(fmt, ...)                                      \
-   do {                                                                         \
-      if (wsi_switch_present_trace_enabled())                                   \
-         mesa_logi(fmt, ##__VA_ARGS__);                                         \
-   } while (0)
 
 static VkResult
 wsi_switch_surface_get_support(VkIcdSurfaceBase *surface,
@@ -557,9 +536,7 @@ wsi_switch_swapchain_cancel_outstanding_images(struct wsi_switch_swapchain *chai
       if (img->slot < 0 || !img->busy_on_host)
          continue;
 
-      Result rc = nwindowCancelBuffer(chain->nw, img->slot, NULL);
-      WSI_SWITCH_PRESENT_TRACE("cancel: image=%u slot=%d rc=0x%x",
-                               i, img->slot, (unsigned)rc);
+      nwindowCancelBuffer(chain->nw, img->slot, NULL);
       img->busy_on_host = false;
       img->busy_on_device = false;
       img->have_acquire_fence = false;
@@ -694,15 +671,8 @@ wsi_switch_swapchain_acquire_next_image(struct wsi_swapchain *wsi_chain,
 
    VkResult dq = wsi_switch_dequeue_buffer(chain->nw, info->timeout,
                                            &slot, &acquire_mf);
-   if (dq != VK_SUCCESS) {
-      WSI_SWITCH_PRESENT_TRACE("acquire: nw=%p dequeue failed result=%d "
-                               "timeout=%" PRIu64,
-                               (void *)chain->nw, dq, info->timeout);
+   if (dq != VK_SUCCESS)
       return dq;
-   }
-
-   WSI_SWITCH_PRESENT_TRACE("acquire: nw=%p slot=%d image_count=%u",
-                            (void *)chain->nw, slot, chain->base.image_count);
 
    for (uint32_t i = 0; i < chain->base.image_count; i++) {
       if (chain->images[i].slot == slot) {
@@ -722,14 +692,10 @@ wsi_switch_swapchain_acquire_next_image(struct wsi_swapchain *wsi_chain,
          *image_index = i;
          chain->images[i].busy_on_host = true;
          chain->images[i].busy_on_device = true;
-         WSI_SWITCH_PRESENT_TRACE("acquire: slot=%d mapped image=%u",
-                                  slot, i);
          return VK_SUCCESS;
       }
    }
 
-   WSI_SWITCH_PRESENT_TRACE("acquire: slot=%d did not match any image, cancelling",
-                            slot);
    nwindowCancelBuffer(chain->nw, slot, NULL);
    return VK_ERROR_OUT_OF_DATE_KHR;
 }
@@ -776,6 +742,9 @@ wsi_switch_swapchain_queue_present(struct wsi_swapchain *wsi_chain,
    struct wsi_switch_swapchain *chain =
       (struct wsi_switch_swapchain *)wsi_chain;
 
+   (void)present_id;
+   (void)damage;
+
    assert(image_index < chain->base.image_count);
 
    struct wsi_switch_image *img = &chain->images[image_index];
@@ -784,52 +753,29 @@ wsi_switch_swapchain_queue_present(struct wsi_swapchain *wsi_chain,
    NvMultiFence mf = { 0 };
    bool have_multifence = false;
 
-   WSI_SWITCH_PRESENT_TRACE("present: begin chain=%p nw=%p image=%u slot=%d present_id=%" PRIu64
-                            " fence=%p",
-                            (void *)chain, (void *)chain->nw, image_index,
-                            img->slot, present_id, (void *)vk_fence);
-
-   if (vk_fence != VK_NULL_HANDLE) {
+   if (vk_fence != VK_NULL_HANDLE)
       have_multifence = nvk_switch_fence_peek_nvmultifence(vk_fence, &mf);
-      WSI_SWITCH_PRESENT_TRACE("present: fence peek image=%u have_multifence=%d num_fences=%u",
-                               image_index, have_multifence ? 1 : 0,
-                               have_multifence ? mf.num_fences : 0);
-   } else {
-      WSI_SWITCH_PRESENT_TRACE("present: image=%u has no VkFence", image_index);
-   }
 
-   if (have_multifence) {
-      WSI_SWITCH_PRESENT_TRACE("present: image=%u using native fence payload num_fences=%u",
-                               image_index, mf.num_fences);
-   } else if (vk_fence != VK_NULL_HANDLE) {
+   if (!have_multifence && vk_fence != VK_NULL_HANDLE) {
       /* The active sync isn't a native NvFence (or the kickoff hasn't
        * imported a fence yet). Block host-side so we never hand the
        * compositor a buffer the GPU is still writing.
        */
-      WSI_SWITCH_PRESENT_TRACE("present: image=%u falling back to host wait",
-                               image_index);
       VkResult wait =
          chain->base.wsi->WaitForFences(chain->base.device, 1, &vk_fence,
                                         true, UINT64_MAX);
-      WSI_SWITCH_PRESENT_TRACE("present: image=%u host wait result=%d",
-                               image_index, wait);
       if (wait != VK_SUCCESS)
          return wait;
    }
 
    Result rc = nwindowQueueBuffer(chain->nw, img->slot,
                                   have_multifence ? &mf : NULL);
-   WSI_SWITCH_PRESENT_TRACE("present: image=%u queue slot=%d have_native_fence=%d rc=0x%x",
-                            image_index, img->slot, have_multifence ? 1 : 0,
-                            (unsigned)rc);
    if (R_FAILED(rc)) {
       return VK_ERROR_SURFACE_LOST_KHR;
    }
 
    img->busy_on_host = false;
    img->busy_on_device = false;
-   WSI_SWITCH_PRESENT_TRACE("present: image=%u complete", image_index);
-
    return VK_SUCCESS;
 }
 
@@ -850,9 +796,6 @@ wsi_switch_swapchain_apply_present_mode(struct wsi_switch_swapchain *chain,
 {
    const uint32_t interval = wsi_switch_swap_interval_for_present_mode(mode);
    Result rc = nwindowSetSwapInterval(chain->nw, interval);
-
-   WSI_SWITCH_PRESENT_TRACE("present-mode: mode=%u interval=%u rc=0x%x",
-                            mode, interval, (unsigned)rc);
 
    if (R_FAILED(rc))
       return VK_ERROR_INITIALIZATION_FAILED;

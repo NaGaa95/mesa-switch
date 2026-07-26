@@ -12,13 +12,7 @@
 
 #include <switch.h>
 
-/* Stub Switch (Horizon / Tegra X1) backend for nvkmd.
- *
- * We currently synthesize a hard-coded GM20B physical device and provide a
- * logical-device object backed by libnx nv services for BO allocation and VA
- * management. Real GPU context submission still needs explicit nvServices /
- * nvgpu wiring.
- */
+/* Horizon / Tegra X1 nvkmd backend using libnx nv services. */
 
 struct nvkmd_switch_pdev {
    struct nvkmd_pdev base;
@@ -36,6 +30,10 @@ struct nvkmd_switch_dev {
 
    simple_mtx_t heap_mutex;
    struct util_vma_heap heap;
+
+   /* Persistent four-byte GPU completion payload slabs. */
+   simple_mtx_t sync_payload_mutex;
+   struct list_head sync_payload_slabs;
 };
 
 /* Horizon's GPU address space is initialized with the smallest GM20B big-page
@@ -56,6 +54,9 @@ VkResult nvkmd_switch_create_dev(struct nvkmd_pdev *pdev,
                                  struct vk_object_base *log_obj,
                                  struct nvkmd_dev **dev_out);
 
+void nvkmd_switch_sync_payload_pool_init(struct nvkmd_switch_dev *dev);
+void nvkmd_switch_sync_payload_pool_finish(struct nvkmd_switch_dev *dev);
+
 /* Attach a just-kicked-off native fence payload to a binary sync object so
  * that a subsequent vk_sync_wait (host or queue) waits on real GPU
  * completion instead of a CPU condvar broadcast.
@@ -68,13 +69,6 @@ void nvkmd_switch_sync_import_nvfence(struct vk_sync *sync,
                                       const NvFence *fence);
 void nvkmd_switch_sync_import_nvmultifence(struct vk_sync *sync,
                                            const NvMultiFence *fence);
-void nvkmd_switch_sync_import_nvfence_payload(struct vk_sync *sync,
-                                              const NvFence *fence,
-                                              uint32_t payload_value);
-
-bool nvkmd_switch_sync_prepare_payload_signal(struct vk_sync *sync,
-                                              uint64_t *addr_out,
-                                              uint32_t *value_out);
 
 /* Whether the given sync type is the Switch nvfence binary sync. Lets
  * the ctx layer skip non-native sync objects (e.g. timeline wrappers,

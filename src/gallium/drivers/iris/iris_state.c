@@ -1575,7 +1575,7 @@ iris_init_compute_context(struct iris_batch *batch)
 
    uint8_t pixel_async_compute_thread_limit, z_pass_async_compute_thread_limit,
            np_z_async_throttle_settings;
-   intel_compute_engine_async_threads_limit(devinfo, 0, false,
+   intel_compute_engine_async_threads_limit(devinfo, 0, false, false,
                                             &pixel_async_compute_thread_limit,
                                             &z_pass_async_compute_thread_limit,
                                             &np_z_async_throttle_settings);
@@ -8835,9 +8835,9 @@ iris_upload_indirect_render_state(struct iris_context *ice,
       if (indirect->buffer) {
          struct iris_bo *bo = iris_resource_bo(indirect->buffer);
          ind.ArgumentBufferStartAddress = ro_bo(bo, indirect->offset);
-         ind.MOCS = iris_mocs(bo, &screen->isl_dev, 0);
+         ind.MOCSIndex = MOCS_GET_INDEX(iris_mocs(bo, &screen->isl_dev, 0));
          } else {
-         ind.MOCS = iris_mocs(NULL, &screen->isl_dev, 0);
+         ind.MOCSIndex = MOCS_GET_INDEX(iris_mocs(NULL, &screen->isl_dev, 0));
       }
 
       if (indirect->indirect_draw_count) {
@@ -9109,6 +9109,7 @@ iris_upload_compute_walker(struct iris_context *ice,
 
    intel_compute_engine_async_threads_limit(devinfo, dispatch.threads,
                                             slm_or_barrier_enabled,
+                                            cs_data->uses_fence,
                                             &pixel_async_compute_thread_limit,
                                             &z_pass_async_compute_thread_limit,
                                             &np_z_async_throttle_settings);
@@ -9208,8 +9209,8 @@ struct GENX(COMPUTE_WALKER_BODY) body = {
          ind.MaxCount                   = 1;
          ind.body                       = body;
          ind.ArgumentBufferStartAddress = indirect_bo;
-         ind.MOCS                       =
-            iris_mocs(indirect_bo.bo, &screen->isl_dev, 0);
+         ind.MOCSIndex                  =
+            MOCS_GET_INDEX(iris_mocs(indirect_bo.bo, &screen->isl_dev, 0));
       }
    } else {
       if (grid->indirect)

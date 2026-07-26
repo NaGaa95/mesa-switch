@@ -7527,7 +7527,10 @@ spirv_to_nir(const uint32_t *words, size_t word_count,
    }
 
    const char *read_path = os_get_option_secure("MESA_SPIRV_READ_PATH");
-   if (read_path) {
+   if (!options->ignore_replacement && read_path) {
+      struct spirv_to_nir_options replace_options = *options;
+      replace_options.ignore_replacement = true;
+
       char blake3_str[BLAKE3_HEX_LEN];
       _mesa_blake3_format(blake3_str, b->shader->info.source_blake3);
 
@@ -7579,7 +7582,7 @@ spirv_to_nir(const uint32_t *words, size_t word_count,
       ralloc_free(b);
       nir_shader* result = spirv_to_nir(replacement_words, replacement_size / sizeof(uint32_t),
                                         spec, num_spec,
-                                        stage, entry_point_name, options,
+                                        stage, entry_point_name, &replace_options,
                                         nir_options);
 
       free((void *)replacement_words);

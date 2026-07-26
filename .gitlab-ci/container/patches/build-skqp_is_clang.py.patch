@@ -1,13 +1,3 @@
-diff --git a/gn/BUILDCONFIG.gn b/gn/BUILDCONFIG.gn
-index 454334a..1797594 100644
---- a/gn/BUILDCONFIG.gn
-+++ b/gn/BUILDCONFIG.gn
-@@ -80,7 +80,7 @@ if (current_cpu == "") {
- is_clang = is_android || is_ios || is_mac ||
-            (cc == "clang" && cxx == "clang++") || clang_win != ""
- if (!is_clang && !is_win) {
--  is_clang = exec_script("gn/is_clang.py",
-+  is_clang = exec_script("//gn/is_clang.py",
-                          [
-                            cc,
-                            cxx,
+version https://git-lfs.github.com/spec/v1
+oid sha256:c0a75c2303309dea3b76e8881dc566280316b061debe582a0e02c13e06026798
+size 497

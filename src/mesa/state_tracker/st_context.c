@@ -344,6 +344,7 @@ st_context_free_zombie_objects(struct st_context *st)
 static void
 st_destroy_context_priv(struct st_context *st, bool destroy_pipe)
 {
+   cso_unbind_context(st->cso_context);
 #ifndef __SWITCH__
    st_destroy_draw(st);
 #endif
@@ -977,6 +978,7 @@ st_destroy_context(struct st_context *st)
    st_release_program(st, &st->mp);
 
    if (st->hw_select_shaders) {
+      st->pipe->bind_gs_state(st->pipe, NULL);
       hash_table_foreach(st->hw_select_shaders, entry)
          st->pipe->delete_gs_state(st->pipe, entry->data);
       _mesa_hash_table_destroy(st->hw_select_shaders, NULL);

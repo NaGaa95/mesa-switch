@@ -9,7 +9,6 @@
 #include "nvk_image.h"
 #include "nvk_physical_device.h"
 #include "nvkmd/nvkmd.h"
-
 #include "util/u_atomic.h"
 
 #include <inttypes.h>
@@ -163,6 +162,9 @@ nvk_AllocateMemory(VkDevice device,
 
    const bool not_shared = handle_types == 0;
    bool pinned_to_vram = false;
+#ifdef HAVE_SWITCH_PLATFORM
+   bool compressed_mapping = false;
+#endif
 
    /* Align to os page size (typically 4K) as a start as this works for
     * everything, and then depending on placement and size, we either keep
@@ -191,10 +193,14 @@ nvk_AllocateMemory(VkDevice device,
           image->planes[0].nil.pte_kind != 0) {
          alignment = MAX2(alignment, image->planes[0].nil.align_B);
          tile_mode = image->planes[0].nil.tile_mode;
-         if (image->can_compress && not_shared)
+         if (image->can_compress && not_shared) {
             pte_kind = image->planes[0].nil.compressed_pte_kind;
-         else
+#ifdef HAVE_SWITCH_PLATFORM
+            compressed_mapping = true;
+#endif
+         } else {
             pte_kind = image->planes[0].nil.pte_kind;
+         }
       }
 #else
       if (image->vk.tiling == VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT &&

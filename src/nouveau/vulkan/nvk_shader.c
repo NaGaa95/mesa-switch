@@ -301,7 +301,7 @@ lower_load_intrinsic(nir_builder *b, nir_intrinsic_instr *load,
          nir_def *sat_offset =
             nir_umin(b, offset, nir_imm_int(b, UINT32_MAX - (load_size - 1)));
          nir_def *in_bounds =
-            nir_ilt(b, nir_iadd_imm(b, sat_offset, load_size - 1), bound);
+            nir_ult(b, nir_iadd_imm(b, sat_offset, load_size - 1), bound);
 
          nir_push_if(b, in_bounds);
       }
@@ -727,6 +727,13 @@ nvk_shader_fill_push(struct nvk_device *dev,
    /* We always map index == type */
    const uint32_t idx = type;
 
+#ifdef HAVE_SWITCH_PLATFORM
+   const bool native_t210_subtiling =
+      shader->info.stage == MESA_SHADER_FRAGMENT && pdev->info.sm == 53;
+#else
+   const bool native_t210_subtiling = false;
+#endif
+
    max_dw_count += 2;
    P_IMMD(p, NV9097, SET_PIPELINE_SHADER(idx), {
       .enable  = ENABLE_TRUE,
@@ -776,12 +783,21 @@ nvk_shader_fill_push(struct nvk_device *dev,
       max_dw_count += 13;
 
       P_MTHD(p, NVC397, SET_SUBTILING_PERF_KNOB_A);
-      P_NV9097_SET_SUBTILING_PERF_KNOB_A(p, {
-         .fraction_of_spm_register_file_per_subtile         = 0x10,
-         .fraction_of_spm_pixel_output_buffer_per_subtile   = 0x40,
-         .fraction_of_spm_triangle_ram_per_subtile          = 0x16,
-         .fraction_of_max_quads_per_subtile                 = 0x20,
-      });
+      if (native_t210_subtiling) {
+         P_NV9097_SET_SUBTILING_PERF_KNOB_A(p, {
+            .fraction_of_spm_register_file_per_subtile       = 0x80,
+            .fraction_of_spm_pixel_output_buffer_per_subtile = 0x60,
+            .fraction_of_spm_triangle_ram_per_subtile        = 0x7f,
+            .fraction_of_max_quads_per_subtile               = 0x08,
+         });
+      } else {
+         P_NV9097_SET_SUBTILING_PERF_KNOB_A(p, {
+            .fraction_of_spm_register_file_per_subtile       = 0x10,
+            .fraction_of_spm_pixel_output_buffer_per_subtile = 0x40,
+            .fraction_of_spm_triangle_ram_per_subtile        = 0x16,
+            .fraction_of_max_quads_per_subtile               = 0x20,
+         });
+      }
       P_NV9097_SET_SUBTILING_PERF_KNOB_B(p, 0x20);
 
       P_IMMD(p, NV9097, SET_API_MANDATED_EARLY_Z,

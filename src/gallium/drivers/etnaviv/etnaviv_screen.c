@@ -579,7 +579,7 @@ etna_screen_is_format_supported(struct pipe_screen *pscreen,
    }
 
    if (usage & PIPE_BIND_SAMPLER_VIEW) {
-      uint32_t fmt = translate_texture_format(format);
+      uint32_t fmt = translate_texture_format(format, screen);
 
       if (!gpu_supports_texture_format(screen, fmt, format))
          fmt = ETNA_NO_MATCH;
@@ -1114,6 +1114,8 @@ etna_screen_create(struct etna_device *dev, struct etna_gpu *gpu,
 
    etna_init_shader_caps(screen);
    etna_init_screen_caps(screen);
+
+   screen->compiler->max_render_targets = screen->base.caps.max_render_targets;
 
    screen->supported_pm_queries = UTIL_DYNARRAY_INIT;
    slab_create_parent(&screen->transfer_pool, sizeof(struct etna_transfer), 16);

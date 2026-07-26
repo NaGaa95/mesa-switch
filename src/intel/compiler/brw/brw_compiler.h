@@ -111,6 +111,14 @@ struct brw_compiler {
    int spilling_rate;
 
    /**
+    * Register file size
+    *
+    * Useful to calculate the amount of push data to deliver to a given
+    * shader.
+    */
+   unsigned register_file_size;
+
+   /**
     * We perform a quick register pressure estimate at the NIR level before
     * attempting backend compilation at various SIMD widths.  If the estimated
     * register pressure for a given SIMD width is beyond this threshold, we
@@ -204,6 +212,7 @@ PRAGMA_DIAGNOSTIC_ERROR(-Wpadded)
 enum brw_robustness_flags {
    BRW_ROBUSTNESS_UBO  = BITFIELD_BIT(0),
    BRW_ROBUSTNESS_SSBO = BITFIELD_BIT(1),
+   BRW_ROBUSTNESS_SLM  = BITFIELD_BIT(2),
 };
 
 enum brw_divergent_atomics_flags {
@@ -218,7 +227,7 @@ struct brw_base_prog_key {
     */
    uint32_t view_mask;
 
-   enum brw_robustness_flags robust_flags:2;
+   enum brw_robustness_flags robust_flags:3;
 
    bool uses_inline_push_addr:1;
 
@@ -233,7 +242,7 @@ struct brw_base_prog_key {
 
    enum brw_divergent_atomics_flags divergent_atomics_flags:2;
 
-   uint32_t padding:24;
+   uint32_t padding:23;
 };
 
 /**
@@ -860,6 +869,7 @@ struct brw_cs_prog_data {
     * constants
     */
    bool uses_inline_push_addr;
+   bool uses_fence;
    bool uses_btd_stack_ids;
    bool uses_systolic;
    uint8_t generate_local_id;

@@ -41,7 +41,6 @@ enum nvk_mme {
    NVK_MME_SET_CONSERVATIVE_RASTER_STATE,
    NVK_MME_SET_VIEWPORT_MIN_MAX_Z,
    NVK_MME_SET_Z_CLAMP,
-
    NVK_MME_COUNT,
 };
 
@@ -109,6 +108,12 @@ enum nvk_mme_scratch {
    NVK_MME_SCRATCH_VIEWPORT0_MAX_Z,
    NVK_MME_SCRATCH_Z_CLAMP = NVK_MME_SCRATCH_VIEWPORT0_MIN_Z
                              + (NVK_MAX_VIEWPORTS * 2),
+
+#ifdef HAVE_SWITCH_PLATFORM
+   /* Depth-target IOVA >> 8.  Keep this last so the upstream scratch layout
+    * and all existing macro state offsets remain unchanged.
+    */
+#endif
 
    /* Must be at the end */
    NVK_MME_NUM_SCRATCH,
@@ -249,7 +254,6 @@ void nvk_mme_set_write_mask(struct mme_builder *b);
 void nvk_mme_set_conservative_raster_state(struct mme_builder *b);
 void nvk_mme_set_viewport_min_max_z(struct mme_builder *b);
 void nvk_mme_set_z_clamp(struct mme_builder *b);
-
 uint32_t nvk_mme_tess_params(mesa_shader_stage stage,
                              enum nak_ts_domain domain,
                              enum nak_ts_spacing spacing,

@@ -19,6 +19,7 @@
 #include "nvtypes.h"
 #include "nv_push_cl902d.h"
 #include "nv_push_cl90b5.h"
+#include "nv_push_cla040.h"
 #include "nv_push_clc1b5.h"
 #include "nv_push_clcab5.h"
 
@@ -988,27 +989,66 @@ nvk_CmdUpdateBuffer(VkCommandBuffer commandBuffer,
    VK_FROM_HANDLE(nvk_buffer, dst, dstBuffer);
 
    uint64_t dst_addr = vk_buffer_address(&dst->vk, dstOffset);
+   uint8_t subc = nvk_cmd_buffer_last_subchannel(cmd);
 
-   uint64_t data_addr;
-   nvk_cmd_buffer_upload_data(cmd, pData, dataSize, 64, &data_addr);
+   /* From the Vulkan 1.4.354 spec:
+    *
+    *    VUID-vkCmdUpdateBuffer-dataSize-00038
+    *    "dataSize must be a multiple of 4"
+    */
+   const uint32_t dw_count = dataSize / 4;
 
-   struct nv_push *p = nvk_cmd_buffer_push(cmd, 10);
+   /* Do not use I2M if the copy is too big (2012 bytes is our limit) */
+   const uint32_t i2m_push_dw_count = dw_count + 9;
+   const bool i2m_size_eligible =
+      i2m_push_dw_count <= NVK_CMD_BUFFER_MAX_PUSH;
+   if (!i2m_size_eligible)
+      subc = SUBC_NV90B5;
 
-   P_MTHD(p, NV90B5, OFFSET_IN_UPPER);
-   P_NV90B5_OFFSET_IN_UPPER(p, data_addr >> 32);
-   P_NV90B5_OFFSET_IN_LOWER(p, data_addr & 0xffffffff);
-   P_NV90B5_OFFSET_OUT_UPPER(p, dst_addr >> 32);
-   P_NV90B5_OFFSET_OUT_LOWER(p, dst_addr & 0xffffffff);
+   const bool use_i2m = subc == SUBC_NV9097 || subc == SUBC_NV90C0;
 
-   P_MTHD(p, NV90B5, LINE_LENGTH_IN);
-   P_NV90B5_LINE_LENGTH_IN(p, dataSize);
-   P_NV90B5_LINE_COUNT(p, 1);
+   /* I2M transfers are affected by conditional rendering but CmdUpdateBuffer
+    * must execute unconditionally.
+    */
+   if (use_i2m) {
+      struct nv_push *p = nvk_cmd_buffer_push(cmd, i2m_push_dw_count);
+      __push_immd(p, subc, NVA040_SET_RENDER_ENABLE_OVERRIDE,
+                  NVA040_SET_RENDER_ENABLE_OVERRIDE_MODE_ALWAYS_RENDER);
+      __push_mthd(p, subc, NVA040_LINE_LENGTH_IN);
+      P_NVA040_LINE_LENGTH_IN(p, dataSize);
+      P_NVA040_LINE_COUNT(p, 1);
+      P_NVA040_OFFSET_OUT_UPPER(p, dst_addr >> 32);
+      P_NVA040_OFFSET_OUT(p, dst_addr);
+      __push_1inc(p, subc, NVA040_LAUNCH_DMA);
+      P_NVA040_LAUNCH_DMA(p, {
+         .dst_memory_layout = DST_MEMORY_LAYOUT_PITCH,
+         .completion_type = COMPLETION_TYPE_FLUSH_ONLY,
+      });
+      P_INLINE_ARRAY(p, pData, dw_count);
+      __push_immd(p, subc, NVA040_SET_RENDER_ENABLE_OVERRIDE,
+                  NVA040_SET_RENDER_ENABLE_OVERRIDE_MODE_USE_RENDER_ENABLE);
+   } else {
+      uint64_t data_addr;
+      nvk_cmd_buffer_upload_data(cmd, pData, dataSize, 64, &data_addr);
 
-   P_IMMD(p, NV90B5, LAUNCH_DMA, {
-      .data_transfer_type = DATA_TRANSFER_TYPE_PIPELINED,
-      .multi_line_enable = MULTI_LINE_ENABLE_TRUE,
-      .flush_enable = FLUSH_ENABLE_TRUE,
-      .src_memory_layout = SRC_MEMORY_LAYOUT_PITCH,
-      .dst_memory_layout = DST_MEMORY_LAYOUT_PITCH,
-   });
+      struct nv_push *p = nvk_cmd_buffer_push(cmd, 10);
+
+      P_MTHD(p, NV90B5, OFFSET_IN_UPPER);
+      P_NV90B5_OFFSET_IN_UPPER(p, data_addr >> 32);
+      P_NV90B5_OFFSET_IN_LOWER(p, data_addr & 0xffffffff);
+      P_NV90B5_OFFSET_OUT_UPPER(p, dst_addr >> 32);
+      P_NV90B5_OFFSET_OUT_LOWER(p, dst_addr & 0xffffffff);
+
+      P_MTHD(p, NV90B5, LINE_LENGTH_IN);
+      P_NV90B5_LINE_LENGTH_IN(p, dataSize);
+      P_NV90B5_LINE_COUNT(p, 1);
+
+      P_IMMD(p, NV90B5, LAUNCH_DMA, {
+         .data_transfer_type = DATA_TRANSFER_TYPE_PIPELINED,
+         .multi_line_enable = MULTI_LINE_ENABLE_TRUE,
+         .flush_enable = FLUSH_ENABLE_TRUE,
+         .src_memory_layout = SRC_MEMORY_LAYOUT_PITCH,
+         .dst_memory_layout = DST_MEMORY_LAYOUT_PITCH,
+      });
+   }
 }

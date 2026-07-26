@@ -278,8 +278,10 @@ struct DefInfo {
     * low half. In that case, data_stride=2. */
    uint8_t data_stride;
    RegClass rc;
+   int operand_idx;
 
-   DefInfo(ra_ctx& ctx, aco_ptr<Instruction>& instr, RegClass rc_, int operand) : rc(rc_)
+   DefInfo(ra_ctx& ctx, aco_ptr<Instruction>& instr, RegClass rc_, int operand)
+       : rc(rc_), operand_idx(operand)
    {
       size = rc.size();
       stride = get_stride(rc) * 4;
@@ -1604,8 +1606,13 @@ get_reg_impl(ra_ctx& ctx, const RegisterFile& reg_file, std::vector<parallelcopy
    if (!is_phi(instr) && instr->opcode != aco_opcode::p_create_vector)
       tmp_file.fill_killed_operands(instr.get());
 
+   /* If this is an operand, block the register space, so that it won't be used for other operands. */
+   if (info.operand_idx != -1)
+      tmp_file.block(best_win);
+
    std::vector<parallelcopy> pc;
-   if (!get_regs_for_copies(ctx, tmp_file, pc, vars, instr, best_win))
+   PhysRegInterval def_reg = info.operand_idx == -1 ? best_win : PhysRegInterval{};
+   if (!get_regs_for_copies(ctx, tmp_file, pc, vars, instr, def_reg))
       return {};
 
    parallelcopies.insert(parallelcopies.end(), pc.begin(), pc.end());
@@ -3146,6 +3153,10 @@ vop3_can_use_vop2acc(ra_ctx& ctx, Instruction* instr)
       return false;
 
    if (instr->isVOP3P()) {
+      /* opsel_hi is implicitly 1 except for inline constant operands of v_pk_fmac_f16 on gfx11+ */
+      bool inline_implicit_opsel_hi =
+         instr->opcode != aco_opcode::v_pk_fma_f16 || ctx.program->gfx_level < GFX11;
+
       for (unsigned i = 0; i < 3; i++) {
          if (instr->operands[i].isLiteral())
             continue;
@@ -3153,9 +3164,8 @@ vop3_can_use_vop2acc(ra_ctx& ctx, Instruction* instr)
          if (instr->valu().opsel_lo[i])
             return false;
 
-         /* v_pk_fmac_f16 inline constants are replicated to hi bits starting with gfx11. */
          if (instr->valu().opsel_hi[i] ==
-             (instr->operands[i].isConstant() && ctx.program->gfx_level >= GFX11))
+             (instr->operands[i].isConstant() && !inline_implicit_opsel_hi))
             return false;
       }
    } else {

@@ -10,9 +10,7 @@
 #include "nvk_format.h"
 #include "nvk_physical_device.h"
 #include "nvkmd/nvkmd.h"
-
 #include "util/detect_os.h"
-#include "util/u_debug.h"
 #include "vk_android.h"
 #include "vk_enum_to_str.h"
 #include "vk_format.h"
@@ -24,38 +22,6 @@
 #include "clc197.h"
 #include "clc597.h"
 #include "clcd97.h"
-
-#include <stdio.h>
-
-#ifdef HAVE_SWITCH_PLATFORM
-static bool
-nvk_switch_file_toggle_enabled(const char *path)
-{
-   FILE *f = fopen(path, "r");
-   if (f == NULL)
-      return false;
-
-   fclose(f);
-   return true;
-}
-
-static bool
-nvk_switch_zcull_save_restore_enabled(void)
-{
-   static int enabled = -1;
-
-   if (enabled < 0) {
-      enabled =
-         debug_get_bool_option("NVK_SWITCH_ZCULL_SAVE_RESTORE", false) ? 1 : 0;
-      if (!enabled &&
-          nvk_switch_file_toggle_enabled(
-             "sdmc:/nvk_switch_zcull_save_restore.enable"))
-         enabled = 1;
-   }
-
-   return enabled != 0;
-}
-#endif
 
 static bool
 nvk_use_separate_zs(const struct nvk_physical_device *pdev, VkFormat vk_format)
@@ -842,25 +808,26 @@ nvk_GetPhysicalDeviceSparseImageFormatProperties2(
  * too many things to VRAM.
  */
 static bool
-nvk_image_can_compress(const struct nvkmd_pdev *nvkmd_pdev,
+nvk_image_can_compress(const struct nvk_physical_device *pdev,
                        const struct nvk_image *image)
 {
-   if (nvkmd_pdev->kmd_info.has_compression) {
-      if (image->plane_count > 1 ||
-          image->vk.usage & (VK_IMAGE_USAGE_HOST_TRANSFER_BIT) ||
-          image->vk.create_flags & (VK_IMAGE_CREATE_SPARSE_BINDING_BIT |
-                                    VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT) ||
-          image->vk.wsi_legacy_scanout)
-         return false;
-      else if (image->vk.usage & (VK_IMAGE_USAGE_STORAGE_BIT |
-                                  VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
-                                  VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) &&
-               image->vk.tiling == VK_IMAGE_TILING_OPTIMAL)
-         return true;
-      else
-         return false;
-   } else
+   if (pdev->debug_flags & NVK_DEBUG_NO_COMPRESSION)
       return false;
+
+   if (!pdev->nvkmd->kmd_info.has_compression)
+      return false;
+
+   if (image->plane_count > 1 ||
+       image->vk.usage & VK_IMAGE_USAGE_HOST_TRANSFER_BIT ||
+       image->vk.create_flags & (VK_IMAGE_CREATE_SPARSE_BINDING_BIT |
+                                 VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT) ||
+       image->vk.wsi_legacy_scanout)
+      return false;
+
+   return image->vk.usage & (VK_IMAGE_USAGE_STORAGE_BIT |
+                             VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                             VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) &&
+          image->vk.tiling == VK_IMAGE_TILING_OPTIMAL;
 }
 
 static VkResult
@@ -917,7 +884,7 @@ nvk_image_init(struct nvk_device *dev,
     * in GetImageMemoryRequirements() we are able to detect it and specify that
     * we prefer a dedicated allocation for it.
     */
-   image->can_compress = nvk_image_can_compress(dev->nvkmd->pdev, image);
+   image->can_compress = nvk_image_can_compress(pdev, image);
    if (!image->can_compress)
       usage |= NIL_IMAGE_USAGE_UNCOMPRESSED_BIT;
 
@@ -1097,31 +1064,6 @@ nvk_image_init(struct nvk_device *dev,
             return vk_errorf(dev, VK_ERROR_UNKNOWN,
                              "Invalid image creation parameters");
       }
-   }
-
-   /* Upstream still keeps persistent zcull save/restore disabled globally.
-    * On Switch, public deko3d and the L4T nvgpu UAPI both expose a bound
-    * zcull context plus per-depth-surface zcull storage, so keep this
-    * Switch-only and restricted to simple 2D depth images. Dynamic clear-only
-    * zcull remains available for the other cases below.
-    */
-   const bool enable_zcull_save_restore =
-#ifdef HAVE_SWITCH_PLATFORM
-      nvk_switch_zcull_save_restore_enabled() &&
-      image->vk.array_layers == 1 &&
-#else
-      false &&
-#endif
-      true;
-
-   if (enable_zcull_save_restore &&
-       (image->vk.aspects & VK_IMAGE_ASPECT_DEPTH_BIT) &&
-       image->vk.image_type != VK_IMAGE_TYPE_3D &&
-       image->vk.tiling == VK_IMAGE_TILING_OPTIMAL &&
-       pdev->info.has_zcull_info) {
-      image->zcull.nil = nil_zcull_new(&pdev->info.zcull_info, 0, 0,
-                                       image->vk.extent.width,
-                                       image->vk.extent.height);
    }
 
    const enum pipe_format plane0_format = image->planes[0].nil.format.p_format;

@@ -1663,6 +1663,7 @@ fail_nvkmd:
    return result;
 }
 
+#ifndef HAVE_SWITCH_PLATFORM
 VkResult
 nvk_create_drm_physical_device(struct vk_instance *_instance,
                                struct _drmDevice *drm_device,
@@ -1679,6 +1680,7 @@ nvk_create_drm_physical_device(struct vk_instance *_instance,
 
    return nvk_create_physical_device_from_nvkmd(instance, nvkmd, pdev_out);
 }
+#endif
 
 void
 nvk_physical_device_destroy(struct vk_physical_device *vk_pdev)

@@ -140,6 +140,8 @@ struct tu_physical_device
 
    bool has_preemption;
 
+   bool expose_double_threadsize;
+
    /* Whether performance counter selector registers can be written by userspace CSes. */
    bool is_perf_cntr_selectable;
 
@@ -221,6 +223,11 @@ struct tu_instance
     */
    bool disable_d24s8_border_color_workaround;
 
+   /* Various games assume that gl_SubgroupSize is either 32 or 64, and we hide
+    * our 128-invocation subgroup support for them.
+    */
+   bool restrict_subgroup_size_64;
+
    /* D3D emulation requires texture coordinates to be rounded to nearest even value. */
    bool use_tex_coord_round_nearest_even_mode;
 
@@ -240,6 +247,8 @@ struct tu_instance
 
    /* Configuration option to use a specific autotune algorithm by default. */
    const char *autotune_algo;
+
+   bool allow_concurrent_binning;
 };
 VK_DEFINE_HANDLE_CASTS(tu_instance, vk.base, VkInstance,
                        VK_OBJECT_TYPE_INSTANCE)

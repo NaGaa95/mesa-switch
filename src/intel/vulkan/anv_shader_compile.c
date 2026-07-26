@@ -239,6 +239,9 @@ anv_shader_init_uuid(struct anv_physical_device *device)
    blake3_hasher ctx;
    _mesa_blake3_init(&ctx);
 
+   const bool always_bindless = unlikely(device->instance->debug & ANV_DEBUG_BINDLESS);
+   _mesa_blake3_update(&ctx, &always_bindless, sizeof(always_bindless));
+
    const bool indirect_descriptors = device->indirect_descriptors;
    _mesa_blake3_update(&ctx, &indirect_descriptors, sizeof(indirect_descriptors));
 
@@ -269,6 +272,9 @@ anv_shader_init_uuid(struct anv_physical_device *device)
 
    const bool btp_bti_rcc = device->rt_change_needs_flush;
    _mesa_blake3_update(&ctx, &btp_bti_rcc, sizeof(btp_bti_rcc));
+
+   const bool slm_robust = device->instance->slm_robust_vectorization;
+   _mesa_blake3_update(&ctx, &slm_robust, sizeof(slm_robust));
 
    uint8_t blake3[BLAKE3_KEY_LEN];
    _mesa_blake3_final(&ctx, blake3);
@@ -455,7 +461,13 @@ populate_gs_prog_key(struct brw_gs_prog_key *key,
                      const struct vk_graphics_pipeline_state *state,
                      VkShaderStageFlags link_stages)
 {
+   const struct anv_physical_device *pdevice =
+      container_of(device, const struct anv_physical_device, vk);
+
    populate_base_gfx_prog_key(&key->base, device, rs, state, link_stages);
+
+   if (pdevice->instance->slm_robust_vectorization)
+      key->base.robust_flags |= BRW_ROBUSTNESS_SLM;
 }
 
 static void
@@ -465,9 +477,14 @@ populate_task_prog_key(struct brw_task_prog_key *key,
                        const struct vk_graphics_pipeline_state *state,
                        VkShaderStageFlags link_stages)
 {
+   const struct anv_physical_device *pdevice =
+      container_of(device, const struct anv_physical_device, vk);
+
    populate_base_gfx_prog_key(&key->base, device, rs, state, link_stages);
 
    key->base.uses_inline_push_addr = true;
+   if (pdevice->instance->slm_robust_vectorization)
+      key->base.robust_flags |= BRW_ROBUSTNESS_SLM;
 }
 
 static void
@@ -660,6 +677,9 @@ populate_cs_prog_key(struct brw_cs_prog_key *key,
       container_of(device, const struct anv_physical_device, vk);
 
    populate_base_prog_key(&key->base, device, rs);
+
+   if (pdevice->instance->slm_robust_vectorization)
+      key->base.robust_flags |= BRW_ROBUSTNESS_SLM;
 
    key->base.uses_inline_push_addr = pdevice->info.verx10 >= 125;
 }
@@ -2095,6 +2115,7 @@ anv_shader_compile(struct vk_device *vk_device,
       struct vk_shader_compile_info *info = shader_data->info;
 
       shader_data->source_hash = ((uint32_t*)info->nir->info.source_blake3)[0];
+      shader_data->key_size = brw_prog_key_size(info->stage);
 
       for (uint32_t i = 0; i < info->set_layout_count; i++) {
          shader_data->dynamic_descriptors[i] =

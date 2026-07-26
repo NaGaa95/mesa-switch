@@ -234,6 +234,24 @@ bi_collect_v2i32(bi_builder *b, bi_index s0, bi_index s1)
    return dst;
 }
 
+static void
+bi_split_i64_for_shadd(bi_builder *b, bi_index src, bi_index out[2])
+{
+   bi_index tmp[4] = {bi_null(), bi_null(), bi_null(), bi_null()};
+   bi_emit_split_i32(b, tmp, src, 2);
+   out[0] = tmp[0];
+   out[1] = tmp[1];
+}
+
+static bi_index
+bi_materialize_i64_for_shadd(bi_builder *b, bi_index src)
+{
+   bi_index components[2] = {bi_null(), bi_null()};
+   bi_split_i64_for_shadd(b, src, components);
+
+   return bi_collect_v2i32(b, components[0], components[1]);
+}
+
 static inline bi_instr *
 bi_f32_to_f16_to(bi_builder *b, bi_index dest, bi_index src)
 {
@@ -3384,6 +3402,8 @@ bi_emit_alu(bi_builder *b, nir_alu_instr *instr)
    case nir_op_iadd:
       if (sz == 64) {
          assert(b->shader->arch >= 9);
+         s0 = bi_materialize_i64_for_shadd(b, s0);
+         s1 = bi_materialize_i64_for_shadd(b, s1);
          bi_shaddx_s64_to(b, dst, s0, s1, 0);
          bi_index dsts[4] = {bi_null(), bi_null(), bi_null(), bi_null()};
          bi_emit_split_i32(b, dsts, dst, 2);
@@ -5635,11 +5655,14 @@ bi_compile_variant(nir_shader *nir,
    ralloc_free(ctx);
 }
 
+/* Find all predecessors of b that are dominated by b. */
 static void
-find_all_predecessors(const bi_context *ctx, bi_block *b, BITSET_WORD *out)
+find_all_dominated_predecessors(const bi_context *ctx, bi_block *b,
+                                BITSET_WORD *out, BITSET_WORD *dominators)
 {
    assert(out);
    assert(b);
+   assert(dominators);
 
    BITSET_CLEAR_COUNT(out, 0, ctx->num_blocks);
 
@@ -5649,7 +5672,8 @@ find_all_predecessors(const bi_context *ctx, bi_block *b, BITSET_WORD *out)
    for (uint32_t iter = 0; iter < ctx->num_blocks - 1; ++iter) {
       bi_foreach_block(ctx, block) {
          bi_foreach_successor(block, succ) {
-            if (succ == b || BITSET_TEST(out, succ->index)) {
+            if ((succ == b || BITSET_TEST(out, succ->index)) &&
+                BITSET_TEST(dominators, block->index)) {
                BITSET_SET(out, block->index);
                break;
             }
@@ -5661,8 +5685,6 @@ find_all_predecessors(const bi_context *ctx, bi_block *b, BITSET_WORD *out)
 void
 bi_find_loop_blocks(const bi_context *ctx, bi_block *header, BITSET_WORD *out)
 {
-   find_all_predecessors(ctx, header, out);
-
    BITSET_WORD *dominators = BITSET_RZALLOC(NULL, ctx->num_blocks);
    bi_foreach_block(ctx, b) {
       if (bi_block_dominates(header, b)) {
@@ -5670,10 +5692,7 @@ bi_find_loop_blocks(const bi_context *ctx, bi_block *header, BITSET_WORD *out)
       }
    }
 
-   /* If the header dominates b and is also the successor of b, then b
-    * is in the loop of that header.
-    */
-   __bitset_and(out, out, dominators, BITSET_WORDS(ctx->num_blocks));
+   find_all_dominated_predecessors(ctx, header, out, dominators);
 
    /* The header is not a predecessor of itself, so add it separately. */
    BITSET_SET(out, header->index);

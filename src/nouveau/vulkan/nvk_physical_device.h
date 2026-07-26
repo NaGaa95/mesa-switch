@@ -80,9 +80,11 @@ nvk_physical_device_instance(const struct nvk_physical_device *pdev)
    return (struct nvk_instance *)pdev->vk.instance;
 }
 
+#ifndef HAVE_SWITCH_PLATFORM
 VkResult nvk_create_drm_physical_device(struct vk_instance *vk_instance,
                                         struct _drmDevice *drm_device,
                                         struct vk_physical_device **pdev_out);
+#endif
 
 struct nvkmd_pdev;
 VkResult nvk_create_physical_device_from_nvkmd(struct nvk_instance *instance,

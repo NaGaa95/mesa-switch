@@ -69,12 +69,6 @@ nvk_files = files(
   'nvk_wsi.h',
   'layers/nvk_app_workarounds.c',
   'layers/nvk_app_workarounds.h',
-  'nvkmd/nouveau/nvkmd_nouveau.h',
-  'nvkmd/nouveau/nvkmd_nouveau_ctx.c',
-  'nvkmd/nouveau/nvkmd_nouveau_dev.c',
-  'nvkmd/nouveau/nvkmd_nouveau_mem.c',
-  'nvkmd/nouveau/nvkmd_nouveau_pdev.c',
-  'nvkmd/nouveau/nvkmd_nouveau_va.c',
   'nvkmd/nvkmd.c',
   'nvkmd/nvkmd.h',
 )
@@ -98,6 +92,15 @@ if with_platform_switch
     'nvkmd/switch/nvkmd_switch.h',
     'nvkmd/switch/nvkmd_switch_dev.c',
     'nvkmd/switch/nvkmd_switch_pdev.c',
+  )
+else
+  nvk_files += files(
+    'nvkmd/nouveau/nvkmd_nouveau.h',
+    'nvkmd/nouveau/nvkmd_nouveau_ctx.c',
+    'nvkmd/nouveau/nvkmd_nouveau_dev.c',
+    'nvkmd/nouveau/nvkmd_nouveau_mem.c',
+    'nvkmd/nouveau/nvkmd_nouveau_pdev.c',
+    'nvkmd/nouveau/nvkmd_nouveau_va.c',
   )
 endif
 

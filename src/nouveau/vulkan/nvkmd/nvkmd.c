@@ -4,8 +4,9 @@
  */
 
 #include "nvkmd.h"
+#ifndef HAVE_SWITCH_PLATFORM
 #include "nouveau/nvkmd_nouveau.h"
-#ifdef __SWITCH__
+#else
 #include "switch/nvkmd_switch.h"
 #endif
 #include "nv_push.h"
@@ -85,6 +86,7 @@ nvkmd_mem_init(struct nvkmd_dev *dev,
    simple_mtx_init(&mem->map_mutex, mtx_plain);
 }
 
+#ifndef HAVE_SWITCH_PLATFORM
 VkResult
 nvkmd_try_create_pdev_for_drm(struct _drmDevice *drm_device,
                               struct vk_object_base *log_obj,
@@ -94,8 +96,9 @@ nvkmd_try_create_pdev_for_drm(struct _drmDevice *drm_device,
    return nvkmd_nouveau_try_create_pdev(drm_device, log_obj,
                                         debug_flags, pdev_out);
 }
+#endif
 
-#ifdef __SWITCH__
+#ifdef HAVE_SWITCH_PLATFORM
 VkResult
 nvkmd_try_create_pdev_for_switch(struct vk_object_base *log_obj,
                                  enum nvk_debug debug_flags,

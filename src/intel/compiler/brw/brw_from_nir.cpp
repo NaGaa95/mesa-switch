@@ -2966,9 +2966,11 @@ brw_from_nir_emit_tes_intrinsic(nir_to_brw_state &ntb,
       break;
 
    case nir_intrinsic_load_attribute_payload_intel:
+      assert(instr->def.bit_size == 32);
       tes_prog_data->base.urb_read_length =
          MAX2(tes_prog_data->base.urb_read_length,
-              DIV_ROUND_UP(nir_src_as_uint(instr->src[0]) + 1, 8));
+              DIV_ROUND_UP(nir_src_as_uint(instr->src[0]) +
+                           4 * instr->def.num_components, 32));
       brw_from_nir_emit_intrinsic(ntb, bld, instr);
       break;
 
@@ -5046,6 +5048,11 @@ brw_from_nir_emit_intrinsic(nir_to_brw_state &ntb,
             break;
       }
 
+      if (s.stage == MESA_SHADER_COMPUTE) {
+         struct brw_cs_prog_data *cs_prog_data = brw_cs_prog_data(s.prog_data);
+         cs_prog_data->uses_fence = true;
+      }
+
       unsigned fence_regs_count = 0;
       brw_reg fence_regs[4] = {};
 
@@ -5239,10 +5246,9 @@ brw_from_nir_emit_intrinsic(nir_to_brw_state &ntb,
       unsigned base_offset = nir_intrinsic_base(instr);
       assert(base_offset % 4 == 0 || base_offset % brw_type_size_bytes(dest.type) == 0);
 
-      brw_reg src = brw_uniform_reg(
-         instr->intrinsic == nir_intrinsic_load_inline_data_intel ?
-         BRW_INLINE_PARAM_REG : (base_offset / REG_SIZE),
-         dest.type);
+      unsigned nr = base_offset / REG_SIZE;
+      nr += instr->intrinsic == nir_intrinsic_load_inline_data_intel ? BRW_INLINE_PARAM_REG : 0;
+      brw_reg src = brw_uniform_reg(nr, dest.type);
 
       if (nir_src_is_const(instr->src[0])) {
          unsigned load_offset = nir_src_as_uint(instr->src[0]);

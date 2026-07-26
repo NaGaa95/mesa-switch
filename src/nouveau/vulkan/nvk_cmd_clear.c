@@ -151,7 +151,6 @@ nvk_CmdClearAttachments(VkCommandBuffer commandBuffer,
 {
    VK_FROM_HANDLE(nvk_cmd_buffer, cmd, commandBuffer);
    const struct vk_dynamic_graphics_state *dyn = &cmd->vk.dynamic_graphics_state;
-
    struct nv_push *p = nvk_cmd_buffer_push(cmd, 4 + attachmentCount * 4);
 
    P_IMMD(p, NV9097, SET_CLEAR_SURFACE_CONTROL, {

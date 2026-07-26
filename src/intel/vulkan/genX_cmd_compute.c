@@ -376,6 +376,7 @@ compute_update_async_threads_limit(struct anv_cmd_buffer *cmd_buffer,
 
    intel_compute_engine_async_threads_limit(devinfo, dispatch->threads,
                                             slm_or_barrier_enabled,
+                                            prog_data->uses_fence,
                                             &pixel_async_compute_thread_limit,
                                             &z_pass_async_compute_thread_limit,
                                             &np_z_async_throttle_settings);
@@ -532,8 +533,8 @@ emit_indirect_compute_walker(struct anv_cmd_buffer *cmd_buffer,
          .MaxCount                   = 1,
          .body                       = body,
          .ArgumentBufferStartAddress = indirect_addr,
-         .MOCS                       = anv_mocs(cmd_buffer->device,
-                                                indirect_addr.bo, 0),
+         .MOCSIndex                  = MOCS_GET_INDEX(anv_mocs(cmd_buffer->device,
+                                                               indirect_addr.bo, 0)),
       );
 
    cmd_buffer_post_dispatch_wa(cmd_buffer);

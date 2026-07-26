@@ -288,15 +288,18 @@ get_max_vbs(const struct intel_device_info *devinfo) {
 #define ANV_TRTT_L1_NULL_TILE_VAL 0
 #define ANV_TRTT_L1_INVALID_TILE_VAL 1
 
-/* The binding table entry id disabled, the shader can write to it and the
+/* The binding table entry is disabled, the shader can write to it and the
  * driver should use a null surface state so that writes are discarded.
  */
 #define ANV_COLOR_OUTPUT_DISABLED (0xff)
-/* The binding table entry id unused, the shader does not write to it and the
+/* The binding table entry is unused, the shader does not write to it and the
  * driver can leave whatever surface state was used before. Transitioning
  * to/from this entry does not require render target cache flush.
  */
 #define ANV_COLOR_OUTPUT_UNUSED   (0xfe)
+/* The binding table entry is unknown.
+ */
+#define ANV_COLOR_OUTPUT_UNKNOWN  (0xfd)
 
 static inline uint32_t
 align_down_npot_u32(uint32_t v, uint32_t a)
@@ -1863,6 +1866,8 @@ struct anv_instance {
     bool                                        disable_lto;
     enum brw_divergent_atomics_flags            enable_opt_divergent_atomics;
 
+    bool                                        slm_robust_vectorization;
+
     /**
      * Ray tracing configuration.
      */
@@ -2288,6 +2293,7 @@ struct anv_gfx_dynamic_state {
    struct {
       uint32_t DerefBlockSize;
       uint32_t PointWidthSource;
+      bool     LastPixelEnable;
       float    LineWidth;
       uint32_t TriangleStripListProvokingVertexSelect;
       uint32_t LineStripListProvokingVertexSelect;
@@ -3500,6 +3506,9 @@ struct anv_storage_image_descriptor {
 
    /** Image Format (enum isl_format) */
    uint32_t format;
+
+   /** Image View VkImageSubresourceRange::baseArrayLayer */
+   uint32_t min_array_element;
 };
 
 /** Struct representing a address/range descriptor

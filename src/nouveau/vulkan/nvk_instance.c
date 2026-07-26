@@ -130,6 +130,7 @@ nvk_init_debug_flags(struct nvk_instance *instance)
       { "edb_bview", NVK_DEBUG_FORCE_EDB_BVIEW },
       { "gart", NVK_DEBUG_FORCE_GART },
       { "coherent", NVK_DEBUG_FORCE_COHERENT },
+      { "no_compression", NVK_DEBUG_NO_COMPRESSION },
       { NULL, 0 },
    };
 
@@ -203,11 +204,12 @@ nvk_CreateInstance(const VkInstanceCreateInfo *pCreateInfo,
    nvk_init_debug_flags(instance);
    nvk_init_dri_options(instance);
 
-   instance->vk.physical_devices.try_create_for_drm =
-      nvk_create_drm_physical_device;
 #ifdef __SWITCH__
    instance->vk.physical_devices.enumerate =
       nvk_enumerate_switch_physical_devices;
+#else
+   instance->vk.physical_devices.try_create_for_drm =
+      nvk_create_drm_physical_device;
 #endif
    instance->vk.physical_devices.destroy = nvk_physical_device_destroy;
 
@@ -244,8 +246,10 @@ nvk_CreateInstance(const VkInstanceCreateInfo *pCreateInfo,
    *pInstance = nvk_instance_to_handle(instance);
    return VK_SUCCESS;
 
+#ifdef HAVE_DL_ITERATE_PHDR
 fail_init:
    vk_instance_finish(&instance->vk);
+#endif
 fail_alloc:
    vk_free(pAllocator, instance);
 

@@ -12,7 +12,3 @@ dEQP-VK.binding_model.unused_invalid_descriptor.write.unused.storage_buffer,Cras
 dEQP-VK.binding_model.unused_invalid_descriptor.write.unused.storage_image,Crash
 dEQP-VK.binding_model.unused_invalid_descriptor.write.unused.uniform_buffer,Crash
 dEQP-VK.memory.concurrent_access.shader_and_host,Crash
-dEQP-VK.pipeline.monolithic.stencil.no_stencil_att.dynamic_rendering.dynamic_enable.d24_unorm_s8_uint,Fail
-dEQP-VK.pipeline.monolithic.stencil.no_stencil_att.dynamic_rendering.dynamic_enable.d32_sfloat_s8_uint,Fail
-dEQP-VK.pipeline.monolithic.stencil.no_stencil_att.dynamic_rendering.static_enable.d24_unorm_s8_uint,Fail
-dEQP-VK.pipeline.monolithic.stencil.no_stencil_att.dynamic_rendering.static_enable.d32_sfloat_s8_uint,Fail

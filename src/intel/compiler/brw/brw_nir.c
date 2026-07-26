@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include "brw_eu.h"
 #include "brw_nir.h"
 #include "brw_private.h"
 #include "brw_sampler.h"
@@ -633,7 +634,7 @@ brw_nir_lower_deferred_urb_writes(nir_shader *nir,
             const nir_io_semantics sem = nir_intrinsic_io_semantics(intrin);
             const unsigned slot =
                vue_map->varying_to_slot[sem.location] +
-               (view_index ? nir_src_as_uint(*view_index) : 0);
+               (view_index ? nir_src_as_uint(*view_index) : 0) +
                nir_src_as_uint(*offset);
             const unsigned c = io_component(intrin, NULL);
             const unsigned mask = nir_intrinsic_write_mask(intrin);
@@ -2640,6 +2641,8 @@ brw_vectorize_lower_mem_access(brw_pass_tracker *pt)
       options.robust_modes |= nir_var_mem_ubo;
    if (pt->key->robust_flags & BRW_ROBUSTNESS_SSBO)
       options.robust_modes |= nir_var_mem_ssbo;
+   if (pt->key->robust_flags & BRW_ROBUSTNESS_SLM)
+      options.robust_modes |= nir_var_mem_shared;
 
    OPT(nir_opt_load_store_vectorize, &options);
 
@@ -3883,6 +3886,26 @@ brw_nir_quick_pressure_estimate(nir_shader *nir,
       simd_estimate[i] = DIV_ROUND_UP(convergent_size, 8 << base_simd) +
                          divergent_size * (1 << (i - base_simd));
    }
+}
+
+/**
+ * Provide a rough estimate of the payload size of a vertex shader based on
+ * the amount of inputs.
+ *
+ * This could be improved checking whether packing is enabled and what
+ * components are read.
+ */
+unsigned
+brw_nir_vs_compute_payload_size(nir_shader *nir,
+                                const struct intel_device_info *devinfo)
+{
+   unsigned n = 2; /* payload registers we can't avoid */
+
+   u_foreach_bit64(b, nir->info.inputs_read) {
+      n += 4 * ((BITFIELD64_BIT(b) & nir->info.dual_slot_inputs) ? 2 : 1);
+   }
+
+   return REG_SIZE * reg_unit(devinfo) * n;
 }
 
 unsigned

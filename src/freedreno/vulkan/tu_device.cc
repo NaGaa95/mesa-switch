@@ -70,6 +70,8 @@ tu_device_get_cache_uuid(struct tu_physical_device *device, void *uuid)
    _mesa_blake3_update(&ctx, &family, sizeof(family));
    _mesa_blake3_update(&ctx, &driver_flags, sizeof(driver_flags));
    _mesa_blake3_update(&ctx, &device->uche_trap_base, sizeof(device->uche_trap_base));
+   _mesa_blake3_update(&ctx, &device->instance->allow_oob_indirect_ubo_loads,
+                       sizeof(device->instance->allow_oob_indirect_ubo_loads));
    _mesa_blake3_final(&ctx, blake3);
 
    memcpy(uuid, blake3, VK_UUID_SIZE);
@@ -663,7 +665,7 @@ tu_get_features(struct tu_physical_device *pdevice,
    /* VK_EXT_extended_dynamic_state2 */
    features->extendedDynamicState2 = true;
    features->extendedDynamicState2LogicOp = true;
-   features->extendedDynamicState2PatchControlPoints = true;
+   features->extendedDynamicState2PatchControlPoints = !pdevice->info->props.is_a702;
 
    /* VK_EXT_extended_dynamic_state3 */
    features->extendedDynamicState3PolygonMode = true;
@@ -884,8 +886,8 @@ tu_get_physical_device_properties_1_1(struct tu_physical_device *pdevice,
    p->deviceNodeMask = 0;
    p->deviceLUIDValid = false;
 
-   p->subgroupSize = pdevice->info->props.supports_double_threadsize ?
-      pdevice->info->threadsize_base * 2 : pdevice->info->threadsize_base;
+   p->subgroupSize =
+      pdevice->expose_double_threadsize ? pdevice->info->threadsize_base * 2 : pdevice->info->threadsize_base;
    p->subgroupSupportedStages = VK_SHADER_STAGE_COMPUTE_BIT;
    p->subgroupSupportedOperations = VK_SUBGROUP_FEATURE_BASIC_BIT |
                                     VK_SUBGROUP_FEATURE_VOTE_BIT |
@@ -1033,8 +1035,8 @@ tu_get_physical_device_properties_1_3(struct tu_physical_device *pdevice,
                                       struct vk_properties *p)
 {
    p->minSubgroupSize = pdevice->info->threadsize_base;
-   p->maxSubgroupSize = pdevice->info->props.supports_double_threadsize ?
-      pdevice->info->threadsize_base * 2 : pdevice->info->threadsize_base;
+   p->maxSubgroupSize =
+      pdevice->expose_double_threadsize ? pdevice->info->threadsize_base * 2 : pdevice->info->threadsize_base;
    p->maxComputeWorkgroupSubgroups = pdevice->info->max_waves;
    p->requiredSubgroupSizeStages = VK_SHADER_STAGE_ALL;
 
@@ -1163,9 +1165,9 @@ tu_get_properties(struct tu_physical_device *pdevice,
    props->maxComputeWorkGroupCount[0] =
       props->maxComputeWorkGroupCount[1] =
       props->maxComputeWorkGroupCount[2] = 65535;
-   props->maxComputeWorkGroupInvocations = pdevice->info->props.supports_double_threadsize ?
-      pdevice->info->threadsize_base * 2 * pdevice->info->max_waves :
-      pdevice->info->threadsize_base * pdevice->info->max_waves;
+   props->maxComputeWorkGroupInvocations = pdevice->expose_double_threadsize
+                                              ? pdevice->info->threadsize_base * 2 * pdevice->info->max_waves
+                                              : pdevice->info->threadsize_base * pdevice->info->max_waves;
    if (pdevice->info->props.is_a702) {
       props->maxComputeWorkGroupSize[0] =
          props->maxComputeWorkGroupSize[1] = 512;
@@ -1397,7 +1399,7 @@ tu_get_properties(struct tu_physical_device *pdevice,
    props->bufferCaptureReplayDescriptorDataSize = sizeof(uint64_t);
    props->imageCaptureReplayDescriptorDataSize = sizeof(uint64_t);
    props->imageViewCaptureReplayDescriptorDataSize = 0;
-   props->samplerCaptureReplayDescriptorDataSize = 0;
+   props->samplerCaptureReplayDescriptorDataSize = sizeof(uint32_t);
    props->accelerationStructureCaptureReplayDescriptorDataSize = 0;
    /* Note: these sizes must match descriptor_size() */
    props->EDBsamplerDescriptorSize = FDL6_TEX_CONST_DWORDS * 4;
@@ -1674,6 +1676,8 @@ tu_physical_device_init(struct tu_physical_device *device,
       goto fail_free_name;
    }
 
+   device->expose_double_threadsize = info.props.supports_double_threadsize && !instance->restrict_subgroup_size_64;
+
    device->level1_dcache_size = util_cache_granularity();
    device->has_cached_non_coherent_memory =
       device->level1_dcache_size > 0 && !DETECT_ARCH_ARM;
@@ -1821,6 +1825,7 @@ static const driOptionDescription tu_dri_options[] = {
       DRI_CONF_VK_X11_STRICT_IMAGE_COUNT(false)
       DRI_CONF_VK_X11_ENSURE_MIN_IMAGE_COUNT(false)
       DRI_CONF_VK_XWAYLAND_WAIT_READY(false)
+      DRI_CONF_TU_ALLOW_CONCURRENT_BINNING(false)
    DRI_CONF_SECTION_END
 
    DRI_CONF_SECTION_DEBUG
@@ -1841,6 +1846,7 @@ static const driOptionDescription tu_dri_options[] = {
       DRI_CONF_TU_ENABLE_SOFTFLOAT32(false)
       DRI_CONF_TU_EMULATE_ALPHA_TO_COVERAGE(false)
       DRI_CONF_TU_AUTOTUNE_ALGORITHM()
+      DRI_CONF_TU_RESTRICT_SUBGROUP_SIZE_64(false)
    DRI_CONF_SECTION_END
 };
 
@@ -1875,6 +1881,10 @@ tu_init_dri_options(struct tu_instance *instance)
          driQueryOptionb(&instance->dri_options, "tu_emulate_alpha_to_coverage");
    instance->autotune_algo =
          driQueryOptionstr(&instance->dri_options, "tu_autotune_algorithm");
+   instance->restrict_subgroup_size_64 = driQueryOptionb(&instance->dri_options, "tu_restrict_subgroup_size_64");
+   instance->allow_concurrent_binning =
+      (driQueryOptionb(&instance->dri_options, "tu_allow_concurrent_binning") && !TU_DEBUG(NO_CONCURRENT_BINNING)) ||
+      TU_DEBUG(FORCE_CONCURRENT_BINNING);
 }
 
 static uint32_t instance_count = 0;
@@ -3544,7 +3554,7 @@ tu_memory_emit_report(struct tu_device *device,
          &device->vk, VK_DEVICE_MEMORY_REPORT_EVENT_TYPE_ALLOCATION_FAILED_EXT,
          /* mem_obj_id */ 0, alloc_info->allocationSize,
          VK_OBJECT_TYPE_DEVICE_MEMORY,
-         /* obj_handle */ 0, alloc_info->memoryTypeIndex);
+         /* obj_handle */ 0, /* heap_index */ 0);
       return;
    }
 
@@ -3561,7 +3571,7 @@ tu_memory_emit_report(struct tu_device *device,
 
    vk_emit_device_memory_report(&device->vk, type, mem->bo->unique_id,
                                 mem->bo->size, VK_OBJECT_TYPE_DEVICE_MEMORY,
-                                (uintptr_t)(mem), mem->vk.memory_type_index);
+                                (uintptr_t)(mem), /* heap_index */ 0);
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL

@@ -2719,9 +2719,9 @@ blorp_blit(struct blorp_batch *batch,
       isl_format_get_layout(params.src.view.format);
 
    struct blorp_blit_prog_key key = {
-      .base = BLORP_BASE_KEY_INIT(BLORP_SHADER_TYPE_BLIT),
-      .base.shader_pipeline = compute ? BLORP_SHADER_PIPELINE_COMPUTE :
-                                        BLORP_SHADER_PIPELINE_RENDER,
+      .base = BLORP_BASE_KEY_INIT(BLORP_SHADER_TYPE_BLIT,
+                                  (compute ? BLORP_SHADER_PIPELINE_COMPUTE :
+                                             BLORP_SHADER_PIPELINE_RENDER)),
       .filter = filter,
       .sint32_to_uint = src_fmtl->channels.r.bits == 32 &&
                         isl_format_has_sint_channel(params.src.view.format) &&
@@ -3132,8 +3132,19 @@ get_max_format_scale(const struct isl_device *isl_dev,
    uint32_t lod1_w = u_minify(info->surf.logical_level0_px.width, 1);
    uint32_t phys_lod1_w = align(lod1_w, info->surf.image_alignment_el.w);
 
+   int max_bpb = 128;
+   /* From the Sandybridge PRM, Volume 1, Part 2, page 32:
+    *
+    *    "NOTE: 128BPE Format Color Buffer ( render target ) MUST be either
+    *     TileX or Linear."
+    *
+    * This is necessary all the way back to 965, but is permitted on Gfx7+.
+    */
+   if (ISL_GFX_VER(isl_dev) < 7 && info->surf.tiling == ISL_TILING_Y0)
+      max_bpb = 64;
+
    /* Find the format size which satisfies alignment requirements. */
-   for (int max_bpb = 128; max_bpb >= surf_fmtl->bpb; max_bpb /= 2) {
+   for (; max_bpb >= surf_fmtl->bpb; max_bpb /= 2) {
       if (info->view.base_level >= 1 &&
           phys_lod1_w * surf_fmtl->bpb % max_bpb)
          continue;
@@ -3260,9 +3271,9 @@ blorp_copy(struct blorp_batch *batch,
                            dst_layer, ISL_FORMAT_UNSUPPORTED, true);
 
    struct blorp_blit_prog_key key = {
-      .base = BLORP_BASE_KEY_INIT(BLORP_SHADER_TYPE_COPY),
-      .base.shader_pipeline = compute ? BLORP_SHADER_PIPELINE_COMPUTE :
-                                        BLORP_SHADER_PIPELINE_RENDER,
+      .base = BLORP_BASE_KEY_INIT(BLORP_SHADER_TYPE_COPY,
+                                  (compute ? BLORP_SHADER_PIPELINE_COMPUTE :
+                                             BLORP_SHADER_PIPELINE_RENDER)),
       .filter = BLORP_FILTER_NONE,
       .need_src_offset = src_surf->tile_x_sa || src_surf->tile_y_sa,
       .need_dst_offset = dst_surf->tile_x_sa || dst_surf->tile_y_sa,

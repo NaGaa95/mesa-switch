@@ -130,15 +130,15 @@ traces:
       checksum: 4b533d691227f26e258ad622a428cc24
       text: Different rendering from iris, but still looks correct (common result with this trace)
     zink-radv-vangogh:
-      checksum: 143603c47d958c6ad7f05e2fb5268bb7
+      checksum: 9ced84dc92fd3748e43888403b1474c8
     zink-radv-gfx1201:
-      checksum: 143603c47d958c6ad7f05e2fb5268bb7
+      checksum: 9ced84dc92fd3748e43888403b1474c8
 
   gputest/plot3d-v2.trace:
     gl-zink-anv-adl:
-      checksum: 56f11d133f72712a6df13855ec00cdb0
+      checksum: 8d32486f770f91a2a7cb13cda9f7da07
     gl-zink-anv-tgl:
-      checksum: 56f11d133f72712a6df13855ec00cdb0
+      checksum: 8d32486f770f91a2a7cb13cda9f7da07
     zink-radv-vangogh:
       checksum: 97f929220cf05c7782c6f9ecc94b76f0
     zink-radv-gfx1201:
@@ -444,10 +444,10 @@ traces:
 
   warzone2100/warzone2100-default.trace:
     gl-zink-anv-adl:
-      checksum: 56f1f06bdca3d5352b5e6c0c3d572f43
+      checksum: be68b8d39e665a64824ea37703654a8a
     gl-zink-anv-tgl:
       label: [skip, flakes]
-      checksum: 56f1f06bdca3d5352b5e6c0c3d572f43
+      checksum: be68b8d39e665a64824ea37703654a8a
       text: occasional checksum change
     zink-radv-vangogh:
       checksum: 51d4649b2e415cfe595ae0243472fdd7

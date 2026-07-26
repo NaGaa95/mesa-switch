@@ -1247,7 +1247,7 @@ emit_intrinsic_copy_global_to_uniform(struct ir3_context *ctx,
 
    struct ir3_instruction *a1 = NULL;
    unsigned dst_imm = dst;
-   if (dst > 256) {
+   if (dst >= 256) {
       a1 = ir3_create_addr1(&ctx->build, dst);
       dst_imm = 0;
    }

@@ -25,6 +25,42 @@
 #define NVKMD_SWITCH_CLS_M2MF     0xa140 /* KEPLER_INLINE_TO_MEMORY_B */
 #define NVKMD_SWITCH_CLS_GPFIFO   0xb06f /* MAXWELL_CHANNEL_GPFIFO_A */
 
+/* Horizon maps every nvkmd memory allocation at the 64 KiB GPU bind
+ * granularity.  A native-fence sync only needs one four-byte completion
+ * payload, so allocating one BO per sync wastes almost the entire mapping and
+ * repeats NvMap, VA-allocation and address-space-map work on every submit.
+ *
+ * Keep slots on separate 64-byte lines.  The memory is CPU-uncached and
+ * GPU-uncached, so this is not required for cache coherence, but it prevents
+ * independent GPU semaphore writes from sharing the same transaction-sized
+ * region and leaves room to extend a payload without changing the allocator.
+ */
+#define NVKMD_SWITCH_SYNC_PAYLOAD_SLAB_SIZE_B NVKMD_SWITCH_BIND_ALIGN_B
+#define NVKMD_SWITCH_SYNC_PAYLOAD_SLOT_SIZE_B 64u
+#define NVKMD_SWITCH_SYNC_PAYLOAD_SLOT_COUNT \
+   (NVKMD_SWITCH_SYNC_PAYLOAD_SLAB_SIZE_B / \
+    NVKMD_SWITCH_SYNC_PAYLOAD_SLOT_SIZE_B)
+#define NVKMD_SWITCH_SYNC_PAYLOAD_MASK_BITS 64u
+#define NVKMD_SWITCH_SYNC_PAYLOAD_MASK_WORDS \
+   (NVKMD_SWITCH_SYNC_PAYLOAD_SLOT_COUNT / \
+    NVKMD_SWITCH_SYNC_PAYLOAD_MASK_BITS)
+
+static_assert(NVKMD_SWITCH_SYNC_PAYLOAD_SLAB_SIZE_B %
+              NVKMD_SWITCH_SYNC_PAYLOAD_SLOT_SIZE_B == 0,
+              "payload slab must contain whole slots");
+static_assert(NVKMD_SWITCH_SYNC_PAYLOAD_SLOT_COUNT %
+              NVKMD_SWITCH_SYNC_PAYLOAD_MASK_BITS == 0,
+              "payload slot bitmap must contain whole words");
+static_assert(NVKMD_SWITCH_SYNC_PAYLOAD_SLOT_COUNT <= UINT16_MAX,
+              "payload slot index must fit in uint16_t");
+
+struct nvkmd_switch_sync_payload_slab {
+   struct list_head link;
+   struct nvkmd_mem *mem;
+   uint64_t used[NVKMD_SWITCH_SYNC_PAYLOAD_MASK_WORDS];
+   uint16_t used_count;
+};
+
 /* Binary vk_sync backed by a libnx native fence payload.
  *
  * Lifecycle:
@@ -47,7 +83,9 @@ struct nvkmd_switch_sync {
    mtx_t mutex;
    struct u_cnd_monotonic cond;
    NvMultiFence fence;
+   struct nvkmd_switch_sync_payload_slab *payload_slab;
    struct nvkmd_mem *payload_mem;
+   uint16_t payload_slot;
    volatile uint32_t *payload;
    uint64_t payload_addr;
    uint32_t next_payload_value;
@@ -55,6 +93,141 @@ struct nvkmd_switch_sync {
    bool has_payload_wait;
    bool signaled;
 };
+
+static struct nvkmd_switch_dev *
+nvkmd_switch_dev_from_nvk(struct nvk_device *dev)
+{
+   return container_of(dev->nvkmd, struct nvkmd_switch_dev, base);
+}
+
+void
+nvkmd_switch_sync_payload_pool_init(struct nvkmd_switch_dev *dev)
+{
+   simple_mtx_init(&dev->sync_payload_mutex, mtx_plain);
+   list_inithead(&dev->sync_payload_slabs);
+}
+
+void
+nvkmd_switch_sync_payload_pool_finish(struct nvkmd_switch_dev *dev)
+{
+   list_for_each_entry_safe(struct nvkmd_switch_sync_payload_slab, slab,
+                            &dev->sync_payload_slabs, link) {
+      assert(slab->used_count == 0);
+
+      list_del(&slab->link);
+      nvkmd_mem_unref(slab->mem);
+      FREE(slab);
+   }
+
+   simple_mtx_destroy(&dev->sync_payload_mutex);
+}
+
+static bool
+nvkmd_switch_sync_payload_slab_take(
+   struct nvkmd_switch_sync_payload_slab *slab,
+   uint16_t *slot_out)
+{
+   if (slab->used_count == NVKMD_SWITCH_SYNC_PAYLOAD_SLOT_COUNT)
+      return false;
+
+   for (uint32_t w = 0; w < ARRAY_SIZE(slab->used); w++) {
+      const uint64_t free_mask = ~slab->used[w];
+      if (free_mask == 0)
+         continue;
+
+      const uint32_t bit = __builtin_ctzll(free_mask);
+      const uint32_t slot = w * NVKMD_SWITCH_SYNC_PAYLOAD_MASK_BITS + bit;
+      assert(slot < NVKMD_SWITCH_SYNC_PAYLOAD_SLOT_COUNT);
+
+      slab->used[w] |= UINT64_C(1) << bit;
+      slab->used_count++;
+      *slot_out = slot;
+      return true;
+   }
+
+   UNREACHABLE("sync payload slab free-count mismatch");
+}
+
+static VkResult
+nvkmd_switch_sync_payload_pool_acquire(
+   struct nvkmd_switch_dev *dev,
+   struct vk_object_base *log_obj,
+   struct nvkmd_switch_sync_payload_slab **slab_out,
+   uint16_t *slot_out,
+   volatile uint32_t **payload_out,
+   uint64_t *payload_addr_out)
+{
+   struct nvkmd_switch_sync_payload_slab *selected = NULL;
+   uint16_t slot = 0;
+
+   simple_mtx_lock(&dev->sync_payload_mutex);
+
+   list_for_each_entry(struct nvkmd_switch_sync_payload_slab, slab,
+                       &dev->sync_payload_slabs, link) {
+      if (nvkmd_switch_sync_payload_slab_take(slab, &slot)) {
+         selected = slab;
+         break;
+      }
+   }
+
+   VkResult result = VK_SUCCESS;
+   if (selected == NULL) {
+      selected = CALLOC_STRUCT(nvkmd_switch_sync_payload_slab);
+      if (selected == NULL) {
+         result = VK_ERROR_OUT_OF_HOST_MEMORY;
+         goto out_unlock;
+      }
+
+      result =
+         nvkmd_dev_alloc_mapped_mem(&dev->base, log_obj,
+                                    NVKMD_SWITCH_SYNC_PAYLOAD_SLAB_SIZE_B,
+                                    NVKMD_SWITCH_SYNC_PAYLOAD_SLAB_SIZE_B,
+                                    NVKMD_MEM_GART | NVKMD_MEM_COHERENT |
+                                    NVKMD_MEM_GPU_UNCACHED,
+                                    NVKMD_MEM_MAP_RDWR,
+                                    &selected->mem);
+      if (result != VK_SUCCESS) {
+         FREE(selected);
+         selected = NULL;
+         goto out_unlock;
+      }
+
+      list_addtail(&selected->link, &dev->sync_payload_slabs);
+      const bool took_slot =
+         nvkmd_switch_sync_payload_slab_take(selected, &slot);
+      assert(took_slot);
+   }
+
+   const uint64_t offset_B =
+      (uint64_t)slot * NVKMD_SWITCH_SYNC_PAYLOAD_SLOT_SIZE_B;
+   *slab_out = selected;
+   *slot_out = slot;
+   *payload_out = (volatile uint32_t *)((char *)selected->mem->map + offset_B);
+   *payload_addr_out = selected->mem->va->addr + offset_B;
+
+out_unlock:
+   simple_mtx_unlock(&dev->sync_payload_mutex);
+   return result;
+}
+
+static void
+nvkmd_switch_sync_payload_pool_release(
+   struct nvkmd_switch_dev *dev,
+   struct nvkmd_switch_sync_payload_slab *slab,
+   uint16_t slot)
+{
+   assert(slot < NVKMD_SWITCH_SYNC_PAYLOAD_SLOT_COUNT);
+   const uint32_t word = slot / NVKMD_SWITCH_SYNC_PAYLOAD_MASK_BITS;
+   const uint32_t bit = slot % NVKMD_SWITCH_SYNC_PAYLOAD_MASK_BITS;
+   const uint64_t mask = UINT64_C(1) << bit;
+
+   simple_mtx_lock(&dev->sync_payload_mutex);
+   assert(slab->used[word] & mask);
+   assert(slab->used_count > 0);
+   slab->used[word] &= ~mask;
+   slab->used_count--;
+   simple_mtx_unlock(&dev->sync_payload_mutex);
+}
 
 static bool
 nvkmd_switch_payload_reached(uint32_t payload, uint32_t wait_value)
@@ -107,6 +280,8 @@ nvkmd_switch_sync_init(struct vk_device *device,
                        uint64_t initial_value)
 {
    struct nvkmd_switch_sync *ssync = nvkmd_switch_sync_from_vk(sync);
+   struct nvk_device *dev = container_of(device, struct nvk_device, vk);
+   struct nvkmd_switch_dev *sdev = nvkmd_switch_dev_from_nvk(dev);
    int ret;
 
    ret = mtx_init(&ssync->mutex, mtx_plain);
@@ -121,21 +296,39 @@ nvkmd_switch_sync_init(struct vk_device *device,
                        "nvkmd-switch: cnd_init failed");
    }
 
-   struct nvk_device *dev = container_of(device, struct nvk_device, vk);
+   ssync->payload_slab = NULL;
+   ssync->payload_mem = NULL;
+   ssync->payload = NULL;
+   ssync->payload_addr = 0;
+   ssync->payload_slot = 0;
+
    VkResult result =
-      nvkmd_dev_alloc_mapped_mem(dev->nvkmd, &dev->vk.base,
-                                 sizeof(uint32_t), sizeof(uint32_t),
-                                 NVKMD_MEM_GART | NVKMD_MEM_COHERENT,
-                                 NVKMD_MEM_MAP_RDWR,
-                                 &ssync->payload_mem);
+      nvkmd_switch_sync_payload_pool_acquire(sdev, &dev->vk.base,
+                                             &ssync->payload_slab,
+                                             &ssync->payload_slot,
+                                             &ssync->payload,
+                                             &ssync->payload_addr);
+   if (result != VK_SUCCESS) {
+      /* Fall back to a dedicated payload allocation. */
+      result =
+         nvkmd_dev_alloc_mapped_mem(dev->nvkmd, &dev->vk.base,
+                                    sizeof(uint32_t), sizeof(uint32_t),
+                                    NVKMD_MEM_GART | NVKMD_MEM_COHERENT |
+                                    NVKMD_MEM_GPU_UNCACHED,
+                                    NVKMD_MEM_MAP_RDWR,
+                                    &ssync->payload_mem);
+      if (result == VK_SUCCESS) {
+         ssync->payload = ssync->payload_mem->map;
+         ssync->payload_addr = ssync->payload_mem->va->addr;
+      }
+   }
+
    if (result != VK_SUCCESS) {
       u_cnd_monotonic_destroy(&ssync->cond);
       mtx_destroy(&ssync->mutex);
       return result;
    }
 
-   ssync->payload = ssync->payload_mem->map;
-   ssync->payload_addr = ssync->payload_mem->va->addr;
    ssync->next_payload_value = initial_value != 0 ? 1 : 0;
    ssync->payload_wait_value = ssync->next_payload_value;
    ssync->has_payload_wait = initial_value != 0;
@@ -151,9 +344,15 @@ nvkmd_switch_sync_finish(struct vk_device *device,
                          struct vk_sync *sync)
 {
    struct nvkmd_switch_sync *ssync = nvkmd_switch_sync_from_vk(sync);
+   struct nvk_device *dev = container_of(device, struct nvk_device, vk);
 
-   if (ssync->payload_mem != NULL)
+   if (ssync->payload_slab != NULL) {
+      nvkmd_switch_sync_payload_pool_release(
+         nvkmd_switch_dev_from_nvk(dev), ssync->payload_slab,
+         ssync->payload_slot);
+   } else if (ssync->payload_mem != NULL) {
       nvkmd_mem_unref(ssync->payload_mem);
+   }
 
    u_cnd_monotonic_destroy(&ssync->cond);
    mtx_destroy(&ssync->mutex);
@@ -374,23 +573,6 @@ nvkmd_switch_sync_import_nvfence(struct vk_sync *sync, const NvFence *fence)
 }
 
 void
-nvkmd_switch_sync_import_nvfence_payload(struct vk_sync *sync,
-                                         const NvFence *fence,
-                                         uint32_t payload_value)
-{
-   struct nvkmd_switch_sync *ssync = nvkmd_switch_sync_from_vk(sync);
-   NvMultiFence mf;
-   nvMultiFenceCreate(&mf, fence);
-
-   mtx_lock(&ssync->mutex);
-   nvkmd_switch_multifence_copy_valid(&ssync->fence, &mf);
-   ssync->payload_wait_value = payload_value;
-   ssync->has_payload_wait = true;
-   u_cnd_monotonic_broadcast(&ssync->cond);
-   mtx_unlock(&ssync->mutex);
-}
-
-void
 nvkmd_switch_sync_import_nvmultifence(struct vk_sync *sync,
                                       const NvMultiFence *fence)
 {
@@ -401,28 +583,6 @@ nvkmd_switch_sync_import_nvmultifence(struct vk_sync *sync,
    ssync->has_payload_wait = false;
    u_cnd_monotonic_broadcast(&ssync->cond);
    mtx_unlock(&ssync->mutex);
-}
-
-bool
-nvkmd_switch_sync_prepare_payload_signal(struct vk_sync *sync,
-                                         uint64_t *addr_out,
-                                         uint32_t *value_out)
-{
-   if (sync == NULL || sync->type != &nvkmd_switch_point_sync_type)
-      return false;
-
-   struct nvkmd_switch_sync *ssync = nvkmd_switch_sync_from_vk(sync);
-
-   mtx_lock(&ssync->mutex);
-   ssync->next_payload_value++;
-   if (ssync->next_payload_value == 0)
-      ssync->next_payload_value = 1;
-
-   *addr_out = ssync->payload_addr;
-   *value_out = ssync->next_payload_value;
-   mtx_unlock(&ssync->mutex);
-
-   return true;
 }
 
 bool
@@ -594,17 +754,9 @@ nvkmd_switch_try_create_pdev(struct vk_object_base *log_obj,
        * restriction is a nouveau-kernel limitation, not a hardware one, so
        * it does not apply to this backend.
        *
-       * NOTE: forcing this false is NOT a safe toggle here. With it off,
-       * nvk_image sets NIL_IMAGE_USAGE_UNCOMPRESSED_BIT, NIL picks the
-       * *uncompressed* pte_kind, and this backend's bind path
-       * (nvkmd_switch_dev.c) rejects that kind with
-       * VK_ERROR_INITIALIZATION_FAILED on the first GFx/UI render target
-       * -> unhandled C++ exception -> abort at startup. So the backend can
-       * currently bind the compressed kind but not the uncompressed one; the
-       * UI/font corruption seen with this true is therefore most likely the
-       * compbit backing not being allocated for the compressed kind, which
-       * must be fixed in the Switch mem backend's bind/kind handling rather
-       * than by flipping this flag. Keep true until that is sorted. */
+       * The NvMap backing stays pitch and the selected NIL kind is applied at
+       * GPU VA mapping time.
+       */
       .has_compression = true,
    };
 
