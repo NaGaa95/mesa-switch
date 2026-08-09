@@ -512,12 +512,13 @@ nvc0_sampler_view_destroy(struct pipe_context *pipe,
    FREE(nv50_tic_entry(view));
 }
 
-static inline void
+static inline unsigned
 nvc0_stage_set_sampler_views(struct nvc0_context *nvc0, int s,
                              unsigned nr,
                              struct pipe_sampler_view **views)
 {
    unsigned i;
+   unsigned changes = 0;
 
    for (i = 0; i < nr; ++i) {
       struct pipe_sampler_view *view = views ? views[i] : NULL;
@@ -526,6 +527,7 @@ nvc0_stage_set_sampler_views(struct nvc0_context *nvc0, int s,
       if (view == nvc0->textures[s][i]) {
          continue;
       }
+      changes++;
       nvc0->textures_dirty[s] |= 1 << i;
 
       if (view && view->texture) {
@@ -553,6 +555,7 @@ nvc0_stage_set_sampler_views(struct nvc0_context *nvc0, int s,
    for (i = nr; i < nvc0->num_textures[s]; ++i) {
       struct nv50_tic_entry *old = nv50_tic_entry(nvc0->textures[s][i]);
       if (old) {
+         changes++;
          if (s == 5)
             nouveau_bufctx_reset(nvc0->bufctx_cp, NVC0_BIND_CP_TEX(i));
          else
@@ -563,6 +566,7 @@ nvc0_stage_set_sampler_views(struct nvc0_context *nvc0, int s,
    }
 
    nvc0->num_textures[s] = nr;
+   return changes;
 }
 
 static void
@@ -571,15 +575,18 @@ nvc0_set_sampler_views(struct pipe_context *pipe, mesa_shader_stage shader,
                        unsigned unbind_num_trailing_slots,
                        struct pipe_sampler_view **views)
 {
+   struct nvc0_context *nvc0 = nvc0_context(pipe);
    const unsigned s = nvc0_shader_stage(shader);
 
    assert(start == 0);
-   nvc0_stage_set_sampler_views(nvc0_context(pipe), s, nr, views);
-
-   if (s == 5)
-      nvc0_context(pipe)->dirty_cp |= NVC0_NEW_CP_TEXTURES;
-   else
-      nvc0_context(pipe)->dirty_3d |= NVC0_NEW_3D_TEXTURES;
+   const unsigned changes =
+      nvc0_stage_set_sampler_views(nvc0, s, nr, views);
+   if (changes) {
+      if (s == 5)
+         nvc0->dirty_cp |= NVC0_NEW_CP_TEXTURES;
+      else
+         nvc0->dirty_3d |= NVC0_NEW_3D_TEXTURES;
+   }
 }
 
 /* ============================= SHADERS =======================================
@@ -647,6 +654,8 @@ nvc0_vp_state_bind(struct pipe_context *pipe, void *hwcso)
 {
     struct nvc0_context *nvc0 = nvc0_context(pipe);
 
+    if (nvc0->vertprog == hwcso)
+       return;
     nvc0->vertprog = hwcso;
     nvc0->dirty_3d |= NVC0_NEW_3D_VERTPROG;
 }
@@ -663,6 +672,8 @@ nvc0_fp_state_bind(struct pipe_context *pipe, void *hwcso)
 {
     struct nvc0_context *nvc0 = nvc0_context(pipe);
 
+    if (nvc0->fragprog == hwcso)
+       return;
     nvc0->fragprog = hwcso;
     nvc0->dirty_3d |= NVC0_NEW_3D_FRAGPROG;
 }
@@ -679,6 +690,8 @@ nvc0_gp_state_bind(struct pipe_context *pipe, void *hwcso)
 {
     struct nvc0_context *nvc0 = nvc0_context(pipe);
 
+    if (nvc0->gmtyprog == hwcso)
+       return;
     nvc0->gmtyprog = hwcso;
     nvc0->dirty_3d |= NVC0_NEW_3D_GMTYPROG;
 }
@@ -695,6 +708,8 @@ nvc0_tcp_state_bind(struct pipe_context *pipe, void *hwcso)
 {
     struct nvc0_context *nvc0 = nvc0_context(pipe);
 
+    if (nvc0->tctlprog == hwcso)
+       return;
     nvc0->tctlprog = hwcso;
     nvc0->dirty_3d |= NVC0_NEW_3D_TCTLPROG;
 }
@@ -711,6 +726,8 @@ nvc0_tep_state_bind(struct pipe_context *pipe, void *hwcso)
 {
     struct nvc0_context *nvc0 = nvc0_context(pipe);
 
+    if (nvc0->tevlprog == hwcso)
+       return;
     nvc0->tevlprog = hwcso;
     nvc0->dirty_3d |= NVC0_NEW_3D_TEVLPROG;
 }
@@ -756,6 +773,8 @@ nvc0_cp_state_bind(struct pipe_context *pipe, void *hwcso)
 {
     struct nvc0_context *nvc0 = nvc0_context(pipe);
 
+    if (nvc0->compprog == hwcso)
+       return;
     nvc0->compprog = hwcso;
     nvc0->dirty_cp |= NVC0_NEW_CP_PROGRAM;
 }

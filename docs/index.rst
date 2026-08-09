@@ -64,6 +64,7 @@ Linux, FreeBSD, and other operating systems.
    glsl
    egl
    opengles
+   switch-opengl
    envvars
    perf
    gpu-perf-tracing

@@ -170,6 +170,9 @@ static void
 nv50_init_screen_caps(struct nv50_screen *screen)
 {
    struct pipe_caps *caps = (struct pipe_caps *)&screen->base.base.caps;
+   struct nv_device_info info_storage;
+   const struct nv_device_info *dev_info =
+      nouveau_device_get_info(screen->base.device, &info_storage);
 
    u_init_pipe_screen_caps(&screen->base.base, 1);
 
@@ -294,10 +297,10 @@ nv50_init_screen_caps(struct nv50_screen *screen)
    caps->sample_shading =
    caps->force_persample_interp = class_3d >= NVA3_3D_CLASS;
 
-   caps->pci_group = dev->info.pci.domain;
-   caps->pci_bus = dev->info.pci.bus;
-   caps->pci_device = dev->info.pci.dev;
-   caps->pci_function = dev->info.pci.func;
+   caps->pci_group = dev_info->pci.domain;
+   caps->pci_bus = dev_info->pci.bus;
+   caps->pci_device = dev_info->pci.dev;
+   caps->pci_function = dev_info->pci.func;
 
    caps->multisample_z_resolve = false; /* potentially supported on some hw */
    caps->integer_multiply_32x16 = false; /* could be done */
@@ -306,7 +309,7 @@ nv50_init_screen_caps(struct nv50_screen *screen)
    caps->hardware_gl_select = false;
 
    caps->vendor_id = 0x10de;
-   caps->device_id = dev->info.device_id;
+   caps->device_id = dev_info->device_id;
    caps->video_memory = dev->vram_size >> 20;
    caps->uma = screen->base.is_uma;
 

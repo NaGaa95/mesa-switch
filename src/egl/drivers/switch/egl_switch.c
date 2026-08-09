@@ -24,6 +24,7 @@
  * DEALINGS IN THE SOFTWARE.
  */
 
+#include <assert.h>
 #include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -50,6 +51,7 @@
 
 #include "util/u_atomic.h"
 #include "util/u_debug.h"
+#include "util/os_misc.h"
 #include "util/format/u_format.h"
 #include "util/u_inlines.h"
 #include "util/u_memory.h"
@@ -59,6 +61,7 @@
 #include "state_tracker/st_context.h"
 #include "state_tracker/st_manager.h"
 
+#include "main/glthread.h"
 #include "mesa/glapi/glapi/glapi.h"
 
 #define NUM_BUFFERS 3
@@ -70,14 +73,13 @@
 #	define TRACE(x...)
 #  define CALLED()
 #endif
-#define ERROR(x...) _eglLog(_EGL_FATAL, "egl_switch: " x)
-
 _EGL_DRIVER_STANDARD_TYPECASTS(switch_egl)
 
 struct switch_egl_display
 {
     struct pipe_frontend_screen *fscreen;
     struct st_config_options st_options;
+    int ref_count;
 };
 
 struct switch_egl_config
@@ -149,11 +151,25 @@ switch_st_framebuffer_validate(struct st_context *st, struct pipe_frontend_drawa
     struct pipe_screen *screen = drawable->fscreen->screen;
     unsigned i;
     (void)st;
-    (void)resolve;
     CALLED();
+
+    if (!surface || !screen || !out || (count && !statts)) {
+        _eglError(EGL_BAD_SURFACE,
+                  "switch_st_framebuffer_validate: invalid arguments");
+        return false;
+    }
+
+    if (resolve)
+        *resolve = NULL;
 
     for (i = 0; i < count; i++)
     {
+        if (statts[i] < 0 || statts[i] >= ST_ATTACHMENT_COUNT) {
+            _eglError(EGL_BAD_SURFACE,
+                      "switch_st_framebuffer_validate: invalid attachment");
+            return false;
+        }
+
         struct pipe_resource* res = surface->attachments[statts[i]];
         if (!res)
         {
@@ -162,7 +178,19 @@ switch_st_framebuffer_validate(struct st_context *st, struct pipe_frontend_drawa
                 case ST_ATTACHMENT_BACK_LEFT:
                 {
                     Result rc = nwindowDequeueBuffer(surface->nw, &surface->cur_slot, NULL);
-                    if (R_FAILED(rc)) fatalThrow(rc);
+                    if (R_FAILED(rc)) {
+                        surface->base.Lost = EGL_TRUE;
+                        _eglError(EGL_BAD_SURFACE,
+                                  "switch_st_framebuffer_validate: nwindowDequeueBuffer failed");
+                        return false;
+                    }
+                    if (surface->cur_slot < 0 ||
+                        surface->cur_slot >= NUM_BUFFERS) {
+                        surface->base.Lost = EGL_TRUE;
+                        _eglError(EGL_BAD_SURFACE,
+                                  "switch_st_framebuffer_validate: invalid buffer slot");
+                        return false;
+                    }
 
                     // Use the dequeued buffer as the back buffer
                     res = surface->buffers[surface->cur_slot];
@@ -190,12 +218,17 @@ switch_st_framebuffer_validate(struct st_context *st, struct pipe_frontend_drawa
                     break;
             }
 
+            if (!res) {
+                _eglError(EGL_BAD_ALLOC,
+                          "switch_st_framebuffer_validate: attachment allocation failed");
+                return false;
+            }
+
             // Register the attachment for future calls
             surface->attachments[statts[i]] = res;
         }
         pipe_resource_reference(&out[i], res);
     }
-
     return true;
 }
 
@@ -254,7 +287,7 @@ switch_create_window_surface(_EGLDisplay *dpy,
     _EGLConfig *conf, void *native_window, const EGLint *attrib_list)
 {
     struct switch_egl_surface *surface;
-    struct switch_framebuffer *fb;
+    struct switch_framebuffer *fb = NULL;
     struct switch_egl_display *display = switch_egl_display(dpy);
     struct switch_egl_config *config = switch_egl_config(conf);
     u32 width, height, i;
@@ -266,6 +299,7 @@ switch_create_window_surface(_EGLDisplay *dpy,
         _eglError(EGL_BAD_ALLOC, "switch_create_window_surface: failed to allocate switch_egl_surface");
         return NULL;
     }
+    surface->cur_slot = -1;
 
     if (!_eglInitSurface(&surface->base, dpy, EGL_WINDOW_BIT, conf, attrib_list, native_window))
         goto cleanup;
@@ -277,16 +311,25 @@ switch_create_window_surface(_EGLDisplay *dpy,
         goto cleanup;
     }
 
-    // Use the specified native window, and check its validity
-    surface->nw = (NWindow*)native_window;
-    if (!nwindowIsValid(surface->nw))
+    NWindow *nw = (NWindow*)native_window;
+    if (!nw || !nwindowIsValid(nw))
     {
         _eglError(EGL_BAD_NATIVE_WINDOW, "switch_create_window_surface: not a valid native window reference");
         goto cleanup;
     }
+    surface->nw = nw;
 
     // Allocate framebuffers and attach them to the native window
-    nwindowGetDimensions(surface->nw, &width, &height);
+    Result rc = nwindowGetDimensions(surface->nw, &width, &height);
+    if (R_FAILED(rc) || width == 0 || height == 0 ||
+        width > UINT16_MAX || height > UINT16_MAX)
+    {
+        _eglError(EGL_BAD_NATIVE_WINDOW,
+                  "switch_create_window_surface: invalid native window dimensions");
+        goto cleanup;
+    }
+    surface->base.Width = width;
+    surface->base.Height = height;
     fb->display = display;
     fb->surface = surface;
     fb->template.target = PIPE_TEXTURE_RECT;
@@ -318,8 +361,12 @@ switch_create_window_surface(_EGLDisplay *dpy,
         }
 
         // Attach the framebuffer to the native window
-        Result rc = nwindowConfigureBuffer(surface->nw, i, &grbuf);
-        if (R_FAILED(rc)) fatalThrow(rc);
+        rc = nwindowConfigureBuffer(surface->nw, i, &grbuf);
+        if (R_FAILED(rc)) {
+            _eglError(EGL_BAD_NATIVE_WINDOW,
+                      "switch_create_window_surface: nwindowConfigureBuffer failed");
+            goto cleanup;
+        }
     }
 
     surface->drawable = &fb->base;
@@ -337,6 +384,8 @@ switch_create_window_surface(_EGLDisplay *dpy,
     return &surface->base;
 
 cleanup:
+    if (fb && !surface->drawable)
+        free(fb);
     switch_egl_surface_cleanup(surface);
     return NULL;
 }
@@ -598,6 +647,64 @@ switch_st_get_param(struct pipe_frontend_screen *fscreen, enum st_manager_param 
     return 0;
 }
 
+static void
+switch_st_set_background_context(struct st_context *st,
+                                 struct util_queue_monitoring *queue_info)
+{
+    /* GLthread requires this callback before unmarshalling its first batch. */
+    (void)st;
+    (void)queue_info;
+}
+
+static bool
+switch_glthread_requested(void)
+{
+    bool enabled = true;
+
+    if (os_get_option("mesa_glthread"))
+        enabled = debug_get_bool_option("mesa_glthread", enabled);
+    if (os_get_option("MESA_GLTHREAD"))
+        enabled = debug_get_bool_option("MESA_GLTHREAD", enabled);
+    if (os_get_option("MESA_SWITCH_GLTHREAD"))
+        enabled = debug_get_bool_option("MESA_SWITCH_GLTHREAD", enabled);
+
+    return enabled;
+}
+
+static void
+switch_display_destroy(_EGLDisplay *dpy)
+{
+    struct switch_egl_display *display = switch_egl_display(dpy);
+    if (!display)
+        return;
+
+    if (display->fscreen) {
+        struct pipe_screen *screen = display->fscreen->screen;
+        st_screen_destroy(display->fscreen);
+        if (screen)
+            screen->destroy(screen);
+        free(display->fscreen);
+    }
+
+    dpy->DriverData = NULL;
+    free(display);
+}
+
+static void
+switch_display_release(_EGLDisplay *dpy)
+{
+    if (!dpy)
+        return;
+
+    struct switch_egl_display *display = switch_egl_display(dpy);
+    assert(display && display->ref_count > 0);
+    if (!p_atomic_dec_zero(&display->ref_count))
+        return;
+
+    _eglCleanupDisplay(dpy);
+    switch_display_destroy(dpy);
+}
+
 static EGLBoolean
 switch_initialize(_EGLDisplay *dpy)
 {
@@ -609,8 +716,11 @@ switch_initialize(_EGLDisplay *dpy)
     // Default to a single-file shader cache to avoid SD card overhead on the Switch
     setenv("MESA_DISK_CACHE_SINGLE_FILE", "1", 0);
 
-    if (!switch_add_configs_for_visuals(dpy))
-        return EGL_FALSE;
+    display = switch_egl_display(dpy);
+    if (display) {
+        p_atomic_inc(&display->ref_count);
+        return EGL_TRUE;
+    }
 
     display = (struct switch_egl_display*) calloc(1, sizeof (*display));
     if (!display) {
@@ -631,24 +741,20 @@ switch_initialize(_EGLDisplay *dpy)
     dpy->Extensions.KHR_create_context_no_error = EGL_TRUE;
     dpy->Extensions.KHR_surfaceless_context = EGL_TRUE;
     dpy->Extensions.KHR_context_flush_control = EGL_TRUE;
-    dpy->Extensions.KHR_fence_sync = EGL_TRUE;
-    dpy->Extensions.KHR_wait_sync = EGL_TRUE;
 
-    /* The Switch frontend doesn't plumb driconf into st_config_options.
-     * Keep the known parser workaround here so every context inherits it.
-     *
-     * Dolphin emits compute shaders with a mid-shader #extension directive
-     * on this path, which newer Mesa rejects unless this is enabled.
-     */
+    /* The frontend does not plumb driconf into st_config_options. */
     display->st_options.allow_glsl_extension_directive_midshader = true;
 
     stmgr = CALLOC_STRUCT(pipe_frontend_screen);
     if (!stmgr) {
         _eglError(EGL_BAD_ALLOC, "switch_initialize");
+        switch_display_destroy(dpy);
         return EGL_FALSE;
     }
+    display->fscreen = stmgr;
 
     stmgr->get_param = switch_st_get_param;
+    stmgr->set_background_context = switch_st_set_background_context;
 
     // Create nouveau screen
     TRACE("Creating nouveau screen\n");
@@ -656,6 +762,7 @@ switch_initialize(_EGLDisplay *dpy)
     if (!screen)
     {
         TRACE("Failed to create nouveau screen\n");
+        switch_display_destroy(dpy);
         return EGL_FALSE;
     }
 
@@ -663,7 +770,13 @@ switch_initialize(_EGLDisplay *dpy)
     TRACE("Wrapping screen\n");
     stmgr->screen = debug_screen_wrap(screen);
 
-    display->fscreen = stmgr;
+    if (!switch_add_configs_for_visuals(dpy)) {
+        _eglCleanupDisplay(dpy);
+        switch_display_destroy(dpy);
+        return EGL_FALSE;
+    }
+
+    p_atomic_set(&display->ref_count, 1);
     return EGL_TRUE;
 }
 
@@ -671,18 +784,11 @@ switch_initialize(_EGLDisplay *dpy)
 static EGLBoolean
 switch_terminate(_EGLDisplay* dpy)
 {
-    struct switch_egl_display *display = switch_egl_display(dpy);
     CALLED();
 
     // Release all non-current Context/Surfaces
     _eglReleaseDisplayResources(dpy);
-
-    _eglCleanupDisplay(dpy);
-
-    st_screen_destroy(display->fscreen);
-    display->fscreen->screen->destroy(display->fscreen->screen);
-    free(display->fscreen);
-    free(display);
+    switch_display_release(dpy);
 
     return EGL_TRUE;
 }
@@ -775,10 +881,17 @@ switch_create_context(_EGLDisplay *dpy, _EGLConfig *conf,
 
     context->st = st_api_create_context(display->fscreen, &attribs, &error,
                                         share_ctx ? share_ctx->st : NULL);
-    if (error != ST_CONTEXT_SUCCESS) {
+    if (!context->st || error != ST_CONTEXT_SUCCESS) {
         _eglError(EGL_BAD_MATCH, "switch_create_context");
         goto cleanup;
     }
+
+    context->st->frontend_context = context;
+
+    /* Enabling GLthread changes public GL dispatch. */
+    const bool enable_glthread = switch_glthread_requested();
+    if (enable_glthread)
+        _mesa_glthread_init(context->st->ctx);
 
     return &context->base;
 
@@ -797,6 +910,7 @@ switch_destroy_context(_EGLDisplay *disp, _EGLContext* ctx)
 
     if (_eglPutContext(ctx))
     {
+        _mesa_glthread_finish(context->st->ctx);
         st_destroy_context(context->st);
         free(context);
         ctx = NULL;
@@ -809,36 +923,84 @@ static EGLBoolean
 switch_make_current(_EGLDisplay* dpy, _EGLSurface *dsurf,
     _EGLSurface *rsurf, _EGLContext *ctx)
 {
-    struct switch_egl_display* disp = switch_egl_display(dpy);
     struct switch_egl_context* cont = switch_egl_context(ctx);
     struct switch_egl_surface* draw_surf = switch_egl_surface(dsurf);
     struct switch_egl_surface* read_surf = switch_egl_surface(rsurf);
-    (void)disp;
     CALLED();
 
     _EGLContext *old_ctx;
     _EGLSurface *old_dsurf, *old_rsurf;
+    _EGLDisplay *old_dpy;
 
     if (!_eglBindContext(ctx, dsurf, rsurf, &old_ctx, &old_dsurf, &old_rsurf))
         return EGL_FALSE;
+    old_dpy = old_ctx ? old_ctx->Resource.Display : NULL;
+
+    if (old_ctx == ctx && old_dsurf == dsurf && old_rsurf == rsurf) {
+        _eglPutSurface(old_dsurf);
+        _eglPutSurface(old_rsurf);
+        _eglPutContext(old_ctx);
+        return EGL_TRUE;
+    }
+
+    /* Drain workers before rebinding state-tracker contexts. */
+    struct switch_egl_context *old_cont = switch_egl_context(old_ctx);
+    if (old_cont) {
+        _mesa_glthread_finish(old_cont->st->ctx);
+    }
+    if (cont && cont != old_cont) {
+        _mesa_glthread_finish(cont->st->ctx);
+    }
 
     EGLBoolean ret = st_api_make_current(cont ? cont->st : NULL,
-        draw_surf ? draw_surf->drawable : NULL, read_surf ? read_surf->drawable : NULL);
+        draw_surf ? draw_surf->drawable : NULL,
+        read_surf ? read_surf->drawable : NULL);
 
-    /* Drop the references returned by _eglBindContext.  The Put helpers
-     * decrement the refcount and only actually free when it reaches zero,
-     * so a quick release→acquire cycle on the same thread won't destroy
-     * resources that are still live.  The old code called destroy_surface /
-     * destroy_context unconditionally which could free the surface/context
-     * the game is about to re-acquire a few microseconds later. */
-    if (old_dsurf)
+    if (!ret) {
+        _EGLContext *tmp_ctx;
+        _EGLSurface *tmp_dsurf, *tmp_rsurf;
+
+        /* Restore the previous EGL and state-tracker binding. */
+        _eglBindContext(old_ctx, old_dsurf, old_rsurf, &ctx, &tmp_dsurf,
+                        &tmp_rsurf);
+        assert((cont ? &cont->base : NULL) == ctx &&
+               tmp_dsurf == dsurf && tmp_rsurf == rsurf);
+
+        _eglPutSurface(dsurf);
+        _eglPutSurface(rsurf);
+        _eglPutContext(ctx);
         _eglPutSurface(old_dsurf);
-    if (old_rsurf)
         _eglPutSurface(old_rsurf);
-    if (old_ctx)
         _eglPutContext(old_ctx);
 
-    return ret;
+        struct switch_egl_surface *old_draw = switch_egl_surface(old_dsurf);
+        struct switch_egl_surface *old_read = switch_egl_surface(old_rsurf);
+        if (st_api_make_current(old_cont ? old_cont->st : NULL,
+                old_draw ? old_draw->drawable : NULL,
+                old_read ? old_read->drawable : NULL))
+            return _eglError(EGL_BAD_MATCH, "switch_make_current");
+
+        /* Keep EGL unbound if the old state cannot be restored. */
+        _eglBindContext(NULL, NULL, NULL, &tmp_ctx, &tmp_dsurf, &tmp_rsurf);
+        assert(tmp_ctx == old_ctx && tmp_dsurf == old_dsurf &&
+               tmp_rsurf == old_rsurf);
+        st_api_make_current(NULL, NULL, NULL);
+    }
+
+    if (ret && ctx)
+        p_atomic_inc(&switch_egl_display(dpy)->ref_count);
+
+    switch_destroy_surface(dpy, old_dsurf);
+    switch_destroy_surface(dpy, old_rsurf);
+    if (old_ctx) {
+        switch_destroy_context(dpy, old_ctx);
+        switch_display_release(old_dpy);
+    }
+
+    if (!ret)
+        return _eglError(EGL_BAD_MATCH, "switch_make_current");
+
+    return EGL_TRUE;
 }
 
 
@@ -848,7 +1010,15 @@ switch_swap_interval(_EGLDisplay *dpy, _EGLSurface *surf, EGLint interval)
     CALLED();
     struct switch_egl_surface* surface = switch_egl_surface(surf);
 
-    nwindowSetSwapInterval(surface->nw, interval);
+    if (!surface->nw)
+        return _eglError(EGL_BAD_SURFACE, "switch_swap_interval");
+
+    Result rc = nwindowSetSwapInterval(surface->nw, interval);
+    if (R_FAILED(rc)) {
+        surface->base.Lost = EGL_TRUE;
+        return _eglError(EGL_BAD_SURFACE,
+                         "switch_swap_interval: nwindowSetSwapInterval failed");
+    }
     return EGL_TRUE;
 }
 
@@ -860,7 +1030,13 @@ switch_swap_buffers(_EGLDisplay *dpy, _EGLSurface *surf)
     CALLED();
     struct switch_egl_surface* surface = switch_egl_surface(surf);
     struct switch_egl_context* context = switch_egl_context(surface->base.CurrentContext);
-    struct switch_egl_display* display = switch_egl_display(surface->base.Resource.Display);
+
+    if (!context || !context->st)
+        return _eglError(EGL_BAD_CONTEXT,
+                         "switch_swap_buffers: surface has no current context");
+
+    /* Drain queued draws before inspecting or presenting the back buffer. */
+    _mesa_glthread_finish(context->st->ctx);
 
     if (surface->cur_slot < 0) {
         TRACE("Nothing to do\n");
@@ -882,12 +1058,19 @@ switch_swap_buffers(_EGLDisplay *dpy, _EGLSurface *surf)
             nvMultiFenceCreate(&mf, &fence);
         }
     } else {
-        TRACE("No valid fence (id=%d), GPU waited via ST_FLUSH_WAIT\n", (int)fence.id);
+        struct pipe_fence_handle *wait_fence = NULL;
+        st_context_flush(context->st,
+                         ST_FLUSH_END_OF_FRAME | ST_FLUSH_WAIT,
+                         &wait_fence, NULL, NULL);
     }
 
     TRACE("Queuing buffer\n");
     Result rc = nwindowQueueBuffer(surface->nw, surface->cur_slot, &mf);
-    if (R_FAILED(rc)) fatalThrow(rc);
+    if (R_FAILED(rc)) {
+        surface->base.Lost = EGL_TRUE;
+        return _eglError(EGL_BAD_SURFACE,
+                         "switch_swap_buffers: nwindowQueueBuffer failed");
+    }
 
     // Update framebuffer state
     surface->cur_slot = -1;

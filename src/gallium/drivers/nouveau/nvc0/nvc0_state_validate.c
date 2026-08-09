@@ -41,7 +41,7 @@ gm200_validate_sample_locations(struct nvc0_context *nvc0, unsigned ms)
    struct nvc0_screen *screen = nvc0->screen;
    unsigned grid_width, grid_height, hw_grid_width;
    uint8_t sample_locations[16][2];
-   unsigned cb[64];
+   unsigned cb[64] = {};
    unsigned i, pixel, pixel_y, pixel_x, sample;
    uint32_t packed_locations[4] = {};
 
@@ -51,6 +51,13 @@ gm200_validate_sample_locations(struct nvc0_context *nvc0, unsigned ms)
    hw_grid_width = grid_width;
    if (ms == 1) /* get_sample_pixel_grid() exposes 2x4 for 1x msaa */
       hw_grid_width = 4;
+
+   /* Reject sample layouts that exceed the fixed table. */
+   if (unlikely(!grid_width || !grid_height ||
+                hw_grid_width * grid_height * ms >
+                   ARRAY_SIZE(sample_locations))) {
+      return;
+   }
 
    if (nvc0->sample_locations_enabled) {
       uint8_t locations[2 * 4 * 8];
@@ -133,6 +140,27 @@ static void
 validate_sample_locations(struct nvc0_context *nvc0)
 {
    unsigned ms = util_framebuffer_get_num_samples(&nvc0->framebuffer);
+
+   /* NVC0 supports only 1x, 2x, 4x, and 8x sampling. */
+   if (unlikely(ms != 1 && ms != 2 && ms != 4 && ms != 8)) {
+      const struct pipe_resource *resource = NULL;
+      unsigned fallback = 1;
+
+      for (unsigned i = 0; i < nvc0->framebuffer.nr_cbufs; i++) {
+         if (nvc0->framebuffer.cbufs[i].texture) {
+            resource = nvc0->framebuffer.cbufs[i].texture;
+            break;
+         }
+      }
+      if (!resource)
+         resource = nvc0->framebuffer.zsbuf.texture;
+      if (resource)
+         fallback = MAX2(1, resource->nr_samples);
+      if (fallback != 1 && fallback != 2 && fallback != 4 && fallback != 8)
+         fallback = 1;
+
+      ms = fallback;
+   }
 
    if (nvc0->screen->base.class_3d >= GM200_3D_CLASS)
       gm200_validate_sample_locations(nvc0, ms);
@@ -269,6 +297,7 @@ nvc0_validate_fb(struct nvc0_context *nvc0)
       IMMED_NVC0(push, NVC0_3D(SERIALIZE), 0);
 
    NOUVEAU_DRV_STAT(&nvc0->screen->base, gpu_serialize_count, serialize);
+
 }
 
 static void
@@ -899,6 +928,9 @@ nvc0_state_validate(struct nvc0_context *nvc0, uint32_t mask,
 
    simple_mtx_assert_locked(&nvc0->screen->state_lock);
 
+#ifdef __SWITCH__
+   nouveau_pushbuf_bind_context(nvc0->base.pushbuf, &nvc0->base);
+#endif
    if (nvc0->screen->cur_ctx != nvc0)
       nvc0_switch_pipe_context(nvc0);
 
@@ -917,8 +949,31 @@ nvc0_state_validate(struct nvc0_context *nvc0, uint32_t mask,
    }
 
    nouveau_pushbuf_bufctx(nvc0->base.pushbuf, bufctx);
-   ret = PUSH_VAL(nvc0->base.pushbuf);
+#ifdef __SWITCH__
+   const bool fast_3d =
+      nvc0->switch_fast_draw && bufctx == nvc0->bufctx_3d;
+   const uint64_t batch_generation =
+      nouveau_switch_pushbuf_batch_generation(nvc0->base.pushbuf);
+   const bool can_skip =
+      fast_3d && !state_mask &&
+      nvc0->switch_validated_residency_generation ==
+         nvc0->switch_residency_generation &&
+      nvc0->switch_validated_batch_generation == batch_generation;
 
+   if (can_skip) {
+      ret = 0;
+   } else {
+      ret = PUSH_VAL(nvc0->base.pushbuf);
+      if (!ret && fast_3d) {
+         nvc0->switch_validated_residency_generation =
+            nvc0->switch_residency_generation;
+         nvc0->switch_validated_batch_generation =
+            nouveau_switch_pushbuf_batch_generation(nvc0->base.pushbuf);
+      }
+   }
+#else
+   ret = PUSH_VAL(nvc0->base.pushbuf);
+#endif
    return !ret;
 }
 

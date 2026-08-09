@@ -5,6 +5,8 @@ ar = 'C:/msys64/opt/devkitpro/devkitA64/bin/aarch64-none-elf-gcc-ar.exe'
 nm = 'C:/msys64/opt/devkitpro/devkitA64/bin/aarch64-none-elf-nm.exe'
 strip = 'C:/msys64/opt/devkitpro/devkitA64/bin/aarch64-none-elf-strip.exe'
 pkg-config = ['C:/msys64/usr/bin/bash.exe', '@DIRNAME@/switch-pkg-config-wrapper.sh']
+flex = 'C:/msys64/usr/bin/flex.exe'
+bison = 'C:/msys64/usr/bin/bison.exe'
 rust = ['C:/msys64/usr/bin/bash.exe', '@DIRNAME@/rustc-switch-wrapper.sh']
 bindgen = ['C:/msys64/usr/bin/bash.exe', '@DIRNAME@/bindgen-switch-wrapper.sh']
 

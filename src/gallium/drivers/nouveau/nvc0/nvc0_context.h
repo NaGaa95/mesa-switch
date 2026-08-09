@@ -237,6 +237,24 @@ struct nvc0_context {
    struct list_head tex_head;
    struct list_head img_head;
 
+#ifdef __SWITCH__
+   bool switch_fast_draw;
+   bool switch_gm20b_mme;
+   bool switch_index_valid;
+   uint8_t switch_index_format;
+   struct nouveau_bo *switch_index_bo;
+   struct pipe_resource *switch_index_resource;
+   struct nouveau_bo *switch_text_bo;
+   uint64_t switch_index_address;
+   uint64_t switch_index_limit;
+   uint64_t switch_residency_generation;
+   uint64_t switch_validated_residency_generation;
+   uint64_t switch_validated_batch_generation;
+   uint64_t switch_bindless_generation;
+   uint64_t switch_validated_bindless_generation;
+   uint64_t switch_validated_text_generation;
+#endif
+
    struct pipe_surface *fb_cbufs[PIPE_MAX_COLOR_BUFS];
    struct pipe_surface *fb_zsbuf;
    struct pipe_framebuffer_state framebuffer;

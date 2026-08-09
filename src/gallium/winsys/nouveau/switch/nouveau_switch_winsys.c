@@ -16,11 +16,12 @@
 #include "nouveau/nouveau_winsys.h"
 #include "nouveau/nouveau_screen.h"
 #include "nouveau/nouveau_buffer.h"
+#include <nvif/class.h>
+#include <nvif/cl0080.h>
 
 
 #ifdef __SWITCH__
-/* _MTX_INITIALIZER_NP is a glibc extension not available on Switch.
- * Use a constructor function to initialize the mutex at startup. */
+/* Switch lacks _MTX_INITIALIZER_NP. */
 static mtx_t nouveau_screen_mutex;
 static void __attribute__((constructor)) init_nouveau_screen_mutex(void) {
    mtx_init(&nouveau_screen_mutex, mtx_plain);
@@ -44,9 +45,18 @@ nouveau_switch_screen_create(void)
 	if (ret)
 		goto err;
 
-	ret = nouveau_device_new(&drm->client, &dev);
+	struct nv_device_v0 device_args = { .device = ~0ULL };
+	ret = nouveau_device_new(&drm->client, NV_DEVICE, &device_args,
+	                         sizeof(device_args), &dev);
 	if (ret)
 		goto err;
+
+	/* Report unified memory through the GART domain. */
+	uint64_t total_memory = 0;
+	if (os_get_total_physical_memory(&total_memory))
+		dev->gart_size = total_memory;
+	/* BOs use the process heap, so its entitlement is the static limit. */
+	dev->gart_limit = dev->gart_size;
 
 	switch (dev->chipset & ~0xf) {
 #if 0

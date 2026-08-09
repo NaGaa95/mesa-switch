@@ -405,6 +405,32 @@ nouveau_buffer_transfer_map(struct pipe_context *pipe,
    nouveau_buffer_transfer_init(tx, resource, box, usage);
    *ptransfer = &tx->base;
 
+#ifdef __SWITCH__
+   if (usage & PIPE_MAP_THREAD_SAFE) {
+      /* GLthread only maps fresh GART stream buffers through this path. */
+      const unsigned required = PIPE_MAP_WRITE | PIPE_MAP_UNSYNCHRONIZED;
+      const unsigned unsupported =
+         PIPE_MAP_READ | PIPE_MAP_DISCARD_RANGE |
+         PIPE_MAP_DISCARD_WHOLE_RESOURCE;
+
+      if ((usage & required) != required || (usage & unsupported) ||
+          buf->domain != NOUVEAU_BO_GART || !buf->bo) {
+         *ptransfer = NULL;
+         FREE(tx);
+         return NULL;
+      }
+
+      ret = BO_MAP(nv->screen, buf->bo, 0, nv->client);
+      if (ret) {
+         *ptransfer = NULL;
+         FREE(tx);
+         return NULL;
+      }
+
+      return (uint8_t *)buf->bo->map + buf->offset + box->x;
+   }
+#endif
+
    if (usage & PIPE_MAP_READ)
       NOUVEAU_DRV_STAT(nv->screen, buf_transfers_rd, 1);
    if (usage & PIPE_MAP_WRITE)

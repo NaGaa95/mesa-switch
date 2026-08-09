@@ -1,12 +1,51 @@
-find_library(OPENGL_egl_LIBRARY EGL)
-find_library(_OPENGL_glapi_LIBRARY glapi)
+get_filename_component(_OPENGL_SWITCH_PREFIX
+	"${CMAKE_CURRENT_LIST_DIR}/../../.." ABSOLUTE)
+set(_OPENGL_SWITCH_LIBDIR "${_OPENGL_SWITCH_PREFIX}/lib")
+set(_OPENGL_SWITCH_INCLUDEDIR "${_OPENGL_SWITCH_PREFIX}/include")
+
+find_library(OPENGL_gl_LIBRARY GL
+	PATHS "${_OPENGL_SWITCH_LIBDIR}" NO_DEFAULT_PATH)
+find_library(OPENGL_egl_LIBRARY EGL
+	PATHS "${_OPENGL_SWITCH_LIBDIR}" NO_DEFAULT_PATH)
+find_library(_OPENGL_glapi_LIBRARY glapi
+	PATHS "${_OPENGL_SWITCH_LIBDIR}" NO_DEFAULT_PATH)
+find_library(_OPENGL_mesa_util_c11_LIBRARY mesa_util_c11
+	PATHS "${_OPENGL_SWITCH_LIBDIR}" NO_DEFAULT_PATH)
+find_library(_OPENGL_blake3_LIBRARY blake3
+	PATHS "${_OPENGL_SWITCH_LIBDIR}" NO_DEFAULT_PATH)
+find_library(_OPENGL_mesa_util_LIBRARY mesa_util
+	PATHS "${_OPENGL_SWITCH_LIBDIR}" NO_DEFAULT_PATH)
+find_library(_OPENGL_mesa_util_simd_LIBRARY mesa_util_simd
+	PATHS "${_OPENGL_SWITCH_LIBDIR}" NO_DEFAULT_PATH)
+find_library(_OPENGL_xmlconfig_LIBRARY xmlconfig
+	PATHS "${_OPENGL_SWITCH_LIBDIR}" NO_DEFAULT_PATH)
 find_library(_OPENGL_drm_nouveau_LIBRARY drm_nouveau)
-find_path(_OPENGL_gl_gl_INCLUDE_DIR NAMES GL/gl.h)
-find_path(_OPENGL_gl_egl_INCLUDE_DIR NAMES EGL/egl.h)
+find_library(_OPENGL_expat_LIBRARY expat)
+find_library(OPENGL_gles1_LIBRARY GLESv1_CM
+	PATHS "${_OPENGL_SWITCH_LIBDIR}" NO_DEFAULT_PATH)
+find_library(OPENGL_gles2_LIBRARY GLESv2
+	PATHS "${_OPENGL_SWITCH_LIBDIR}" NO_DEFAULT_PATH)
+find_library(_OPENGL_zstd_LIBRARY zstd)
+find_library(_OPENGL_z_LIBRARY z)
+find_library(_OPENGL_nx_LIBRARY nx)
+find_path(_OPENGL_gl_gl_INCLUDE_DIR NAMES GL/gl.h
+	PATHS "${_OPENGL_SWITCH_INCLUDEDIR}" NO_DEFAULT_PATH)
+find_path(_OPENGL_gl_egl_INCLUDE_DIR NAMES EGL/egl.h
+	PATHS "${_OPENGL_SWITCH_INCLUDEDIR}" NO_DEFAULT_PATH)
+find_path(_OPENGL_gles1_INCLUDE_DIR NAMES GLES/gl.h
+	PATHS "${_OPENGL_SWITCH_INCLUDEDIR}" NO_DEFAULT_PATH)
+find_path(_OPENGL_gles2_INCLUDE_DIR NAMES GLES2/gl2.h
+	PATHS "${_OPENGL_SWITCH_INCLUDEDIR}" NO_DEFAULT_PATH)
 
 include(FindPackageHandleStandardArgs)
 find_package_handle_standard_args(OpenGL
-	REQUIRED_VARS OPENGL_egl_LIBRARY _OPENGL_glapi_LIBRARY _OPENGL_drm_nouveau_LIBRARY _OPENGL_gl_gl_INCLUDE_DIR
+	REQUIRED_VARS OPENGL_gl_LIBRARY OPENGL_egl_LIBRARY _OPENGL_glapi_LIBRARY
+		_OPENGL_mesa_util_c11_LIBRARY _OPENGL_blake3_LIBRARY
+		_OPENGL_mesa_util_LIBRARY _OPENGL_mesa_util_simd_LIBRARY
+		_OPENGL_xmlconfig_LIBRARY
+		_OPENGL_drm_nouveau_LIBRARY _OPENGL_expat_LIBRARY
+		_OPENGL_zstd_LIBRARY _OPENGL_z_LIBRARY
+		_OPENGL_nx_LIBRARY _OPENGL_gl_gl_INCLUDE_DIR _OPENGL_gl_egl_INCLUDE_DIR
 )
 
 set(OPENGL_FOUND ${OpenGL_FOUND})
@@ -17,7 +56,55 @@ set(OpenGL_GLX_FOUND OFF)
 set(OpenGL_EGL_FOUND ${OpenGL_FOUND})
 set(OPENGL_INCLUDE_DIR ${_OPENGL_gl_gl_INCLUDE_DIR})
 set(OPENGL_EGL_INCLUDE_DIRS ${_OPENGL_gl_egl_INCLUDE_DIR})
-set(OPENGL_LIBRARIES ${OPENGL_egl_LIBRARY} ${_OPENGL_glapi_LIBRARY} ${_OPENGL_drm_nouveau_LIBRARY})
+set(_OPENGL_SWITCH_LIBRARIES
+	${_OPENGL_glapi_LIBRARY}
+	${_OPENGL_mesa_util_c11_LIBRARY}
+	${_OPENGL_blake3_LIBRARY}
+	${_OPENGL_mesa_util_LIBRARY}
+	${_OPENGL_mesa_util_simd_LIBRARY}
+	${_OPENGL_xmlconfig_LIBRARY}
+	${_OPENGL_drm_nouveau_LIBRARY}
+	${_OPENGL_expat_LIBRARY}
+	${_OPENGL_zstd_LIBRARY}
+	${_OPENGL_z_LIBRARY}
+	${_OPENGL_nx_LIBRARY}
+	stdc++
+	m
+)
+
+if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.24" AND
+   NOT DEFINED CMAKE_LINK_GROUP_USING_RESCAN_SUPPORTED)
+	# devkitPro's NintendoSwitch platform uses GNU ld but does not define
+	# CMake's built-in RESCAN feature as Linux and Generic-GNU do.
+	set(CMAKE_LINK_GROUP_USING_RESCAN
+		"LINKER:--start-group" "LINKER:--end-group")
+	set(CMAKE_LINK_GROUP_USING_RESCAN_SUPPORTED TRUE)
+endif()
+
+function(_opengl_switch_make_rescan_group output)
+	if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.24" AND
+	   CMAKE_LINK_GROUP_USING_RESCAN_SUPPORTED)
+		string(JOIN "," _group_libraries ${ARGN})
+		set(${output} "$<LINK_GROUP:RESCAN,${_group_libraries}>" PARENT_SCOPE)
+	else()
+		# CMake added LINK_GROUP in 3.24. Two archive passes preserve support
+		# for older devkitPro projects without emitting misplaced linker flags.
+		set(${output} "${ARGN};${ARGN}" PARENT_SCOPE)
+	endif()
+endfunction()
+
+_opengl_switch_make_rescan_group(_OPENGL_SWITCH_EGL_LINK
+	${OPENGL_egl_LIBRARY} ${_OPENGL_SWITCH_LIBRARIES})
+_opengl_switch_make_rescan_group(_OPENGL_SWITCH_GL_LINK
+	${OPENGL_gl_LIBRARY} ${OPENGL_egl_LIBRARY}
+	${_OPENGL_SWITCH_LIBRARIES})
+_opengl_switch_make_rescan_group(_OPENGL_SWITCH_GLES1_LINK
+	${OPENGL_gles1_LIBRARY} ${_OPENGL_SWITCH_LIBRARIES})
+_opengl_switch_make_rescan_group(_OPENGL_SWITCH_GLES2_LINK
+	${OPENGL_gles2_LIBRARY} ${_OPENGL_SWITCH_LIBRARIES})
+
+set(OPENGL_LIBRARIES "${_OPENGL_SWITCH_GL_LINK}")
+set(OPENGL_EGL_LIBRARIES "${_OPENGL_SWITCH_EGL_LINK}")
 
 set(OPENGL_LIBRARY ${OPENGL_LIBRARIES})
 set(OPENGL_INCLUDE_PATH ${OPENGL_INCLUDE_DIR})
@@ -27,7 +114,8 @@ if(OpenGL_FOUND)
 		add_library(OpenGL::EGL INTERFACE IMPORTED)
 		set_target_properties(OpenGL::EGL PROPERTIES
 			INTERFACE_INCLUDE_DIRECTORIES "${_OPENGL_gl_egl_INCLUDE_DIR}"
-			INTERFACE_LINK_LIBRARIES "${OPENGL_egl_LIBRARY};${_OPENGL_glapi_LIBRARY};${_OPENGL_drm_nouveau_LIBRARY}"
+			INTERFACE_LINK_LIBRARIES "${_OPENGL_SWITCH_EGL_LINK}"
+			INTERFACE_LINK_OPTIONS "-pthread"
 		)
 	endif()
 
@@ -35,7 +123,26 @@ if(OpenGL_FOUND)
 		add_library(OpenGL::GL INTERFACE IMPORTED)
 		set_target_properties(OpenGL::GL PROPERTIES
 			INTERFACE_INCLUDE_DIRECTORIES "${_OPENGL_gl_gl_INCLUDE_DIR}"
-			INTERFACE_LINK_LIBRARIES "${OPENGL_egl_LIBRARY};${_OPENGL_glapi_LIBRARY};${_OPENGL_drm_nouveau_LIBRARY}"
+			INTERFACE_LINK_LIBRARIES "${_OPENGL_SWITCH_GL_LINK}"
+			INTERFACE_LINK_OPTIONS "-pthread"
+		)
+	endif()
+
+	if(OPENGL_gles1_LIBRARY AND NOT TARGET OpenGL::GLES1)
+		add_library(OpenGL::GLES1 INTERFACE IMPORTED)
+		set_target_properties(OpenGL::GLES1 PROPERTIES
+			INTERFACE_INCLUDE_DIRECTORIES "${_OPENGL_gles1_INCLUDE_DIR}"
+			INTERFACE_LINK_LIBRARIES "${_OPENGL_SWITCH_GLES1_LINK}"
+			INTERFACE_LINK_OPTIONS "-pthread"
+		)
+	endif()
+
+	if(OPENGL_gles2_LIBRARY AND NOT TARGET OpenGL::GLES2)
+		add_library(OpenGL::GLES2 INTERFACE IMPORTED)
+		set_target_properties(OpenGL::GLES2 PROPERTIES
+			INTERFACE_INCLUDE_DIRECTORIES "${_OPENGL_gles2_INCLUDE_DIR}"
+			INTERFACE_LINK_LIBRARIES "${_OPENGL_SWITCH_GLES2_LINK}"
+			INTERFACE_LINK_OPTIONS "-pthread"
 		)
 	endif()
 endif()

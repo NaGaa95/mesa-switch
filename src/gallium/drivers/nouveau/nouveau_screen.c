@@ -243,13 +243,39 @@ nouveau_pushbuf_cb(struct nouveau_pushbuf *push)
    return true;
 }
 
+#ifdef __SWITCH__
+void
+nouveau_pushbuf_bind_context(struct nouveau_pushbuf *push,
+                             struct nouveau_context *context)
+{
+   struct nouveau_pushbuf_priv *p = push ? push->user_priv : NULL;
+
+   if (p)
+      p->context = context;
+}
+
+void
+nouveau_pushbuf_unbind_context(struct nouveau_pushbuf *push,
+                               struct nouveau_context *context)
+{
+   struct nouveau_pushbuf_priv *p = push ? push->user_priv : NULL;
+
+   if (p && p->context == context)
+      p->context = NULL;
+}
+#endif
+
 int
 nouveau_pushbuf_create(struct nouveau_screen *screen, struct nouveau_context *context,
                        struct nouveau_client *client, struct nouveau_object *chan, int nr,
                        uint32_t size, struct nouveau_pushbuf **push)
 {
    int ret;
+#ifdef __SWITCH__
+   ret = nouveau_pushbuf_new(client, chan, nr, size, true, push);
+#else
    ret = nouveau_pushbuf_new(client, chan, nr, size, push);
+#endif
    if (ret)
       return ret;
 
@@ -260,7 +286,11 @@ nouveau_pushbuf_create(struct nouveau_screen *screen, struct nouveau_context *co
    }
    p->screen = screen;
    p->context = context;
+#ifdef __SWITCH__
+   nouveau_switch_pushbuf_set_kick_notify(*push, nouveau_pushbuf_cb);
+#else
    (*push)->kick_notify = nouveau_pushbuf_cb;
+#endif
    (*push)->user_priv = p;
    return 0;
 }
@@ -299,7 +329,10 @@ static void
 nouveau_device_uuid(struct pipe_screen *pscreen, char *uuid)
 {
    const struct nouveau_screen *screen = nouveau_screen(pscreen);
-   nv_device_uuid(&screen->device->info, (void *)uuid, PIPE_UUID_SIZE, false);
+   struct nv_device_info storage;
+   const struct nv_device_info *info =
+      nouveau_device_get_info(screen->device, &storage);
+   nv_device_uuid(info, (void *)uuid, PIPE_UUID_SIZE, false);
 }
 
 int
@@ -457,7 +490,10 @@ nouveau_screen_init(struct nouveau_screen *screen, struct nouveau_device *dev)
       PIPE_BIND_SAMPLER_VIEW | PIPE_BIND_STREAM_OUTPUT |
       PIPE_BIND_COMMAND_ARGS_BUFFER;
 
-   screen->is_uma = dev->info.type != NV_DEVICE_TYPE_DIS;
+   struct nv_device_info info_storage;
+   const struct nv_device_info *dev_info =
+      nouveau_device_get_info(dev, &info_storage);
+   screen->is_uma = dev_info->type != NV_DEVICE_TYPE_DIS;
 
    memset(&mm_config, 0, sizeof(mm_config));
    nouveau_fence_list_init(&screen->fence);

@@ -2208,7 +2208,8 @@ if build_machine.system() == 'windows'
   # better windows support.
 
   prog_flex = find_program('win_flex', required : false)
-  if prog_flex.found()
+  using_win_flex = prog_flex.found()
+  if using_win_flex
     # windows compatibility (uses <io.h> instead of <unistd.h> and _isatty,
     # _fileno functions)
     prog_flex = [prog_flex, '--wincompat']
@@ -2220,11 +2221,15 @@ if build_machine.system() == 'windows'
   prog_flex += '-DYY_USE_CONST='
 
   prog_flex_cpp = prog_flex
-  # Convince win_flex to use <inttypes.h> for C++ files
-  # Note that we are using a C99 version here rather than C11,
-  # because using a C11 version can cause the MSVC CRT headers to define
-  # static_assert to _Static_assert, which breaks other parts of the CRT
-  prog_flex_cpp += '-D__STDC_VERSION__=199901'
+  if using_win_flex
+    # Convince win_flex to use <inttypes.h> for C++ files.  Do not pass this
+    # to GNU flex: its generated definition leaks into the target C++ source
+    # and makes newlib expose the C-only restrict keyword.
+    # Note that we are using a C99 version here rather than C11,
+    # because using a C11 version can cause the MSVC CRT headers to define
+    # static_assert to _Static_assert, which breaks other parts of the CRT
+    prog_flex_cpp += '-D__STDC_VERSION__=199901'
+  endif
 
   prog_bison = find_program('win_bison', required : false)
   if not prog_bison.found()
@@ -2557,6 +2562,13 @@ endif
 subdir('include')
 subdir('bin')
 subdir('src')
+
+if with_platform_switch and with_egl
+  install_data(
+    'OpenGLConfig.cmake',
+    install_dir : join_paths(get_option('libdir'), 'cmake', 'OpenGL'),
+  )
+endif
 
 meson.add_devenv(devenv)
 

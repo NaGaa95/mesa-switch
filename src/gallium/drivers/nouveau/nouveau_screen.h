@@ -114,6 +114,14 @@ struct nouveau_pushbuf_priv {
    struct nouveau_context *context;
 };
 
+#ifdef __SWITCH__
+/* Keep the shared Switch pushbuf bound to its current context. */
+void nouveau_pushbuf_bind_context(struct nouveau_pushbuf *push,
+                                  struct nouveau_context *context);
+void nouveau_pushbuf_unbind_context(struct nouveau_pushbuf *push,
+                                    struct nouveau_context *context);
+#endif
+
 #define NV_VRAM_DOMAIN(screen) ((screen)->vram_domain)
 
 #ifdef NOUVEAU_ENABLE_DRIVER_STATISTICS

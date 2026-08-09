@@ -1212,6 +1212,9 @@ nvc0_blitctx_post_blit(struct nvc0_blitctx *blit)
 
    nouveau_bufctx_reset(nvc0->bufctx_3d, NVC0_BIND_3D_VTX_TMP);
    nouveau_bufctx_reset(nvc0->bufctx_3d, NVC0_BIND_3D_TEXT);
+#ifdef __SWITCH__
+   nvc0->switch_text_bo = NULL;
+#endif
    nouveau_bufctx_reset(nvc0->bufctx_3d, NVC0_BIND_3D_FB);
    nouveau_bufctx_reset(nvc0->bufctx_3d, NVC0_BIND_3D_TEX(4, 0));
    nouveau_bufctx_reset(nvc0->bufctx_3d, NVC0_BIND_3D_TEX(4, 1));

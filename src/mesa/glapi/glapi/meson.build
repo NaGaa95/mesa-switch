@@ -23,10 +23,23 @@ if with_platform_windows
 endif
 
 libglapi_bridge = static_library(
-  'glapi_bridge',
+  with_platform_switch ? 'GL' : 'glapi_bridge',
   bridge_glapi_files,
   include_directories : [inc_mesa, inc_include, inc_src, inc_gallium],
   c_args : [c_msvc_compat_args, bridge_glapi_args],
   dependencies : [dep_thread, idep_mesautil],
   build_by_default : false,
+  install : with_platform_switch,
 )
+
+if with_platform_switch
+  pkg.generate(
+    name : 'gl',
+    filebase : 'gl',
+    description : 'Mesa OpenGL library',
+    version : meson.project_version(),
+    libraries : '-L${libdir} -lGL',
+    requires : 'glapi',
+    libraries_private : gl_priv_libs,
+  )
+endif

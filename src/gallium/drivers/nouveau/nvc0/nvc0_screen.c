@@ -20,9 +20,12 @@
  * OTHER DEALINGS IN THE SOFTWARE.
  */
 
+#include <errno.h>
 #include <nouveau_drm.h>
 #ifndef __SWITCH__
 #include <xf86drm.h>
+#else
+#include <switch.h>
 #endif
 #include "drm-uapi/nouveau_drm.h"
 #include <nvif/class.h>
@@ -39,10 +42,63 @@
 #include "nvc0/nvc0_screen.h"
 
 #include "nvc0/mme/com9097.mme.h"
+#ifdef __SWITCH__
+#include "nvc0/mme/gm20b_draw.mme.h"
+#endif
 #include "nvc0/mme/com90c0.mme.h"
 #include "nvc0/mme/comc597.mme.h"
 
 #include "nv50/g80_texture.xml.h"
+
+enum nvc0_engine_class {
+   NVC0_ENGINE_CLASS_COMPUTE,
+   NVC0_ENGINE_CLASS_M2MF,
+   NVC0_ENGINE_CLASS_COPY,
+   NVC0_ENGINE_CLASS_3D,
+};
+
+static int
+nvc0_object_mclass(struct nouveau_object *parent,
+                   const struct nouveau_mclass *classes,
+                   enum nvc0_engine_class engine)
+{
+#ifdef __SWITCH__
+   const nvioctl_gpu_characteristics *gpu = nvGpuGetCharacteristics();
+   uint32_t supported_class;
+
+   if (!gpu)
+      return -ENODEV;
+
+   switch (engine) {
+   case NVC0_ENGINE_CLASS_COMPUTE:
+      supported_class = gpu->compute_class;
+      break;
+   case NVC0_ENGINE_CLASS_M2MF:
+      supported_class = gpu->inline_to_memory_class;
+      break;
+   case NVC0_ENGINE_CLASS_COPY:
+      supported_class = gpu->dma_copy_class;
+      break;
+   case NVC0_ENGINE_CLASS_3D:
+      supported_class = gpu->threed_class;
+      break;
+   default:
+      return -EINVAL;
+   }
+
+   /* Match the reported GM20B class directly. */
+   for (int i = 0; classes[i].oclass; i++) {
+      if (classes[i].oclass == supported_class) {
+         return i;
+      }
+   }
+
+   return -ENODEV;
+#else
+   (void)engine;
+   return nouveau_object_mclass(parent, classes);
+#endif
+}
 
 static bool
 nvc0_screen_is_format_supported(struct pipe_screen *pscreen,
@@ -190,11 +246,20 @@ static void
 nvc0_init_screen_caps(struct nvc0_screen *screen)
 {
    struct pipe_caps *caps = (struct pipe_caps *)&screen->base.base.caps;
+   struct nv_device_info info_storage;
+   const struct nv_device_info *dev_info =
+      nouveau_device_get_info(screen->base.device, &info_storage);
 
    u_init_pipe_screen_caps(&screen->base.base, 1);
 
    const uint16_t class_3d = screen->base.class_3d;
    struct nouveau_device *dev = screen->base.device;
+#ifdef __SWITCH__
+   /* Conservative-raster MME setup requires unavailable FECS access. */
+   const bool supports_conservative_raster = false;
+#else
+   const bool supports_conservative_raster = class_3d >= GM200_3D_CLASS;
+#endif
 
    /* non-boolean caps */
    caps->max_texture_2d_size = 16384;
@@ -233,7 +298,8 @@ nvc0_init_screen_caps(struct nvc0_screen *screen)
    caps->endianness = PIPE_ENDIAN_LITTLE;
    caps->max_shader_patch_varyings = 30;
    caps->max_window_rectangles = NVC0_MAX_WINDOW_RECTANGLES;
-   caps->max_conservative_raster_subpixel_precision_bias = class_3d >= GM200_3D_CLASS ? 8 : 0;
+   caps->max_conservative_raster_subpixel_precision_bias =
+      supports_conservative_raster ? 8 : 0;
    caps->max_texture_upload_memory_budget = 64 * 1024 * 1024;
    /* NOTE: These only count our slots for GENERIC varyings.
     * The address space may be larger, but the actual hard limit seems to be
@@ -344,14 +410,16 @@ nvc0_init_screen_caps(struct nvc0_screen *screen)
    caps->vs_layer_viewport =
    caps->tes_layer_viewport =
    caps->post_depth_coverage =
-   caps->conservative_raster_post_snap_triangles =
-   caps->conservative_raster_post_snap_points_lines =
-   caps->conservative_raster_post_depth_coverage =
    caps->programmable_sample_locations =
    caps->viewport_swizzle =
    caps->viewport_mask =
    caps->sampler_reduction_minmax = class_3d >= GM200_3D_CLASS;
-   caps->conservative_raster_pre_snap_triangles = class_3d >= GP100_3D_CLASS;
+   caps->conservative_raster_post_snap_triangles =
+   caps->conservative_raster_post_snap_points_lines =
+   caps->conservative_raster_post_depth_coverage =
+      supports_conservative_raster;
+   caps->conservative_raster_pre_snap_triangles =
+      supports_conservative_raster && class_3d >= GP100_3D_CLASS;
    caps->resource_from_user_memory_compute_only =
    caps->system_svm = screen->base.has_svm;
 
@@ -361,21 +429,27 @@ nvc0_init_screen_caps(struct nvc0_screen *screen)
    /* nir related caps */
    caps->nir_images_as_deref = false;
 
-   caps->pci_group = dev->info.pci.domain;
-   caps->pci_bus = dev->info.pci.bus;
-   caps->pci_device = dev->info.pci.dev;
-   caps->pci_function = dev->info.pci.func;
+   caps->pci_group = dev_info->pci.domain;
+   caps->pci_bus = dev_info->pci.bus;
+   caps->pci_device = dev_info->pci.dev;
+   caps->pci_function = dev_info->pci.func;
 
    caps->opencl_integer_functions = false; /* could be done */
    caps->integer_multiply_32x16 = false; /* could be done */
+#ifdef __SWITCH__
+   /* The Switch buffer path supports GLthread's stream-buffer mapping. */
+   caps->map_unsynchronized_thread_safe = true;
+   caps->allow_mapped_buffers_during_execution = true;
+#else
    caps->map_unsynchronized_thread_safe = false; /* when we fix MT stuff */
+#endif
    caps->alpha_to_coverage_dither_control = false; /* TODO */
    caps->shader_atomic_int64 = false; /* TODO */
    caps->hardware_gl_select = false;
 
    caps->vendor_id = 0x10de;
-   caps->device_id = dev->info.device_id;
-   caps->video_memory = dev->vram_size >> 20;
+   caps->device_id = dev_info->device_id;
+   caps->video_memory = nouveau_device_get_memory_size(dev) >> 20;
    caps->uma = screen->base.is_uma;
 
    caps->min_line_width =
@@ -391,8 +465,10 @@ nvc0_init_screen_caps(struct nvc0_screen *screen)
    caps->max_texture_anisotropy = 16.0f;
    caps->max_texture_lod_bias = 15.0f;
    caps->min_conservative_raster_dilate = 0.0f;
-   caps->max_conservative_raster_dilate = class_3d >= GM200_3D_CLASS ? 0.75f : 0.0f;
-   caps->conservative_raster_dilate_granularity = class_3d >= GM200_3D_CLASS ? 0.25f : 0.0f;
+   caps->max_conservative_raster_dilate =
+      supports_conservative_raster ? 0.75f : 0.0f;
+   caps->conservative_raster_dilate_granularity =
+      supports_conservative_raster ? 0.25f : 0.0f;
 
    /* Up to 16 bytes are accelerated */
    caps->hw_clear_buffer_sizes = 1 | 2 | 4 | 8 | 16;
@@ -635,7 +711,7 @@ nvc0_screen_init_compute(struct nvc0_screen *screen)
    struct nouveau_object *chan = screen->base.channel;
    int ret;
 
-   ret = nouveau_object_mclass(chan, computes);
+   ret = nvc0_object_mclass(chan, computes, NVC0_ENGINE_CLASS_COMPUTE);
    if (ret < 0) {
       NOUVEAU_ERR("No supported compute class: %d\n", ret);
       return ret;
@@ -708,6 +784,9 @@ nvc0_screen_resize_text_area(struct nvc0_screen *screen, struct nouveau_pushbuf 
                 NV_VRAM_DOMAIN(&screen->base) | NOUVEAU_BO_RD);
    nouveau_bo_ref(NULL, &screen->text);
    screen->text = bo;
+#ifdef __SWITCH__
+   screen->switch_text_generation++;
+#endif
 
    nouveau_heap_free(&screen->lib_code);
    nouveau_heap_destroy(&screen->text_heap);
@@ -843,8 +922,10 @@ nvc0_screen_create(struct nouveau_device *dev)
    pscreen->context_create = nvc0_create;
    pscreen->is_format_supported = nvc0_screen_is_format_supported;
    pscreen->get_sample_pixel_grid = nvc0_screen_get_sample_pixel_grid;
+#ifndef __SWITCH__
    pscreen->get_driver_query_info = nvc0_screen_get_driver_query_info;
    pscreen->get_driver_query_group_info = nvc0_screen_get_driver_query_group_info;
+#endif
 
    nvc0_screen_init_resource_functions(pscreen);
 
@@ -862,7 +943,7 @@ nvc0_screen_create(struct nouveau_device *dev)
    screen->fence.map = screen->fence.bo->map;
    screen->base.fence.emit = nvc0_screen_fence_emit;
    screen->base.fence.update = nvc0_screen_fence_update;
-
+#ifndef __SWITCH__
    if (dev->chipset < 0x140) {
       ret = nouveau_object_new(chan, (dev->chipset < 0xe0) ? 0x1f906e : 0x906e,
                                NVIF_CLASS_SW_GF100, NULL, 0, &screen->nvsw);
@@ -872,6 +953,7 @@ nvc0_screen_create(struct nouveau_device *dev)
       BEGIN_NVC0(push, SUBC_SW(NV01_SUBCHAN_OBJECT), 1);
       PUSH_DATA (push, screen->nvsw->handle);
    }
+#endif
 
    const struct nouveau_mclass m2mfs[] = {
       { NVF0_P2MF_CLASS, -1 },
@@ -880,7 +962,7 @@ nvc0_screen_create(struct nouveau_device *dev)
       {}
    };
 
-   ret = nouveau_object_mclass(chan, m2mfs);
+   ret = nvc0_object_mclass(chan, m2mfs, NVC0_ENGINE_CLASS_M2MF);
    if (ret < 0)
       FAIL_SCREEN_INIT("No supported m2mf class: %d\n", ret);
 
@@ -888,7 +970,6 @@ nvc0_screen_create(struct nouveau_device *dev)
                             &screen->m2mf);
    if (ret)
       FAIL_SCREEN_INIT("Error allocating PGRAPH context for M2MF: %d\n", ret);
-
    BEGIN_NVC0(push, SUBC_M2MF(NV01_SUBCHAN_OBJECT), 1);
    PUSH_DATA (push, screen->m2mf->oclass);
 
@@ -905,14 +986,13 @@ nvc0_screen_create(struct nouveau_device *dev)
          {}
       };
 
-      ret = nouveau_object_mclass(chan, copys);
+      ret = nvc0_object_mclass(chan, copys, NVC0_ENGINE_CLASS_COPY);
       if (ret < 0)
          FAIL_SCREEN_INIT("No supported copy engine class: %d\n", ret);
 
       ret = nouveau_object_new(chan, 0, copys[ret].oclass, NULL, 0, &screen->copy);
       if (ret)
          FAIL_SCREEN_INIT("Error allocating copy engine class: %d\n", ret);
-
       BEGIN_NVC0(push, SUBC_COPY(NV01_SUBCHAN_OBJECT), 1);
       PUSH_DATA (push, screen->copy->oclass);
    }
@@ -921,7 +1001,6 @@ nvc0_screen_create(struct nouveau_device *dev)
                             &screen->eng2d);
    if (ret)
       FAIL_SCREEN_INIT("Error allocating PGRAPH context for 2D: %d\n", ret);
-
    BEGIN_NVC0(push, SUBC_2D(NV01_SUBCHAN_OBJECT), 1);
    PUSH_DATA (push, screen->eng2d->oclass);
    BEGIN_NVC0(push, SUBC_2D(NVC0_2D_SINGLE_GPC), 1);
@@ -961,7 +1040,7 @@ nvc0_screen_create(struct nouveau_device *dev)
       {}
    };
 
-   ret = nouveau_object_mclass(chan, threeds);
+   ret = nvc0_object_mclass(chan, threeds, NVC0_ENGINE_CLASS_3D);
    if (ret < 0)
       FAIL_SCREEN_INIT("No supported 3d class: %d\n", ret);
 
@@ -970,7 +1049,6 @@ nvc0_screen_create(struct nouveau_device *dev)
    if (ret)
       FAIL_SCREEN_INIT("Error allocating PGRAPH context for 3D: %d\n", ret);
    screen->base.class_3d = screen->eng3d->oclass;
-
    BEGIN_NVC0(push, SUBC_3D(NV01_SUBCHAN_OBJECT), 1);
    PUSH_DATA (push, screen->eng3d->oclass);
 
@@ -1054,6 +1132,10 @@ nvc0_screen_create(struct nouveau_device *dev)
    PUSH_DATAh(push, screen->uniform_bo->offset + NVC0_CB_AUX_RUNOUT_INFO);
    PUSH_DATA (push, screen->uniform_bo->offset + NVC0_CB_AUX_RUNOUT_INFO);
 
+#ifdef __SWITCH__
+   /* GM20B has one GPC and two SMMs. */
+   value = (2 << 8) | 1;
+#else
    if (screen->base.drm->version >= 0x01000101) {
       ret = nouveau_getparam(dev, NOUVEAU_GETPARAM_GRAPH_UNITS, &value);
       if (ret)
@@ -1064,6 +1146,7 @@ nvc0_screen_create(struct nouveau_device *dev)
       else
          value = (16 << 8) | 4;
    }
+#endif
    screen->gpc_count = value & 0x000000ff;
    screen->mp_count = value >> 8;
    screen->mp_count_compute = screen->mp_count;
@@ -1183,6 +1266,13 @@ nvc0_screen_create(struct nouveau_device *dev)
       MK_MACRO(NVC0_3D_MACRO_SET_PRIV_REG, mme9097_set_priv_reg);
       MK_MACRO(NVC0_3D_MACRO_COMPUTE_COUNTER, mme9097_compute_counter);
       MK_MACRO(NVC0_3D_MACRO_COMPUTE_COUNTER_TO_QUERY, mme9097_compute_counter_to_query);
+#ifdef __SWITCH__
+      if (NVC0_SWITCH_IS_GM20B_CHIPSET(
+             screen->base.device->chipset)) {
+         MK_MACRO(NVC0_3D_MACRO_DRAW_ARRAYS_DIRECT, gm20b_mme_draw);
+         MK_MACRO(NVC0_3D_MACRO_DRAW_ELEMENTS_DIRECT, gm20b_mme_draw_indexed);
+      }
+#endif
       MK_MACRO(NVC0_CP_MACRO_LAUNCH_GRID_INDIRECT, mme90c0_launch_grid_indirect);
    } else {
 #undef MK_MACRO
@@ -1234,7 +1324,6 @@ nvc0_screen_create(struct nouveau_device *dev)
 
    if (nvc0_screen_init_compute(screen))
       goto fail;
-
    /* XXX: Compute and 3D are somehow aliased on Fermi. */
    for (i = 0; i < 5; ++i) {
       unsigned j = 0;
@@ -1279,6 +1368,7 @@ nvc0_screen_create(struct nouveau_device *dev)
    BEGIN_NVC0(push, NVC0_3D(LINKED_TSC), 1);
    PUSH_DATA (push, 0);
 
+#ifndef __SWITCH__
    /* requires Nvidia provided firmware */
    if (screen->eng3d->oclass >= GM200_3D_CLASS) {
       unsigned reg = screen->eng3d->oclass >= GV100_3D_CLASS ? 0x419ba4 : 0x419f78;
@@ -1287,8 +1377,32 @@ nvc0_screen_create(struct nouveau_device *dev)
       PUSH_DATA (push, 0x00000000);
       PUSH_DATA (push, 0x00000008);
    }
+#endif
 
+#ifdef __SWITCH__
+   /* Drain initialization before exposing the screen. */
+   ret = PUSH_REF1(push, screen->fence.bo,
+                   NOUVEAU_BO_GART | NOUVEAU_BO_WR);
+   if (ret)
+      goto fail;
+#endif
    PUSH_KICK (push);
+#ifdef __SWITCH__
+   unsigned native_threshold = 0;
+   const int native_syncpt =
+      nouveau_bo_get_syncpoint(screen->fence.bo, &native_threshold);
+   if (native_syncpt >= 0) {
+      NvFence native_fence = {
+         .id = (uint32_t)native_syncpt,
+         .value = native_threshold,
+      };
+      const Result drain_result = nvFenceWait(&native_fence, 2000000);
+      if (R_FAILED(drain_result))
+         goto fail;
+   } else {
+      goto fail;
+   }
+#endif
 
    screen->tic.entries = CALLOC(
          NVC0_TIC_MAX_ENTRIES + NVC0_TSC_MAX_ENTRIES + NVE4_IMG_MAX_HANDLES,
@@ -1299,11 +1413,13 @@ nvc0_screen_create(struct nouveau_device *dev)
    if (!nvc0_blitter_create(screen))
       goto fail;
 
+#ifndef __SWITCH__
    nouveau_device_set_classes_for_debug(dev,
                                         screen->eng3d->oclass,
                                         screen->compute->oclass,
                                         screen->m2mf->oclass,
                                         screen->copy ? screen->copy->oclass : 0);
+#endif
 
    nvc0_init_shader_caps(screen);
    nvc0_init_compute_caps(screen);

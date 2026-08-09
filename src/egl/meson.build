@@ -15,6 +15,7 @@ if with_platform_windows
   link_for_egl += libgallium_wgl
 endif
 deps_for_egl = []
+switch_egl_private_libs = []
 incs_for_egl = [inc_include, inc_src, inc_egl]
 objs_for_egl = []
 
@@ -152,21 +153,30 @@ elif with_platform_haiku
   deps_for_egl += [cpp.find_library('be'), driver_swrast]
 elif with_platform_switch
   incs_for_egl += [inc_gallium, inc_gallium_aux, inc_gallium_winsys, inc_mesa]
+  files_egl += sha1_h
   files_egl += files('drivers/switch/egl_switch.c')
   link_for_egl += libglapi
   objs_for_egl += [
-    libmesa.extract_all_objects(),
-    libglsl.extract_all_objects(),
-    libglcpp.extract_all_objects(),
-    libcompiler.extract_all_objects(),
-    _libnir.extract_all_objects(),
-    libgallium.extract_all_objects(),
-    libgalliumvl_stub.extract_all_objects(),
-    libnouveauwinsys.extract_all_objects(),
-    libnouveau_codegen.extract_all_objects(),
-    libnouveau.extract_all_objects()
+    libmesa.extract_all_objects(recursive : false),
+    libglsl.extract_all_objects(recursive : false),
+    libglcpp.extract_all_objects(recursive : false),
+    libcompiler.extract_all_objects(recursive : false),
+    _libnir.extract_all_objects(recursive : false),
+    libgallium.extract_all_objects(recursive : false),
+    libgalliumvl_stub.extract_all_objects(recursive : false),
+    libnouveauwinsys.extract_all_objects(recursive : false),
+    libnouveau_codegen.extract_all_objects(recursive : false),
+    libnouveau.extract_all_objects(recursive : false),
+    _libmesa_util.extract_all_objects(recursive : false),
+    _libmesa_util_c11.extract_all_objects(recursive : false),
+    libmesa_util_simd.extract_all_objects(recursive : false),
+    blake3.extract_all_objects(recursive : false),
+    _libxmlconfig.extract_all_objects(recursive : false)
   ]
-  deps_for_egl += dep_zstd
+  deps_for_egl += [dep_zstd, dep_switch_libdrm_nouveau]
+  switch_egl_private_libs += [
+    '-ldrm_nouveau', '-lexpat', '-lstdc++', '-lnx'
+  ]
 elif with_platform_windows
   c_args_for_egl += [
     '-DEGLAPI=', '-DPUBLIC='
@@ -269,7 +279,7 @@ else
     description : 'Mesa EGL Library',
     version : meson.project_version(),
     libraries : libegl,
-    libraries_private: gl_priv_libs,
+    libraries_private: [gl_priv_libs, switch_egl_private_libs],
     requires_private : gl_priv_reqs,
     extra_cflags : gl_pkgconfig_c_flags,
   )

@@ -187,15 +187,26 @@ nouveau_mm_allocate(struct nouveau_mman *cache,
    }
 
    alloc = MALLOC_STRUCT(nouveau_mm_allocation);
-   if (!alloc)
+   if (!alloc) {
+      *bo = NULL;
+      *offset = 0;
       return NULL;
+   }
 
    simple_mtx_lock(&bucket->lock);
    if (!list_is_empty(&bucket->used)) {
       slab = list_entry(bucket->used.next, struct mm_slab, head);
    } else {
       if (list_is_empty(&bucket->free)) {
-         mm_slab_new(cache, bucket, MAX2(mm_get_order(size), MM_MIN_ORDER));
+         ret = mm_slab_new(cache, bucket,
+                           MAX2(mm_get_order(size), MM_MIN_ORDER));
+         if (ret) {
+            simple_mtx_unlock(&bucket->lock);
+            FREE(alloc);
+            *bo = NULL;
+            *offset = 0;
+            return NULL;
+         }
       }
       slab = list_entry(bucket->free.next, struct mm_slab, head);
 

@@ -22,6 +22,17 @@ libglapi = static_library(
   link_args : [ld_args_gc_sections],
   include_directories : [inc_mesa, inc_src, inc_include],
   dependencies : [dep_thread, idep_mesautil],
-  install : false,
+  install : with_platform_switch,
 )
 libglapi_build_dir = meson.current_build_dir()
+
+if with_platform_switch
+  pkg.generate(
+    name : 'glapi',
+    filebase : 'glapi',
+    description : 'Mesa shared OpenGL dispatch library',
+    version : meson.project_version(),
+    libraries : libglapi,
+    libraries_private : gl_priv_libs,
+  )
+endif

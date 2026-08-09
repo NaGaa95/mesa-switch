@@ -88,6 +88,10 @@ nvc0_flush(struct pipe_context *pipe,
       nouveau_fence_ref(nvc0->base.fence, (struct nouveau_fence **)fence,
                         nvc0->base.screen);
 
+#ifdef __SWITCH__
+   /* Bind the screen-owned pushbuf to this context. */
+   nouveau_pushbuf_bind_context(nvc0->base.pushbuf, &nvc0->base);
+#endif
    PUSH_KICK(nvc0->base.pushbuf); /* fencing handled in kick_notify */
 
    nouveau_context_update_frame_stats(&nvc0->base);
@@ -197,6 +201,10 @@ nvc0_context_unreference_resources(struct nvc0_context *nvc0)
    nouveau_bufctx_del(&nvc0->bufctx_3d);
    nouveau_bufctx_del(&nvc0->bufctx);
    nouveau_bufctx_del(&nvc0->bufctx_cp);
+#ifdef __SWITCH__
+   /* Drop cached index ownership after removing its bufctx entries. */
+   pipe_resource_reference(&nvc0->switch_index_resource, NULL);
+#endif
 
    nvc0_framebuffer_init(&nvc0->base.pipe, NULL, nvc0->fb_cbufs, &nvc0->fb_zsbuf);
    util_unreference_framebuffer_state(&nvc0->framebuffer);
@@ -257,6 +265,9 @@ nvc0_destroy(struct pipe_context *pipe)
     * Other contexts will always set their bufctx again on action calls.
     */
    nouveau_pushbuf_bufctx(nvc0->base.pushbuf, NULL);
+#ifdef __SWITCH__
+   nouveau_pushbuf_bind_context(nvc0->base.pushbuf, &nvc0->base);
+#endif
    PUSH_KICK(nvc0->base.pushbuf);
 
    nvc0_context_unreference_resources(nvc0);
@@ -273,6 +284,9 @@ nvc0_destroy(struct pipe_context *pipe)
    }
 
    nouveau_fence_cleanup(&nvc0->base);
+#ifdef __SWITCH__
+   nouveau_pushbuf_unbind_context(nvc0->base.pushbuf, &nvc0->base);
+#endif
    nouveau_context_destroy(&nvc0->base);
 }
 
@@ -296,6 +310,28 @@ nvc0_invalidate_resource_storage(struct nouveau_context *ctx,
 {
    struct nvc0_context *nvc0 = nvc0_context(&ctx->pipe);
    unsigned s, i;
+
+#ifdef __SWITCH__
+   bool bindless_storage_changed = false;
+   list_for_each_entry(struct nvc0_resident, resident,
+                       &nvc0->tex_head, list) {
+      if (&resident->buf->base == res) {
+         bindless_storage_changed = true;
+         break;
+      }
+   }
+   if (!bindless_storage_changed) {
+      list_for_each_entry(struct nvc0_resident, resident,
+                          &nvc0->img_head, list) {
+         if (&resident->buf->base == res) {
+            bindless_storage_changed = true;
+            break;
+         }
+      }
+   }
+   if (bindless_storage_changed)
+      nvc0->switch_bindless_generation++;
+#endif
 
    if (res->bind & PIPE_BIND_RENDER_TARGET) {
       for (i = 0; i < nvc0->framebuffer.nr_cbufs; ++i) {
@@ -473,6 +509,16 @@ nvc0_create(struct pipe_screen *pscreen, void *priv, unsigned ctxflags)
    list_inithead(&nvc0->tex_head);
    list_inithead(&nvc0->img_head);
 
+#ifdef __SWITCH__
+   nvc0->switch_fast_draw =
+      debug_get_bool_option("NOUVEAU_SWITCH_FAST_DRAW", true);
+   nvc0->switch_gm20b_mme =
+      debug_get_bool_option("NOUVEAU_SWITCH_GM20B_MME", true) &&
+      NVC0_SWITCH_IS_GM20B_CHIPSET(
+         nvc0->screen->base.device->chipset) &&
+      nvc0->screen->eng3d->oclass < TU102_3D_CLASS;
+#endif
+
    nvc0->base.invalidate_resource_storage = nvc0_invalidate_resource_storage;
 
    pipe->create_video_codec = nvc0_create_decoder;
@@ -556,6 +602,10 @@ nvc0_create(struct pipe_screen *pscreen, void *priv, unsigned ctxflags)
       nvc0->dirty_3d |= NVC0_NEW_3D_SAMPLERS;
       nvc0->dirty_cp |= NVC0_NEW_CP_SAMPLERS;
    }
+
+#ifdef __SWITCH__
+   nouveau_pushbuf_bind_context(nvc0->base.pushbuf, &nvc0->base);
+#endif
 
    return pipe;
 

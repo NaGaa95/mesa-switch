@@ -2,6 +2,12 @@
 #define __NVC0_SCREEN_H__
 
 #include "nouveau_screen.h"
+
+#ifdef __SWITCH__
+/* Accept both Switch and upstream-style GM20B chipset values. */
+#define NVC0_SWITCH_IS_GM20B_CHIPSET(chipset) \
+   ((chipset) == 0x120 || (chipset) == 0x12b)
+#endif
 #include "nouveau_mm.h"
 #include "nouveau_fence.h"
 #include "nouveau_heap.h"
@@ -74,6 +80,9 @@ struct nvc0_screen {
    int num_occlusion_queries_active;
 
    struct nouveau_bo *text;
+#ifdef __SWITCH__
+   uint64_t switch_text_generation;
+#endif
    struct nouveau_bo *uniform_bo;
    struct nouveau_bo *tls;
    struct nouveau_bo *txc; /* TIC (offset 0) and TSC (65536) */

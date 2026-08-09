@@ -878,6 +878,8 @@ nve4_make_texture_handle_resident(struct pipe_context *pipe,
    struct nvc0_context *nvc0 = nvc0_context(pipe);
    if (resident) {
       struct nvc0_resident *res = calloc(1, sizeof(struct nvc0_resident));
+      if (!res)
+         return;
       struct nv50_tic_entry *tic =
          nvc0->screen->tic.entries[handle & NVE4_TIC_ENTRY_INVALID];
       assert(tic);
@@ -887,11 +889,17 @@ nve4_make_texture_handle_resident(struct pipe_context *pipe,
       res->buf = nv04_resource(tic->pipe.texture);
       res->flags = NOUVEAU_BO_RD;
       list_add(&res->list, &nvc0->tex_head);
+#ifdef __SWITCH__
+      nvc0->switch_bindless_generation++;
+#endif
    } else {
       list_for_each_entry_safe(struct nvc0_resident, pos, &nvc0->tex_head, list) {
          if (pos->handle == handle) {
             list_del(&pos->list);
             free(pos);
+#ifdef __SWITCH__
+            nvc0->switch_bindless_generation++;
+#endif
             break;
          }
       }
@@ -1394,6 +1402,8 @@ nve4_make_image_handle_resident(struct pipe_context *pipe, uint64_t handle,
 
    if (resident) {
       struct nvc0_resident *res = calloc(1, sizeof(struct nvc0_resident));
+      if (!res)
+         return;
       struct pipe_image_view *view =
          screen->img.entries[handle & (NVE4_IMG_MAX_HANDLES - 1)];
       assert(view);
@@ -1405,11 +1415,17 @@ nve4_make_image_handle_resident(struct pipe_context *pipe, uint64_t handle,
       res->buf = nv04_resource(view->resource);
       res->flags = (access & 3) << 8;
       list_add(&res->list, &nvc0->img_head);
+#ifdef __SWITCH__
+      nvc0->switch_bindless_generation++;
+#endif
    } else {
       list_for_each_entry_safe(struct nvc0_resident, pos, &nvc0->img_head, list) {
          if (pos->handle == handle) {
             list_del(&pos->list);
             free(pos);
+#ifdef __SWITCH__
+            nvc0->switch_bindless_generation++;
+#endif
             break;
          }
       }
@@ -1482,6 +1498,8 @@ gm107_make_image_handle_resident(struct pipe_context *pipe, uint64_t handle,
 
    if (resident) {
       struct nvc0_resident *res = calloc(1, sizeof(struct nvc0_resident));
+      if (!res)
+         return;
       struct nv50_tic_entry *tic =
          nvc0->screen->tic.entries[handle & NVE4_TIC_ENTRY_INVALID];
       assert(tic);
@@ -1496,11 +1514,17 @@ gm107_make_image_handle_resident(struct pipe_context *pipe, uint64_t handle,
                         tic->pipe.u.buf.offset,
                         tic->pipe.u.buf.offset + tic->pipe.u.buf.size);
       list_add(&res->list, &nvc0->img_head);
+#ifdef __SWITCH__
+      nvc0->switch_bindless_generation++;
+#endif
    } else {
       list_for_each_entry_safe(struct nvc0_resident, pos, &nvc0->img_head, list) {
          if (pos->handle == handle) {
             list_del(&pos->list);
             free(pos);
+#ifdef __SWITCH__
+            nvc0->switch_bindless_generation++;
+#endif
             break;
          }
       }

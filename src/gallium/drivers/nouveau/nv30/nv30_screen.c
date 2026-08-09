@@ -91,6 +91,9 @@ static void
 nv30_init_screen_caps(struct nv30_screen *screen)
 {
    struct pipe_caps *caps = (struct pipe_caps *)&screen->base.base.caps;
+   struct nv_device_info info_storage;
+   const struct nv_device_info *dev_info =
+      nouveau_device_get_info(screen->base.device, &info_storage);
 
    u_init_pipe_screen_caps(&screen->base.base, 1);
 
@@ -269,15 +272,15 @@ nv30_init_screen_caps(struct nv30_screen *screen)
    caps->image_atomic_inc_wrap = false;
    caps->image_store_formatted = false;
 
-   caps->pci_group = dev->info.pci.domain;
-   caps->pci_bus = dev->info.pci.bus;
-   caps->pci_device = dev->info.pci.dev;
-   caps->pci_function = dev->info.pci.func;
+   caps->pci_group = dev_info->pci.domain;
+   caps->pci_bus = dev_info->pci.bus;
+   caps->pci_device = dev_info->pci.dev;
+   caps->pci_function = dev_info->pci.func;
 
    caps->max_gs_invocations = 32;
    caps->max_shader_buffer_size = 1 << 27;
    caps->vendor_id = 0x10de;
-   caps->device_id = dev->info.device_id;
+   caps->device_id = dev_info->device_id;
    caps->video_memory = dev->vram_size >> 20;
    caps->uma = false;
 
@@ -571,7 +574,11 @@ nv30_screen_create(struct nouveau_device *dev)
       nouveau_heap_init(&screen->vp_data_heap, 6, 468 - 6);
    }
 
+#ifdef __SWITCH__
+   ret = nouveau_bo_wrap(screen->base.device, fifo->notify, &screen->notify);
+#else
    ret = nouveau_bo_wrap(screen->base.device, fifo->base.notify, &screen->notify);
+#endif
    if (ret == 0)
       ret = BO_MAP(&screen->base, screen->notify, 0, screen->base.client);
    if (ret)

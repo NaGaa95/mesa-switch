@@ -588,6 +588,20 @@ nvc0_draw_arrays(struct nvc0_context *nvc0,
 
    prim = nvc0_prim_gl(mode);
 
+#ifdef __SWITCH__
+   if (nvc0->switch_gm20b_mme && nvc0->state.instance_base == 0) {
+      PUSH_SPACE(push, 6);
+      BEGIN_1IC0(push, NVC0_3D(MACRO_DRAW_ARRAYS_DIRECT), 5);
+      PUSH_DATA (push, prim);
+      PUSH_DATA (push, count);
+      PUSH_DATA (push, instance_count);
+      PUSH_DATA (push, start);
+      PUSH_DATA (push, 0); /* first instance */
+      NOUVEAU_DRV_STAT(&nvc0->screen->base, draw_calls_array, 1);
+      return;
+   }
+#endif
+
    while (instance_count--) {
       PUSH_SPACE(push, 6);
       BEGIN_NVC0(push, NVC0_3D(VERTEX_BEGIN_GL), 1);
@@ -721,6 +735,21 @@ nvc0_draw_elements(struct nvc0_context *nvc0, bool shorten,
    }
 
    if (!info->has_user_indices) {
+#ifdef __SWITCH__
+      if (nvc0->switch_gm20b_mme && index_bias == 0 &&
+          nvc0->state.instance_base == 0) {
+         PUSH_SPACE(push, 7);
+         BEGIN_1IC0(push, NVC0_3D(MACRO_DRAW_ELEMENTS_DIRECT), 6);
+         PUSH_DATA (push, prim);
+         PUSH_DATA (push, count);
+         PUSH_DATA (push, instance_count);
+         PUSH_DATA (push, start);
+         PUSH_DATA (push, 0); /* base vertex */
+         PUSH_DATA (push, 0); /* first instance */
+         NOUVEAU_DRV_STAT(&nvc0->screen->base, draw_calls_indexed, 1);
+         return;
+      }
+#endif
       PUSH_SPACE(push, 1);
       IMMED_NVC0(push, NVC0_3D(VERTEX_BEGIN_GL), prim);
       do {
@@ -1117,46 +1146,154 @@ nvc0_draw_vbo(struct pipe_context *pipe, const struct pipe_draw_info *info,
       IMMED_NVC0(push, NVC0_3D(PATCH_VERTICES), nvc0->state.patch_vertices);
    }
 
-   if (info->index_size && !info->has_user_indices) {
-      struct nv04_resource *buf = nv04_resource(info->index.resource);
+#ifdef __SWITCH__
+   /* Context switches invalidate the cached index registers. */
+   if (nvc0->switch_fast_draw && screen->cur_ctx != nvc0)
+      nvc0->switch_index_valid = false;
 
-      assert(buf);
-      assert(nouveau_resource_mapped_by_gpu(&buf->base));
+   if (nvc0->switch_fast_draw) {
+      if (info->index_size && !info->has_user_indices) {
+         struct nv04_resource *buf = nv04_resource(info->index.resource);
+         uint64_t address, limit;
+         uint8_t format;
+         bool resource_changed, bo_changed, residency_changed, state_changed;
 
-      PUSH_SPACE(push, 6);
-      if (nvc0->screen->eng3d->oclass < TU102_3D_CLASS) {
-         BEGIN_NVC0(push, NVC0_3D(INDEX_ARRAY_START_HIGH), 5);
-         PUSH_DATAh(push, buf->address);
-         PUSH_DATA (push, buf->address);
-         PUSH_DATAh(push, buf->address + buf->base.width0 - 1);
-         PUSH_DATA (push, buf->address + buf->base.width0 - 1);
-         PUSH_DATA (push, info->index_size >> 1);
-      } else {
-         BEGIN_NVC0(push, NVC0_3D(INDEX_ARRAY_START_HIGH), 2);
-         PUSH_DATAh(push, buf->address);
-         PUSH_DATA (push, buf->address);
-         BEGIN_NVC0(push, SUBC_3D(TU102_3D_INDEX_ARRAY_LIMIT_HIGH), 2);
-         PUSH_DATAh(push, buf->address + buf->base.width0 - 1);
-         PUSH_DATA (push, buf->address + buf->base.width0 - 1);
-         BEGIN_NVC0(push, NVC0_3D(INDEX_FORMAT), 1);
-         PUSH_DATA (push, info->index_size >> 1);
+         assert(buf);
+         assert(nouveau_resource_mapped_by_gpu(&buf->base));
+
+         address = buf->address;
+         limit = address + buf->base.width0 - 1;
+         format = info->index_size >> 1;
+         resource_changed =
+            nvc0->switch_index_resource != &buf->base;
+         bo_changed = nvc0->switch_index_bo != buf->bo;
+         residency_changed = !nvc0->switch_index_valid || resource_changed;
+         state_changed =
+            residency_changed || bo_changed ||
+            nvc0->switch_index_address != address ||
+            nvc0->switch_index_limit != limit ||
+            nvc0->switch_index_format != format;
+
+         if (residency_changed) {
+            /* Keep the cached index resource alive across batch epochs. */
+            nouveau_bufctx_reset(nvc0->bufctx_3d, NVC0_BIND_3D_IDX);
+            pipe_resource_reference(&nvc0->switch_index_resource,
+                                    &buf->base);
+            BCTX_REFN(nvc0->bufctx_3d, 3D_IDX, buf, RD);
+            nvc0->switch_residency_generation++;
+         }
+
+         if (state_changed) {
+            PUSH_SPACE(push, 6);
+            if (nvc0->screen->eng3d->oclass < TU102_3D_CLASS) {
+               BEGIN_NVC0(push, NVC0_3D(INDEX_ARRAY_START_HIGH), 5);
+               PUSH_DATAh(push, address);
+               PUSH_DATA (push, address);
+               PUSH_DATAh(push, limit);
+               PUSH_DATA (push, limit);
+               PUSH_DATA (push, format);
+            } else {
+               BEGIN_NVC0(push, NVC0_3D(INDEX_ARRAY_START_HIGH), 2);
+               PUSH_DATAh(push, address);
+               PUSH_DATA (push, address);
+               BEGIN_NVC0(push,
+                          SUBC_3D(TU102_3D_INDEX_ARRAY_LIMIT_HIGH), 2);
+               PUSH_DATAh(push, limit);
+               PUSH_DATA (push, limit);
+               BEGIN_NVC0(push, NVC0_3D(INDEX_FORMAT), 1);
+               PUSH_DATA (push, format);
+            }
+         }
+
+         nvc0->switch_index_valid = true;
+         nvc0->switch_index_bo = buf->bo;
+         nvc0->switch_index_address = address;
+         nvc0->switch_index_limit = limit;
+         nvc0->switch_index_format = format;
+      } else if (nvc0->switch_index_valid) {
+         nouveau_bufctx_reset(nvc0->bufctx_3d, NVC0_BIND_3D_IDX);
+         pipe_resource_reference(&nvc0->switch_index_resource, NULL);
+         nvc0->switch_index_valid = false;
+         nvc0->switch_index_bo = NULL;
+         nvc0->switch_residency_generation++;
       }
 
-      BCTX_REFN(nvc0->bufctx_3d, 3D_IDX, buf, RD);
-   }
+      if (nvc0->switch_validated_bindless_generation !=
+          nvc0->switch_bindless_generation) {
+         nouveau_bufctx_reset(nvc0->bufctx_3d, NVC0_BIND_3D_BINDLESS);
+         list_for_each_entry(struct nvc0_resident, resident,
+                             &nvc0->tex_head, list) {
+            nvc0_add_resident(nvc0->bufctx_3d, NVC0_BIND_3D_BINDLESS,
+                              resident->buf, resident->flags);
+         }
+         list_for_each_entry(struct nvc0_resident, resident,
+                             &nvc0->img_head, list) {
+            nvc0_add_resident(nvc0->bufctx_3d, NVC0_BIND_3D_BINDLESS,
+                              resident->buf, resident->flags);
+         }
+         nvc0->switch_validated_bindless_generation =
+            nvc0->switch_bindless_generation;
+         nvc0->switch_residency_generation++;
+      }
 
-   list_for_each_entry(struct nvc0_resident, resident, &nvc0->tex_head, list) {
-      nvc0_add_resident(nvc0->bufctx_3d, NVC0_BIND_3D_BINDLESS, resident->buf,
-                        resident->flags);
-   }
+      if (nvc0->switch_text_bo != screen->text ||
+          nvc0->switch_validated_text_generation !=
+             screen->switch_text_generation) {
+         nouveau_bufctx_reset(nvc0->bufctx_3d, NVC0_BIND_3D_TEXT);
+         BCTX_REFN_bo(nvc0->bufctx_3d, 3D_TEXT,
+                      vram_domain | NOUVEAU_BO_RD, screen->text);
+         nvc0->switch_text_bo = screen->text;
+         nvc0->switch_validated_text_generation =
+            screen->switch_text_generation;
+         nvc0->switch_residency_generation++;
+      }
+   } else
+#endif
+   {
+      if (info->index_size && !info->has_user_indices) {
+         struct nv04_resource *buf = nv04_resource(info->index.resource);
 
-   list_for_each_entry(struct nvc0_resident, resident, &nvc0->img_head, list) {
-      nvc0_add_resident(nvc0->bufctx_3d, NVC0_BIND_3D_BINDLESS, resident->buf,
-                        resident->flags);
-   }
+         assert(buf);
+         assert(nouveau_resource_mapped_by_gpu(&buf->base));
 
-   BCTX_REFN_bo(nvc0->bufctx_3d, 3D_TEXT, vram_domain | NOUVEAU_BO_RD,
-                screen->text);
+         PUSH_SPACE(push, 6);
+         if (nvc0->screen->eng3d->oclass < TU102_3D_CLASS) {
+            BEGIN_NVC0(push, NVC0_3D(INDEX_ARRAY_START_HIGH), 5);
+            PUSH_DATAh(push, buf->address);
+            PUSH_DATA (push, buf->address);
+            PUSH_DATAh(push, buf->address + buf->base.width0 - 1);
+            PUSH_DATA (push, buf->address + buf->base.width0 - 1);
+            PUSH_DATA (push, info->index_size >> 1);
+         } else {
+            BEGIN_NVC0(push, NVC0_3D(INDEX_ARRAY_START_HIGH), 2);
+            PUSH_DATAh(push, buf->address);
+            PUSH_DATA (push, buf->address);
+            BEGIN_NVC0(push,
+                       SUBC_3D(TU102_3D_INDEX_ARRAY_LIMIT_HIGH), 2);
+            PUSH_DATAh(push, buf->address + buf->base.width0 - 1);
+            PUSH_DATA (push, buf->address + buf->base.width0 - 1);
+            BEGIN_NVC0(push, NVC0_3D(INDEX_FORMAT), 1);
+            PUSH_DATA (push, info->index_size >> 1);
+         }
+
+         BCTX_REFN(nvc0->bufctx_3d, 3D_IDX, buf, RD);
+      }
+
+      list_for_each_entry(struct nvc0_resident, resident,
+                          &nvc0->tex_head, list) {
+         nvc0_add_resident(nvc0->bufctx_3d, NVC0_BIND_3D_BINDLESS,
+                           resident->buf, resident->flags);
+      }
+
+      list_for_each_entry(struct nvc0_resident, resident,
+                          &nvc0->img_head, list) {
+         nvc0_add_resident(nvc0->bufctx_3d, NVC0_BIND_3D_BINDLESS,
+                           resident->buf, resident->flags);
+      }
+
+      BCTX_REFN_bo(nvc0->bufctx_3d, 3D_TEXT,
+                   vram_domain | NOUVEAU_BO_RD, screen->text);
+   }
 
    nvc0_state_validate_3d(nvc0, ~0);
 
@@ -1167,7 +1304,7 @@ nvc0_draw_vbo(struct pipe_context *pipe, const struct pipe_draw_info *info,
          drawid++;
    }
 
-   PUSH_KICK(push);
+   PUSH_KICK_DEFER(push);
    simple_mtx_unlock(&nvc0->screen->state_lock);
 
    nvc0->base.kick_notify = nvc0_default_kick_notify;
@@ -1176,7 +1313,13 @@ nvc0_draw_vbo(struct pipe_context *pipe, const struct pipe_draw_info *info,
 
    nouveau_pushbuf_bufctx(push, NULL);
 
-   nouveau_bufctx_reset(nvc0->bufctx_3d, NVC0_BIND_3D_TEXT);
-   nouveau_bufctx_reset(nvc0->bufctx_3d, NVC0_BIND_3D_IDX);
-   nouveau_bufctx_reset(nvc0->bufctx_3d, NVC0_BIND_3D_BINDLESS);
+#ifdef __SWITCH__
+   if (!nvc0->switch_fast_draw) {
+#endif
+      nouveau_bufctx_reset(nvc0->bufctx_3d, NVC0_BIND_3D_TEXT);
+      nouveau_bufctx_reset(nvc0->bufctx_3d, NVC0_BIND_3D_IDX);
+      nouveau_bufctx_reset(nvc0->bufctx_3d, NVC0_BIND_3D_BINDLESS);
+#ifdef __SWITCH__
+   }
+#endif
 }

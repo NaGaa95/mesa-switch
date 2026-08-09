@@ -6,6 +6,7 @@
 *.out
 /build
 /builddir-*
+/mesa-install/
 knowledge
 libnx
 libdrm-nouveau

@@ -18,15 +18,22 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
+dep_switch_libdrm_nouveau = cc.find_library('drm_nouveau', required : true)
+
 libnouveauwinsys = static_library(
   'nouveauwinsys',
-  files('nouveau_switch_public.h', 'nouveau_switch_winsys.c'),
+  files(
+    'nouveau_switch_abi.h',
+    'nouveau_switch_public.h',
+    'nouveau_switch_pushbuf.c',
+    'nouveau_switch_winsys.c',
+  ),
   include_directories : [
     inc_src, inc_include, inc_gallium, inc_gallium_aux, inc_gallium_drivers,
     inc_nouveau_drm,
   ],
   c_args : get_variable('c_vis_args', []),
-  dependencies : [idep_nvidia_headers],
+  dependencies : [idep_nvidia_headers, dep_switch_libdrm_nouveau],
 )
 
 idep_libnouveauwinsys = declare_dependency(
@@ -35,4 +42,5 @@ idep_libnouveauwinsys = declare_dependency(
     inc_nouveau_drm,
   ],
   link_with : [libnouveauwinsys],
+  dependencies : [dep_switch_libdrm_nouveau],
 )

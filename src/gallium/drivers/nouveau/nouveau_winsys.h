@@ -8,7 +8,9 @@
 #include "util/os_misc.h"
 
 #include "drm-uapi/drm.h"
+#include "drm-uapi/nouveau_drm.h"
 #include "nouveau.h"
+#include "nv_device_info.h"
 #include "nouveau_screen.h"
 
 #ifndef NV04_PFIFO_MAX_PACKET_LEN
@@ -20,6 +22,13 @@
 
 #ifdef __SWITCH__
 #define NOUVEAU_BUFREF_LIST_TYPE struct nouveau_list
+int nouveau_switch_pushbuf_kick_deferred(struct nouveau_pushbuf *push,
+                                         struct nouveau_object *chan);
+void nouveau_switch_pushbuf_set_kick_notify(
+   struct nouveau_pushbuf *push,
+   bool (*kick_notify)(struct nouveau_pushbuf *));
+uint64_t nouveau_switch_pushbuf_batch_generation(
+   struct nouveau_pushbuf *push);
 #else
 #define NOUVEAU_BUFREF_LIST_TYPE struct list_head
 #endif
@@ -28,6 +37,33 @@
    for (NOUVEAU_BUFREF_LIST_TYPE *__node = (list)->next;                     \
         __node != (list) && (((ref) = (struct nouveau_bufref *)__node), true); \
         __node = __node->next)
+
+static inline const struct nv_device_info *
+nouveau_device_get_info(const struct nouveau_device *dev,
+                        struct nv_device_info *storage)
+{
+#ifdef __SWITCH__
+   /* The Switch device has no PCI identity. */
+   *storage = (struct nv_device_info) {
+      .type = NV_DEVICE_TYPE_SOC,
+      .chipset = dev->chipset,
+   };
+   return storage;
+#else
+   (void)storage;
+   return &dev->info;
+#endif
+}
+
+static inline uint64_t
+nouveau_device_get_memory_size(const struct nouveau_device *dev)
+{
+#ifdef __SWITCH__
+   return dev->vram_size ? dev->vram_size : dev->gart_size;
+#else
+   return dev->vram_size;
+#endif
+}
 
 static inline uint32_t
 PUSH_AVAIL(struct nouveau_pushbuf *push)
@@ -105,9 +141,30 @@ PUSH_KICK(struct nouveau_pushbuf *push)
 {
    struct nouveau_pushbuf_priv *ppush = push->user_priv;
    simple_mtx_lock(&ppush->screen->fence.lock);
+#ifdef __SWITCH__
+   int ASSERTED ret = nouveau_pushbuf_kick(push, push->channel);
+#else
    int ASSERTED ret = nouveau_pushbuf_kick(push);
+#endif
    assert(!ret);
    simple_mtx_unlock(&ppush->screen->fence.lock);
+}
+
+/* Defer draw kicks only; other kick and wait paths still submit immediately. */
+static inline void
+PUSH_KICK_DEFER(struct nouveau_pushbuf *push)
+{
+#ifdef __SWITCH__
+   struct nouveau_pushbuf_priv *ppush = push->user_priv;
+
+   simple_mtx_lock(&ppush->screen->fence.lock);
+   int ASSERTED ret =
+      nouveau_switch_pushbuf_kick_deferred(push, push->channel);
+   assert(!ret);
+   simple_mtx_unlock(&ppush->screen->fence.lock);
+#else
+   PUSH_KICK(push);
+#endif
 }
 
 static inline int

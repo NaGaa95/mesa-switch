@@ -238,7 +238,12 @@ nouveau_fence_kick(struct nouveau_fence *fence)
    }
 
    if (fence->state < NOUVEAU_FENCE_STATE_FLUSHED) {
+#ifdef __SWITCH__
+      if (nouveau_pushbuf_kick(context->pushbuf,
+                               context->pushbuf->channel))
+#else
       if (nouveau_pushbuf_kick(context->pushbuf))
+#endif
          return false;
    }
 
