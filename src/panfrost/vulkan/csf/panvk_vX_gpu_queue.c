@@ -45,6 +45,9 @@ finish_render_desc_ringbuf(struct panvk_gpu_queue *queue)
    }
 
    if (ringbuf->addr.dev) {
+      panvk_address_binding_report(dev, NULL, ringbuf->addr.dev, ringbuf->size,
+                                   VK_DEVICE_ADDRESS_BINDING_TYPE_UNBIND_EXT);
+
       struct pan_kmod_vm_op op = {
          .type = PAN_KMOD_VM_OP_TYPE_UNMAP,
          .va = {
@@ -151,6 +154,9 @@ init_render_desc_ringbuf(struct panvk_gpu_queue *queue)
 
    ringbuf->addr.dev = dev_addr;
 
+   panvk_address_binding_report(dev, NULL, ringbuf->addr.dev, ringbuf->size,
+                                VK_DEVICE_ADDRESS_BINDING_TYPE_BIND_EXT);
+
    if (dev->debug.decode_ctx) {
       pandecode_inject_mmap(dev->debug.decode_ctx, ringbuf->addr.dev,
                             ringbuf->addr.host, ringbuf->size, NULL);
@@ -188,6 +194,10 @@ finish_subqueue_tracing(struct panvk_gpu_queue *queue,
 
    if (subq->tracebuf.addr.dev) {
       uint64_t pgsize = panvk_get_gpu_page_size(dev);
+
+      panvk_address_binding_report(dev, NULL, subq->tracebuf.addr.dev,
+                                   subq->tracebuf.size,
+                                   VK_DEVICE_ADDRESS_BINDING_TYPE_UNBIND_EXT);
 
       pandecode_inject_free(dev->debug.decode_ctx, subq->tracebuf.addr.dev,
                             subq->tracebuf.size);
@@ -290,6 +300,10 @@ init_subqueue_tracing(struct panvk_gpu_queue *queue,
    }
 
    subq->tracebuf.addr.dev = dev_addr;
+
+   panvk_address_binding_report(dev, NULL, subq->tracebuf.addr.dev,
+                                subq->tracebuf.size,
+                                VK_DEVICE_ADDRESS_BINDING_TYPE_BIND_EXT);
 
    if (dev->debug.decode_ctx) {
       pandecode_inject_mmap(dev->debug.decode_ctx, subq->tracebuf.addr.dev,
@@ -717,7 +731,12 @@ init_tiler(struct panvk_gpu_queue *queue)
    tiler_heap->chunk_size = phys_dev->csf.tiler.chunk_size;
 
    alloc_info.size = get_fbd_size(true, MAX_RTS);
-   alloc_info.alignment = pan_alignment(FRAMEBUFFER);
+#if PAN_ARCH >= 14
+   const unsigned fbds_alignment = alignof(struct panvk_fb_layer_state);
+#else
+   const unsigned fbds_alignment = pan_alignment(FRAMEBUFFER);
+#endif
+   alloc_info.alignment = fbds_alignment;
    tiler_heap->oom_fbd = panvk_pool_alloc_mem(&dev->mempools.rw, alloc_info);
    if (!panvk_priv_mem_check_alloc(tiler_heap->oom_fbd)) {
       result = panvk_errorf(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY,

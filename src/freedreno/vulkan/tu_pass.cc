@@ -540,6 +540,7 @@ tu_render_pass_disable_fdm(struct tu_device *dev, struct tu_render_pass *pass)
       if (att->samples > 1 &&
           (att->load || att->load_stencil ||
            att->store || att->store_stencil)) {
+         pass->warn_fdm_force_disabled = true;
          perf_debug(dev, "Disabling fragment density map due to %s of multisample attachment",
                     (att->load || att->load_stencil) ? "load" : "store");
          return true;
@@ -889,7 +890,7 @@ attachment_set_ops(struct tu_device *device,
                    VkAttachmentStoreOp store_op,
                    VkAttachmentStoreOp stencil_store_op)
 {
-   if (unlikely(device->instance->dont_care_as_load)) {
+   if (unlikely(device->instance->drirc.debug.dont_care_as_load)) {
       if (load_op == VK_ATTACHMENT_LOAD_OP_DONT_CARE)
          load_op = VK_ATTACHMENT_LOAD_OP_LOAD;
       if (stencil_load_op == VK_ATTACHMENT_LOAD_OP_DONT_CARE)
@@ -1151,7 +1152,8 @@ tu_CreateRenderPass2(VkDevice _device,
    const VkRenderPassFragmentDensityMapCreateInfoEXT *fdm_info =
       vk_find_struct_const(pCreateInfo->pNext,
                            RENDER_PASS_FRAGMENT_DENSITY_MAP_CREATE_INFO_EXT);
-   if (fdm_info && !tu_render_pass_disable_fdm(device, pass)) {
+   if (fdm_info && fdm_info->fragmentDensityMapAttachment.attachment != VK_ATTACHMENT_UNUSED &&
+       !tu_render_pass_disable_fdm(device, pass)) {
       pass->fragment_density_map.attachment =
          fdm_info->fragmentDensityMapAttachment.attachment;
       pass->has_fdm = true;
@@ -1249,6 +1251,7 @@ tu_CreateRenderPass2(VkDevice _device,
                   subpass->resolve_attachments[j].attachment = a;
                   subpass->unresolve_attachments[j].attachment = a;
                   subpass->color_attachments[j].attachment = a = msrtss_att_idx++;
+                  pass->has_msrtss = true;
                }
 
                tu_subpass_use_attachment(pass, i, a, pCreateInfo);
@@ -1299,6 +1302,7 @@ tu_CreateRenderPass2(VkDevice _device,
             subpass->unresolve_attachments[subpass->resolve_count - 1].attachment = a;
             subpass->depth_stencil_attachment.attachment = a = msrtss_att_idx++;
             subpass->resolve_depth_stencil = true;
+            pass->has_msrtss = true;
          }
 
          tu_subpass_use_attachment(pass, i, a, pCreateInfo);
@@ -1544,6 +1548,9 @@ tu_setup_dynamic_render_pass(struct tu_cmd_buffer *cmd_buffer,
             att->will_be_resolved = false;
          }
       }
+
+      if (att_is_msrtss)
+         pass->has_msrtss = true;
    }
 
    if (info->pDepthAttachment || info->pStencilAttachment) {
@@ -1654,6 +1661,9 @@ tu_setup_dynamic_render_pass(struct tu_cmd_buffer *cmd_buffer,
                att->will_be_resolved = false;
             }
          }
+
+         if (att_is_msrtss)
+            pass->has_msrtss = true;
       } else {
          subpass->depth_stencil_attachment.attachment = VK_ATTACHMENT_UNUSED;
          subpass->input_attachments[0].attachment = VK_ATTACHMENT_UNUSED;

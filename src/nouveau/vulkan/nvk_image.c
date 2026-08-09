@@ -771,42 +771,6 @@ nvk_GetPhysicalDeviceSparseImageFormatProperties2(
    }
 }
 
-/* To use compression and larger page sizes, we need to signal to the kernel
- * that the memory requested is going to be VRAM resident. However, this
- * comes with an issue where said memory can't be evicted to host RAM under
- * pressure, so we work around this by going with a dedicated allocation for
- * color, Z/S, and storage image targets which are the main types that would
- * benefit from compression as they're heavy on writes. Additionally, they
- * also aren't the majority of memory used, so they can be safely pinned in
- * VRAM without worrying about eviction under high pressure.
- *
- * There are some additional restrictions we need to keep in mind, however:
- * 1. We can only enable this for Turing onwards because prior architectures
- *    relied on firmware to manage the compression tags, and it's impossible to
- *    do this on nouveau. Additionally, since compression needs kernel changes,
- *    we can only enable it if the detected kernel supports it.
- *
- * 2. Given our approach depends on dedicated allocations, we can't enable
- *    compression for sparse images as dedicated allocations are not compatible
- *    with sparse.
- *
- * 3. In similar vein, we currently don't do multiplanar dedicated allocations
- *    so we can't do compression for multi-plane YCbCr images.
- *
- * 4. Host copies are a complete no-go for compression as the host doesn't know
- *    about the modified data layout nor the compression tags.
- *
- * 5. The API for VK_EXT_image_drm_format_modifier requires that we report the
- *    supported modifiers in GetPhysicalDeviceFormatProperties2(). However,
- *    since we can only know whether an image is compressed or not at bind time
- *    we can't actually expose any of the compressed modifiers in case the app
- *    chooses a compressed modifier for a non-compressed image. So for now, we
- *    have to disable compression for TILING_DRM_FORMAT_MODIFIER_EXT images.
- *
- * This helper enforces these restrictions and also makes sure to enable
- * compression for storage, color, and Z/S targets only so as to avoid pinning
- * too many things to VRAM.
- */
 static bool
 nvk_image_can_compress(const struct nvk_physical_device *pdev,
                        const struct nvk_image *image)
@@ -817,17 +781,64 @@ nvk_image_can_compress(const struct nvk_physical_device *pdev,
    if (!pdev->nvkmd->kmd_info.has_compression)
       return false;
 
-   if (image->plane_count > 1 ||
-       image->vk.usage & VK_IMAGE_USAGE_HOST_TRANSFER_BIT ||
-       image->vk.create_flags & (VK_IMAGE_CREATE_SPARSE_BINDING_BIT |
-                                 VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT) ||
-       image->vk.wsi_legacy_scanout)
+   /* Switch scanout images use pitch NvMap backing and must stay
+    * uncompressed even when their GPU mapping uses a tiled PTE kind.
+    */
+   if (image->vk.wsi_legacy_scanout)
       return false;
 
-   return image->vk.usage & (VK_IMAGE_USAGE_STORAGE_BIT |
-                             VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
-                             VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) &&
-          image->vk.tiling == VK_IMAGE_TILING_OPTIMAL;
+   /* Our host copy code does not understand compression */
+   if (image->vk.usage & VK_IMAGE_USAGE_HOST_TRANSFER_BIT)
+      return false;
+
+   /* Our compression strategy depends on dedicated allocations, so we can't
+    * enable compression for sparse images as dedicated allocations are not
+    * compatible with sparse.
+    */
+   if (image->vk.create_flags & (VK_IMAGE_CREATE_SPARSE_BINDING_BIT |
+                                 VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT))
+      return false;
+
+   /* Linear images cannot be compressed. */
+   if (image->vk.tiling == VK_IMAGE_TILING_LINEAR)
+      return false;
+
+   /* In similar vein, we currently don't do multiplanar dedicated allocations
+    * so we can't do compression for multi-plane YCbCr images.
+    */
+   if (image->plane_count > 1)
+      return false;
+
+   /* The API for VK_EXT_image_drm_format_modifier requires that we report the
+    * supported modifiers in GetPhysicalDeviceFormatProperties2(). However,
+    * since we can only know whether an image is compressed or not at bind
+    * time we can't actually expose any of the compressed modifiers in case
+    * the app chooses a compressed modifier for a non-compressed image. So for
+    * now, we have to disable compression for TILING_DRM_FORMAT_MODIFIER_EXT
+    * images.
+    */
+   if (image->vk.tiling == VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT)
+      return false;
+
+   assert(image->vk.tiling == VK_IMAGE_TILING_OPTIMAL);
+
+   /* To use compression and larger page sizes, we need to signal to the
+    * kernel that the memory requested is going to be VRAM resident. However,
+    * this comes with an issue where said memory can't be evicted to host RAM
+    * under pressure.
+    *
+    * So we work around this by only allowing compression for color, Z/S, and
+    * storage image targets which are the main types that would benefit from
+    * compression as they're heavy on writes.  Additionally, they also aren't
+    * the majority of memory used, so they can be safely pinned in VRAM
+    * without worrying about eviction under high pressure.
+    */
+   if (!(image->vk.usage & (VK_IMAGE_USAGE_STORAGE_BIT |
+                            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                            VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)))
+      return false;
+
+   return true;
 }
 
 static VkResult
@@ -1066,6 +1077,32 @@ nvk_image_init(struct nvk_device *dev,
       }
    }
 
+#ifndef __SWITCH__
+   const VkImageUsageFlagBits READ_ONLY_IMAGE_USAGE =
+      VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+      VK_IMAGE_USAGE_SAMPLED_BIT |
+      VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT;
+
+   /*
+    * We don't know how to update the zcull data if the image is written
+    * as anything other than a depth attachment
+    */
+   const VkImageUsageFlagBits ZCULL_COMPATIBLE_IMAGE_USAGE =
+      VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | READ_ONLY_IMAGE_USAGE;
+
+   if ((image->vk.aspects & VK_IMAGE_ASPECT_DEPTH_BIT) &&
+       (image->vk.usage & VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) &&
+       !(image->vk.usage & ~ZCULL_COMPATIBLE_IMAGE_USAGE) &&
+       !(image->vk.create_flags & VK_IMAGE_CREATE_SPARSE_BINDING_BIT) &&
+       image->vk.image_type != VK_IMAGE_TYPE_3D &&
+       image->vk.tiling == VK_IMAGE_TILING_OPTIMAL &&
+       pdev->info.has_zcull_info) {
+      image->zcull.nil = nil_zcull_new(&pdev->info.zcull_info, 0, 0,
+                                       image->vk.extent.width,
+                                       image->vk.extent.height);
+   }
+#endif
+
    const enum pipe_format plane0_format = image->planes[0].nil.format.p_format;
    if (plane0_format == PIPE_FORMAT_Z32_FLOAT_S8X24_UINT) {
       struct nil_image_init_info stencil_nil_info = {
@@ -1142,7 +1179,7 @@ nvk_image_init(struct nvk_device *dev,
       image->image_align_B = MAX2(image->stencil_copy_temp.plane_align_B,
                                   image->image_align_B);
    }
-   
+
    return VK_SUCCESS;
 }
 
@@ -1151,6 +1188,7 @@ nvk_image_plane_alloc_va(struct nvk_device *dev,
                          const struct nvk_image *image,
                          struct nvk_image_plane *plane)
 {
+   assert(plane->va == NULL);
    VkResult result;
 
    const bool sparse_bound =
@@ -1602,6 +1640,7 @@ nvk_image_plane_bind(struct nvk_device *dev,
          VkResult result = nvk_image_plane_alloc_va(dev, image, plane);
          if (result != VK_SUCCESS)
             return result;
+
          result = nvkmd_va_bind_mem(plane->va, &image->vk.base, 0,
                                     mem->mem, offset_B,
                                     plane->va->size_B);
@@ -1683,20 +1722,6 @@ nvk_bind_image_memory(struct nvk_device *dev,
 
    if (image->zcull.nil.size_B > 0) {
       result = nvk_image_zcull_bind(&image->zcull, mem, offset_B);
-      if (result != VK_SUCCESS)
-         return result;
-
-      /*
-       * zcull hardware kills the context if we try to LOAD_ZCULL on garbage
-       * data. Work around this by always initializing the zcull data to zero.
-       */
-      result = nvk_upload_queue_fill(dev, &dev->upload,
-                                     image->zcull.addr,
-                                     0, image->zcull.nil.size_B);
-      if (result != VK_SUCCESS)
-         return result;
-
-      result = nvk_upload_queue_sync(dev, &dev->upload);
       if (result != VK_SUCCESS)
          return result;
    }

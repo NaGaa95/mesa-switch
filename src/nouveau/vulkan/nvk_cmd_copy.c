@@ -383,11 +383,10 @@ nouveau_copy_rect(struct nvk_cmd_buffer *cmd,
    }
 }
 
-VKAPI_ATTR void VKAPI_CALL
-nvk_CmdCopyBuffer2(VkCommandBuffer commandBuffer,
-                   const VkCopyBufferInfo2 *pCopyBufferInfo)
+void
+nvk_cmd_copy_buffer_ce(struct nvk_cmd_buffer *cmd,
+                       const VkCopyBufferInfo2 *pCopyBufferInfo)
 {
-   VK_FROM_HANDLE(nvk_cmd_buffer, cmd, commandBuffer);
    VK_FROM_HANDLE(nvk_buffer, src, pCopyBufferInfo->srcBuffer);
    VK_FROM_HANDLE(nvk_buffer, dst, pCopyBufferInfo->dstBuffer);
 
@@ -485,11 +484,10 @@ nvk_remap_insert_aspect(struct nouveau_copy *copy,
    }
 }
 
-VKAPI_ATTR void VKAPI_CALL
-nvk_CmdCopyBufferToImage2(VkCommandBuffer commandBuffer,
-                          const VkCopyBufferToImageInfo2 *pCopyBufferToImageInfo)
+void
+nvk_cmd_copy_buffer_to_image_ce(struct nvk_cmd_buffer *cmd,
+                                const VkCopyBufferToImageInfo2 *pCopyBufferToImageInfo)
 {
-   VK_FROM_HANDLE(nvk_cmd_buffer, cmd, commandBuffer);
    VK_FROM_HANDLE(nvk_buffer, src, pCopyBufferToImageInfo->srcBuffer);
    VK_FROM_HANDLE(nvk_image, dst, pCopyBufferToImageInfo->dstImage);
 
@@ -612,11 +610,10 @@ nvk_remap_extract_aspect(struct nouveau_copy *copy,
    }
 }
 
-VKAPI_ATTR void VKAPI_CALL
-nvk_CmdCopyImageToBuffer2(VkCommandBuffer commandBuffer,
-                          const VkCopyImageToBufferInfo2 *pCopyImageToBufferInfo)
+void
+nvk_cmd_copy_image_to_buffer_ce(struct nvk_cmd_buffer *cmd,
+                                const VkCopyImageToBufferInfo2 *pCopyImageToBufferInfo)
 {
-   VK_FROM_HANDLE(nvk_cmd_buffer, cmd, commandBuffer);
    VK_FROM_HANDLE(nvk_image, src, pCopyImageToBufferInfo->srcImage);
    VK_FROM_HANDLE(nvk_buffer, dst, pCopyImageToBufferInfo->dstBuffer);
 
@@ -786,11 +783,10 @@ nvk_remap_copy_aspect(struct nouveau_copy *copy,
    }
 }
 
-VKAPI_ATTR void VKAPI_CALL
-nvk_CmdCopyImage2(VkCommandBuffer commandBuffer,
-                  const VkCopyImageInfo2 *pCopyImageInfo)
+void
+nvk_cmd_copy_image_ce(struct nvk_cmd_buffer *cmd,
+                      const VkCopyImageInfo2 *pCopyImageInfo)
 {
-   VK_FROM_HANDLE(nvk_cmd_buffer, cmd, commandBuffer);
    VK_FROM_HANDLE(nvk_image, src, pCopyImageInfo->srcImage);
    VK_FROM_HANDLE(nvk_image, dst, pCopyImageInfo->dstImage);
 
@@ -907,19 +903,11 @@ nvk_CmdCopyImage2(VkCommandBuffer commandBuffer,
    }
 }
 
-VKAPI_ATTR void VKAPI_CALL
-nvk_CmdFillBuffer(VkCommandBuffer commandBuffer,
-                  VkBuffer dstBuffer,
-                  VkDeviceSize dstOffset,
-                  VkDeviceSize size,
-                  uint32_t data)
+void
+nvk_cmd_fill_memory_ce(struct nvk_cmd_buffer *cmd,
+                       uint64_t dst_addr, uint64_t size,
+                       uint32_t data)
 {
-   VK_FROM_HANDLE(nvk_cmd_buffer, cmd, commandBuffer);
-   VK_FROM_HANDLE(nvk_buffer, dst_buffer, dstBuffer);
-
-   uint64_t dst_addr = vk_buffer_address(&dst_buffer->vk, dstOffset);
-   size = vk_buffer_range(&dst_buffer->vk, dstOffset, size);
-
    uint32_t max_dim = 1 << 15;
 
    struct nv_push *p = nvk_cmd_buffer_push(cmd, 7);
@@ -1000,17 +988,11 @@ nvk_CmdUpdateBuffer(VkCommandBuffer commandBuffer,
 
    /* Do not use I2M if the copy is too big (2012 bytes is our limit) */
    const uint32_t i2m_push_dw_count = dw_count + 9;
-   const bool i2m_size_eligible =
-      i2m_push_dw_count <= NVK_CMD_BUFFER_MAX_PUSH;
-   if (!i2m_size_eligible)
+   if (i2m_push_dw_count > NVK_CMD_BUFFER_MAX_PUSH)
       subc = SUBC_NV90B5;
 
-   const bool use_i2m = subc == SUBC_NV9097 || subc == SUBC_NV90C0;
-
-   /* I2M transfers are affected by conditional rendering but CmdUpdateBuffer
-    * must execute unconditionally.
-    */
-   if (use_i2m) {
+   /* I2M transfers are affected by conditional rendering but CmdUpdateBuffer shouldn't */
+   if (subc == SUBC_NV9097 || subc == SUBC_NV90C0) {
       struct nv_push *p = nvk_cmd_buffer_push(cmd, i2m_push_dw_count);
       __push_immd(p, subc, NVA040_SET_RENDER_ENABLE_OVERRIDE,
                   NVA040_SET_RENDER_ENABLE_OVERRIDE_MODE_ALWAYS_RENDER);
@@ -1032,7 +1014,6 @@ nvk_CmdUpdateBuffer(VkCommandBuffer commandBuffer,
       nvk_cmd_buffer_upload_data(cmd, pData, dataSize, 64, &data_addr);
 
       struct nv_push *p = nvk_cmd_buffer_push(cmd, 10);
-
       P_MTHD(p, NV90B5, OFFSET_IN_UPPER);
       P_NV90B5_OFFSET_IN_UPPER(p, data_addr >> 32);
       P_NV90B5_OFFSET_IN_LOWER(p, data_addr & 0xffffffff);

@@ -38,7 +38,7 @@
 #include "compiler/glsl_types.h"
 #endif
 
-#ifndef _WIN32 
+#ifndef _WIN32
 // #include "dlfcn.h"
 #endif
 

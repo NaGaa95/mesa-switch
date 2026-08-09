@@ -36,23 +36,24 @@ _nouveau_fence_wait(struct nouveau_fence *fence, struct util_debug_callback *deb
 bool
 nouveau_fence_new(struct nouveau_context *nv, struct nouveau_fence **fence)
 {
-   *fence = CALLOC_STRUCT(nouveau_fence);
-   if (!*fence)
+   struct nouveau_fence *new_fence = CALLOC_STRUCT(nouveau_fence);
+   if (!new_fence)
       return false;
 
 #ifndef __SWITCH__
-   int ret = nouveau_bo_new(nv->screen->device, NOUVEAU_BO_GART, 0x1000, 0x1000, NULL, &(*fence)->bo);
+   int ret = nouveau_bo_new(nv->screen->device, NOUVEAU_BO_GART, 0x1000, 0x1000, NULL, &new_fence->bo);
    if (ret) {
-      FREE(*fence);
+      FREE(new_fence);
       return false;
    }
 #endif
 
-   (*fence)->screen = nv->screen;
-   (*fence)->context = nv;
-   (*fence)->ref = 1;
-   list_inithead(&(*fence)->work);
+   new_fence->screen = nv->screen;
+   new_fence->context = nv;
+   new_fence->ref = 1;
+   list_inithead(&new_fence->work);
 
+   *fence = new_fence;
    return true;
 }
 
@@ -241,8 +242,10 @@ nouveau_fence_kick(struct nouveau_fence *fence)
          return false;
    }
 
-   if (current)
-      _nouveau_fence_next(fence->context);
+   if (current) {
+      if (!_nouveau_fence_next(fence->context))
+         return false;
+   }
 
    _nouveau_fence_update(screen, false);
 
@@ -314,7 +317,7 @@ _nouveau_fence_wait(struct nouveau_fence *fence, struct util_debug_callback *deb
 #endif
 }
 
-void
+bool
 _nouveau_fence_next(struct nouveau_context *nv)
 {
    struct nouveau_fence_list *fence_list = &nv->screen->fence;
@@ -325,12 +328,12 @@ _nouveau_fence_next(struct nouveau_context *nv)
       if (p_atomic_read(&nv->fence->ref) > 1)
          _nouveau_fence_emit(nv->fence);
       else
-         return;
+         return true;
    }
 
    _nouveau_fence_ref(NULL, &nv->fence);
 
-   nouveau_fence_new(nv, &nv->fence);
+   return nouveau_fence_new(nv, &nv->fence);
 }
 
 void
@@ -406,13 +409,15 @@ nouveau_fence_wait(struct nouveau_fence *fence, struct util_debug_callback *debu
    return res;
 }
 
-void
+bool
 nouveau_fence_next_if_current(struct nouveau_context *nv, struct nouveau_fence *fence)
 {
+   bool result = true;
    simple_mtx_lock(&fence->screen->fence.lock);
    if (nv->fence == fence)
-      _nouveau_fence_next(nv);
+      result = _nouveau_fence_next(nv);
    simple_mtx_unlock(&fence->screen->fence.lock);
+   return result;
 }
 
 bool

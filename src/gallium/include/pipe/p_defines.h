@@ -801,6 +801,7 @@ struct pipe_shader_caps {
    bool fp16;
    bool fp16_derivatives;
    bool fp16_const_buffers;
+   bool fp16_no_denorms;
    bool int16;
    bool glsl_16bit_consts;
    bool glsl_16bit_load_dst; /* fp16 or int16 is AND'ed with this */
@@ -925,6 +926,7 @@ struct pipe_caps {
    bool texture_float_linear;
    bool texture_half_float_linear;
    bool depth_bounds_test;
+   bool native_fp32_depth;
    bool texture_query_samples;
    bool force_persample_interp;
    bool shareable_shaders;
@@ -959,7 +961,6 @@ struct pipe_caps {
    bool fp16;
    bool doubles;
    bool int64;
-   bool tgsi_tex_txf_lz;
    bool shader_clock;
    bool shader_realtime_clock;
    bool polygon_mode_fill_rectangle;
@@ -1062,6 +1063,7 @@ struct pipe_caps {
    bool representative_fragment_test;
    bool prefer_persp;
    bool blit_3d;
+   bool glsl_bindless_handles_are_32bit;
 
    int accelerated;
    int min_texel_offset;
@@ -1151,6 +1153,9 @@ struct pipe_caps {
    /** for CL SVM */
    uint64_t min_vma;
    uint64_t max_vma;
+
+   /** Which POT pattern sizes are accelerated? This is a bitmask of sizes */
+   uint16_t hw_clear_buffer_sizes;
 
    enum pipe_vertex_input_alignment vertex_input_alignment;
    enum pipe_endian endianness;

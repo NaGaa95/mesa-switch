@@ -9,7 +9,7 @@
 #ifndef __SWITCH__
 #include "nouveau/nvif/ioctl.h"
 #include <xf86drm.h>
-#else 
+#else
 #include "nvif/ioctl.h"
 #endif
 

@@ -6,81 +6,42 @@
 #   -include <shim>          right after the "--" separator
 # so it lands in clang's args, not bindgen's.
 
+# Prefer the Docker-installed bindgen, then fall back to the native MSYS2
+# CLANGARM64 package used by build-switch-msys2.
+if [ -n "${MESA_SWITCH_BINDGEN:-}" ]; then
+    BINDGEN_BIN="$MESA_SWITCH_BINDGEN"
+elif [ -x /root/.cargo/bin/bindgen ]; then
+    BINDGEN_BIN=/root/.cargo/bin/bindgen
+elif [ -x /clangarm64/bin/bindgen.exe ]; then
+    BINDGEN_BIN=/clangarm64/bin/bindgen.exe
+else
+    BINDGEN_BIN="$(command -v bindgen)"
+fi
+
 # Pass through --version without extra args
 case "$*" in
-    *--version*) exec /root/.cargo/bin/bindgen "$@" ;;
+    *--version*) exec "$BINDGEN_BIN" "$@" ;;
 esac
 
-SHIM_DIR=/tmp/bindgen-shim
-SHIM=$SHIM_DIR/atomic_shim.h
-mkdir -p "$SHIM_DIR"
-cat > "$SHIM" << 'EOF'
-#ifndef BINDGEN_ATOMIC_SHIM_H
-#define BINDGEN_ATOMIC_SHIM_H
+# Keep the shim in the source tree.  Besides avoiding a write to the host's
+# /tmp, this makes the wrapper work when Meson launches MSYS2 bash with a
+# Windows PATH (where ordinary Unix utilities may not be discoverable).
+SCRIPT_DIR=${0%/*}
+if [ "$SCRIPT_DIR" = "$0" ]; then
+    SCRIPT_DIR=.
+fi
+SHIM=$SCRIPT_DIR/bindgen-atomic-shim.h
 
-/* Skip stdatomic.h entirely — pre-define its common include guards. */
-#define _STDATOMIC_H 1
-#define _STDATOMIC_H_ 1
-#define __CLANG_STDATOMIC_H 1
-#define __STDATOMIC_H 1
-
-#include <stdint.h>
-#include <stddef.h>
-
-/* C11 atomic types — for bindgen we just need struct layout. */
-#define _Atomic(T) T
-
-typedef _Bool          atomic_bool;
-typedef char           atomic_char;
-typedef signed char    atomic_schar;
-typedef unsigned char  atomic_uchar;
-typedef short          atomic_short;
-typedef unsigned short atomic_ushort;
-typedef int            atomic_int;
-typedef unsigned int   atomic_uint;
-typedef long           atomic_long;
-typedef unsigned long  atomic_ulong;
-typedef long long          atomic_llong;
-typedef unsigned long long atomic_ullong;
-
-typedef int_least8_t   atomic_int_least8_t;
-typedef uint_least8_t  atomic_uint_least8_t;
-typedef int_least16_t  atomic_int_least16_t;
-typedef uint_least16_t atomic_uint_least16_t;
-typedef int_least32_t  atomic_int_least32_t;
-typedef uint_least32_t atomic_uint_least32_t;
-typedef int_least64_t  atomic_int_least64_t;
-typedef uint_least64_t atomic_uint_least64_t;
-
-typedef int_fast8_t   atomic_int_fast8_t;
-typedef uint_fast8_t  atomic_uint_fast8_t;
-typedef int_fast16_t  atomic_int_fast16_t;
-typedef uint_fast16_t atomic_uint_fast16_t;
-typedef int_fast32_t  atomic_int_fast32_t;
-typedef uint_fast32_t atomic_uint_fast32_t;
-typedef int_fast64_t  atomic_int_fast64_t;
-typedef uint_fast64_t atomic_uint_fast64_t;
-
-typedef intptr_t  atomic_intptr_t;
-typedef uintptr_t atomic_uintptr_t;
-typedef size_t    atomic_size_t;
-typedef ptrdiff_t atomic_ptrdiff_t;
-
-typedef enum {
-    memory_order_relaxed,
-    memory_order_consume,
-    memory_order_acquire,
-    memory_order_release,
-    memory_order_acq_rel,
-    memory_order_seq_cst
-} memory_order;
-
-typedef struct { atomic_bool _val; } atomic_flag;
-
-#endif /* BINDGEN_ATOMIC_SHIM_H */
-EOF
-
-CLANG_RES_DIR="$(clang -print-resource-dir 2>/dev/null || echo /usr/lib/llvm-15/lib/clang/15.0.6)/include"
+if [ -x /clangarm64/bin/clang.exe ]; then
+    CLANG_BIN=/clangarm64/bin/clang.exe
+    SWITCH_SYS_INCLUDE=C:/msys64/opt/devkitpro/devkitA64/aarch64-none-elf/include
+    SWITCH_LIBNX_INCLUDE=C:/msys64/opt/devkitpro/libnx/include
+else
+    CLANG_BIN="$(command -v clang)"
+    SWITCH_SYS_INCLUDE=${DEVKITPRO:-/opt/devkitpro}/devkitA64/aarch64-none-elf/include
+    SWITCH_LIBNX_INCLUDE=${DEVKITPRO:-/opt/devkitpro}/libnx/include
+fi
+CLANG_RES_DIR="$("$CLANG_BIN" -print-resource-dir)/include"
 
 # Rebuild positional args, inserting clang-side flags right after "--".
 # Append a sentinel, then rotate args from front to back, injecting after "--".
@@ -92,16 +53,17 @@ while [ "$1" != "__BINDGEN_WRAPPER_END__" ]; do
     shift
     set -- "$@" "$arg"
     if [ "$arg" = "--" ] && [ "$inject_done" = "0" ]; then
-        set -- "$@" "-include" "$SHIM" \
+        set -- "$@" "--target=aarch64-none-elf" \
+            "-include" "$SHIM" \
             "-isystem" "$CLANG_RES_DIR" \
-            "-isystem" "/usr/include" \
-            "-isystem" "/usr/include/aarch64-linux-gnu"
+            "-isystem" "$SWITCH_SYS_INCLUDE" \
+            "-isystem" "$SWITCH_LIBNX_INCLUDE"
         inject_done=1
     fi
 done
 shift  # drop the sentinel
 
 # Belt-and-suspenders: also export the env var.
-export BINDGEN_EXTRA_CLANG_ARGS="-include $SHIM -isystem $CLANG_RES_DIR -isystem /usr/include -isystem /usr/include/aarch64-linux-gnu"
+export BINDGEN_EXTRA_CLANG_ARGS="--target=aarch64-none-elf -include $SHIM -isystem $CLANG_RES_DIR -isystem $SWITCH_SYS_INCLUDE -isystem $SWITCH_LIBNX_INCLUDE"
 
-exec /root/.cargo/bin/bindgen "$@"
+exec "$BINDGEN_BIN" "$@"

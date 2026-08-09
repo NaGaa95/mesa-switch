@@ -9,6 +9,7 @@ from pathlib import Path
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--out", required=True)
+    parser.add_argument("--link-library", action="append", default=[])
     parser.add_argument("archives", nargs="+")
     args = parser.parse_args()
 
@@ -20,6 +21,8 @@ def main() -> None:
         archive_path = Path(archive).resolve()
         rel_path = os.path.relpath(archive_path, start=out_dir)
         lines.append(f"  {Path(rel_path).as_posix()}")
+    for library in args.link_library:
+        lines.append(f"  -l{library}")
     lines.append(")")
     lines.append("")
 

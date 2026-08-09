@@ -9,14 +9,15 @@
  */
 
 #include "radv_queue.h"
+#include "tools/radv_debug_hang.h"
+#include "tools/radv_debug_nir.h"
+#include "tools/radv_rmv.h"
 #include "radv_buffer.h"
 #include "radv_cp_reg_shadowing.h"
 #include "radv_cs.h"
-#include "radv_debug.h"
-#include "radv_debug_nir.h"
 #include "radv_device_memory.h"
 #include "radv_image.h"
-#include "radv_rmv.h"
+#include "vk_common_entrypoints.h"
 #include "vk_semaphore.h"
 #include "vk_sync.h"
 
@@ -215,6 +216,7 @@ radv_queue_submit_empty(struct radv_queue *queue, struct vk_queue_submit *submis
    struct radv_winsys_submit_info submit = {
       .ip_type = radv_queue_ring(queue),
       .queue_index = queue->vk.index_in_family,
+      .secure = submission->is_protected,
    };
 
    return device->ws->cs_submit(ctx, &submit, submission->wait_count, submission->waits, submission->signal_count,
@@ -244,6 +246,7 @@ radv_set_ring_buffer(const struct radv_physical_device *pdev, struct radeon_wins
       .index_stride = index_stride,
       .add_tid = add_tid,
       .gfx10_oob_select = oob_select,
+      .has_desc_resource_level = pdev->info.compiler_info.has_desc_resource_level,
    };
 
    ac_build_buffer_descriptor(pdev->info.gfx_level, &ac_state, desc);
@@ -331,8 +334,9 @@ radv_fill_shader_rings(struct radv_device *device, uint32_t *desc, struct radeon
    if (ge_rings_bo) {
       assert(pdev->info.gfx_level >= GFX11);
 
-      ac_build_attr_ring_descriptor(pdev->info.gfx_level, radv_buffer_get_va(ge_rings_bo),
-                                    pdev->info.total_attribute_pos_prim_ring_size, 0, &desc[0]);
+      ac_build_attr_ring_descriptor(pdev->info.gfx_level, pdev->info.compiler_info.has_desc_resource_level,
+                                    radv_buffer_get_va(ge_rings_bo), pdev->info.total_attribute_pos_prim_ring_size, 0,
+                                    &desc[0]);
    }
 
    desc += 4;
@@ -477,22 +481,15 @@ radv_emit_compute_scratch(struct radv_device *device, struct radv_cmd_stream *cs
    const struct radeon_info *gpu_info = &pdev->info;
    uint32_t tmpring_size;
    uint64_t scratch_va;
-   uint32_t rsrc1;
 
    /* Ensure there is always a mapped BO in s[0:1] for the SMEM OOB mitigation */
-   if (!compute_scratch_bo && pdev->cache_key.mitigate_smem_oob)
+   if (!compute_scratch_bo && device->compiler_info.key.mitigate_smem_oob)
       compute_scratch_bo = device->zero_bo;
 
    if (!compute_scratch_bo)
       return;
 
    scratch_va = radv_buffer_get_va(compute_scratch_bo);
-   rsrc1 = S_008F04_BASE_ADDRESS_HI(scratch_va >> 32);
-
-   if (gpu_info->gfx_level >= GFX11)
-      rsrc1 |= S_008F04_SWIZZLE_ENABLE_GFX11(1);
-   else
-      rsrc1 |= S_008F04_SWIZZLE_ENABLE_GFX6(1);
 
    ac_get_scratch_tmpring_size(gpu_info, waves, size_per_wave, &tmpring_size);
 
@@ -501,16 +498,18 @@ radv_emit_compute_scratch(struct radv_device *device, struct radv_cmd_stream *cs
    radeon_begin(cs);
 
    if (gpu_info->gfx_level >= GFX11) {
+      assert(!device->compiler_info.key.mitigate_smem_oob);
+
       radeon_set_sh_reg_seq(R_00B840_COMPUTE_DISPATCH_SCRATCH_BASE_LO, 2);
       radeon_emit(scratch_va >> 8);
       radeon_emit(scratch_va >> 40);
+   } else {
+      uint32_t rsrc1 = S_008F04_BASE_ADDRESS_HI(scratch_va >> 32) | S_008F04_SWIZZLE_ENABLE_GFX6(1);
 
-      waves /= gpu_info->max_se;
+      radeon_set_sh_reg_seq(R_00B900_COMPUTE_USER_DATA_0, 2);
+      radeon_emit(scratch_va);
+      radeon_emit(rsrc1);
    }
-
-   radeon_set_sh_reg_seq(R_00B900_COMPUTE_USER_DATA_0, 2);
-   radeon_emit(scratch_va);
-   radeon_emit(rsrc1);
 
    radeon_set_sh_reg(R_00B860_COMPUTE_TMPRING_SIZE, tmpring_size);
 
@@ -521,6 +520,8 @@ static void
 radv_emit_compute_shader_pointers(struct radv_device *device, struct radv_cmd_stream *cs,
                                   struct radeon_winsys_bo *descriptor_bo)
 {
+   const struct radv_physical_device *pdev = radv_device_physical(device);
+
    if (!descriptor_bo)
       return;
 
@@ -531,7 +532,10 @@ radv_emit_compute_shader_pointers(struct radv_device *device, struct radv_cmd_st
     * so emit the descriptor pointer to user data 2-3 instead (task_ring_offsets arg).
     */
    radeon_begin(cs);
-   radeon_emit_64bit_pointer(R_00B908_COMPUTE_USER_DATA_2, va);
+   if (pdev->info.gfx_level >= GFX11)
+      radeon_emit_64bit_pointer(R_00B900_COMPUTE_USER_DATA_0, va);
+   else
+      radeon_emit_64bit_pointer(R_00B908_COMPUTE_USER_DATA_2, va);
    radeon_end();
 }
 
@@ -543,7 +547,7 @@ radv_emit_graphics_shader_pointers(struct radv_device *device, struct radv_cmd_s
    uint64_t va;
 
    /* Ensure there is always a mapped BO in s[0:1] for the SMEM OOB mitigation */
-   if (!descriptor_bo && pdev->cache_key.mitigate_smem_oob)
+   if (!descriptor_bo && device->compiler_info.key.mitigate_smem_oob)
       descriptor_bo = device->zero_bo;
 
    if (!descriptor_bo)
@@ -725,19 +729,6 @@ radv_emit_graphics(struct radv_device *device, struct radv_cmd_stream *cs)
    if (pdev->info.gfx_level < GFX11)
       ac_pm4_set_reg(pm4, R_00B124_SPI_SHADER_PGM_HI_VS, S_00B124_MEM_BASE(pdev->info.address32_hi >> 8));
 
-   unsigned cu_mask_ps = pdev->info.gfx_level >= GFX10_3 ? ac_gfx103_get_cu_mask_ps(&pdev->info) : ~0u;
-
-   if (pdev->info.gfx_level >= GFX12) {
-      ac_pm4_set_reg(pm4, R_00B420_SPI_SHADER_PGM_RSRC4_HS, S_00B420_WAVE_LIMIT(0x3ff) | S_00B420_GLG_FORCE_DISABLE(1));
-      ac_pm4_set_reg(pm4, R_00B01C_SPI_SHADER_PGM_RSRC4_PS,
-                     S_00B01C_WAVE_LIMIT_GFX12(0x3FF) | S_00B01C_LDS_GROUP_SIZE_GFX12(1));
-   } else if (pdev->info.gfx_level >= GFX11) {
-      ac_pm4_set_reg_idx3(pm4, R_00B404_SPI_SHADER_PGM_RSRC4_HS,
-                          ac_apply_cu_en(S_00B404_CU_EN(0xffff), C_00B404_CU_EN, 16, &pdev->info));
-      ac_pm4_set_reg_idx3(pm4, R_00B004_SPI_SHADER_PGM_RSRC4_PS,
-                          ac_apply_cu_en(S_00B004_CU_EN(cu_mask_ps >> 16), C_00B004_CU_EN, 16, &pdev->info));
-   }
-
    if (pdev->info.gfx_level >= GFX10) {
       /* Vulkan doesn't support user edge flags and it also doesn't
        * need to prevent drawing lines on internal edges of
@@ -746,12 +737,6 @@ radv_emit_graphics(struct radv_device *device, struct radv_cmd_stream *cs)
       unsigned vertex_reuse_depth = pdev->info.gfx_level >= GFX10_3 ? 30 : 0;
       ac_pm4_set_reg(pm4, R_028838_PA_CL_NGG_CNTL,
                      S_028838_INDEX_BUF_EDGE_FLAG_ENA(0) | S_028838_VERTEX_REUSE_DEPTH(vertex_reuse_depth));
-
-      if (pdev->info.gfx_level >= GFX10_3) {
-         /* This allows sample shading. */
-         ac_pm4_set_reg(pm4, R_028848_PA_CL_VRS_CNTL,
-                        S_028848_SAMPLE_ITER_COMBINER_MODE(V_028848_SC_VRS_COMB_MODE_OVERRIDE));
-      }
    }
 
    unsigned tmp = (unsigned)(1.0 * 8.0);
@@ -859,7 +844,7 @@ radv_init_graphics_state(struct radv_cmd_stream *cs, struct radv_device *device)
 
 static VkResult
 radv_update_preamble_cs(struct radv_queue_state *queue, struct radv_device *device,
-                        const struct radv_queue_ring_info *needs)
+                        const struct radv_queue_ring_info *needs, bool secure)
 {
    const struct radv_physical_device *pdev = radv_device_physical(device);
    struct radeon_winsys *ws = device->ws;
@@ -876,6 +861,7 @@ radv_update_preamble_cs(struct radv_queue_state *queue, struct radv_device *devi
    struct radeon_winsys_bo *gds_oa_bo = queue->gds_oa_bo;
    struct radv_cmd_stream *dest_cs[3] = {0};
    const uint32_t ring_bo_flags = RADEON_FLAG_NO_CPU_ACCESS | RADEON_FLAG_NO_INTERPROCESS_SHARING;
+   const uint32_t ring_bo_flags_tmz = ring_bo_flags | (secure ? RADEON_FLAG_ENCRYPTED : 0);
    VkResult result = VK_SUCCESS;
 
    const bool add_sample_positions = !queue->ring_info.sample_positions && needs->sample_positions;
@@ -894,7 +880,7 @@ radv_update_preamble_cs(struct radv_queue_state *queue, struct radv_device *devi
    const uint32_t compute_queue_scratch_size =
       queue->ring_info.compute_scratch_size_per_wave * queue->ring_info.compute_scratch_waves;
    if (compute_scratch_size > compute_queue_scratch_size) {
-      result = radv_bo_create(device, NULL, compute_scratch_size, 4096, RADEON_DOMAIN_VRAM, ring_bo_flags,
+      result = radv_bo_create(device, NULL, compute_scratch_size, 4096, RADEON_DOMAIN_VRAM, ring_bo_flags_tmz,
                               RADV_BO_PRIORITY_SCRATCH, 0, true, &compute_scratch_bo);
       if (result != VK_SUCCESS)
          goto fail;
@@ -918,7 +904,7 @@ radv_update_preamble_cs(struct radv_queue_state *queue, struct radv_device *devi
    }
 
    if (!queue->ring_info.tess_rings && needs->tess_rings) {
-      result = radv_bo_create(device, NULL, pdev->info.total_tess_ring_size, 256, RADEON_DOMAIN_VRAM, ring_bo_flags,
+      result = radv_bo_create(device, NULL, pdev->info.total_tess_ring_size, 256, RADEON_DOMAIN_VRAM, ring_bo_flags_tmz,
                               RADV_BO_PRIORITY_SCRATCH, 0, true, &tess_rings_bo);
       if (result != VK_SUCCESS)
          goto fail;
@@ -960,7 +946,7 @@ radv_update_preamble_cs(struct radv_queue_state *queue, struct radv_device *devi
    if (!queue->ring_info.ge_rings && needs->ge_rings) {
       assert(pdev->info.gfx_level >= GFX11);
       result = radv_bo_create(device, NULL, pdev->info.total_attribute_pos_prim_ring_size, 2 * 1024 * 1024 /* 2MiB */,
-                              RADEON_DOMAIN_VRAM, RADEON_FLAG_32BIT | RADEON_FLAG_DISCARDABLE | ring_bo_flags,
+                              RADEON_DOMAIN_VRAM, RADEON_FLAG_32BIT | RADEON_FLAG_DISCARDABLE | ring_bo_flags_tmz,
                               RADV_BO_PRIORITY_SCRATCH, 0, true, &ge_rings_bo);
       if (result != VK_SUCCESS)
          goto fail;
@@ -1211,7 +1197,7 @@ fail:
 static VkResult
 radv_update_preambles(struct radv_queue_state *queue, struct radv_device *device,
                       struct vk_command_buffer *const *cmd_buffers, uint32_t cmd_buffer_count, bool *use_perf_counters,
-                      bool *has_follower)
+                      bool *has_follower, bool secure)
 {
    const struct radv_physical_device *pdev = radv_device_physical(device);
 
@@ -1238,20 +1224,20 @@ radv_update_preambles(struct radv_queue_state *queue, struct radv_device *device
    for (uint32_t j = 0; j < cmd_buffer_count; j++) {
       struct radv_cmd_buffer *cmd_buffer = container_of(cmd_buffers[j], struct radv_cmd_buffer, vk);
 
-      needs.scratch_size_per_wave = MAX2(needs.scratch_size_per_wave, cmd_buffer->scratch_size_per_wave_needed);
-      needs.scratch_waves = MAX2(needs.scratch_waves, cmd_buffer->scratch_waves_wanted);
+      needs.scratch_size_per_wave = MAX2(needs.scratch_size_per_wave, cmd_buffer->queue_state.scratch_size_per_wave_needed);
+      needs.scratch_waves = MAX2(needs.scratch_waves, cmd_buffer->queue_state.scratch_waves_wanted);
       needs.compute_scratch_size_per_wave =
-         MAX2(needs.compute_scratch_size_per_wave, cmd_buffer->compute_scratch_size_per_wave_needed);
-      needs.compute_scratch_waves = MAX2(needs.compute_scratch_waves, cmd_buffer->compute_scratch_waves_wanted);
-      needs.esgs_ring_size = MAX2(needs.esgs_ring_size, cmd_buffer->esgs_ring_size_needed);
-      needs.gsvs_ring_size = MAX2(needs.gsvs_ring_size, cmd_buffer->gsvs_ring_size_needed);
-      needs.tess_rings |= cmd_buffer->tess_rings_needed;
-      needs.task_rings |= cmd_buffer->task_rings_needed;
-      needs.mesh_scratch_ring |= cmd_buffer->mesh_scratch_ring_needed;
-      needs.gds |= cmd_buffer->gds_needed;
-      needs.gds_oa |= cmd_buffer->gds_oa_needed;
-      needs.sample_positions |= cmd_buffer->sample_positions_needed;
-      *use_perf_counters |= cmd_buffer->state.uses_perf_counters;
+         MAX2(needs.compute_scratch_size_per_wave, cmd_buffer->queue_state.compute_scratch_size_per_wave_needed);
+      needs.compute_scratch_waves = MAX2(needs.compute_scratch_waves, cmd_buffer->queue_state.compute_scratch_waves_wanted);
+      needs.esgs_ring_size = MAX2(needs.esgs_ring_size, cmd_buffer->queue_state.esgs_ring_size_needed);
+      needs.gsvs_ring_size = MAX2(needs.gsvs_ring_size, cmd_buffer->queue_state.gsvs_ring_size_needed);
+      needs.tess_rings |= cmd_buffer->queue_state.tess_rings_needed;
+      needs.task_rings |= cmd_buffer->queue_state.task_rings_needed;
+      needs.mesh_scratch_ring |= cmd_buffer->queue_state.mesh_scratch_ring_needed;
+      needs.gds |= cmd_buffer->queue_state.gds_needed;
+      needs.gds_oa |= cmd_buffer->queue_state.gds_oa_needed;
+      needs.sample_positions |= cmd_buffer->queue_state.sample_positions_needed;
+      *use_perf_counters |= cmd_buffer->queue_state.uses_perf_counters;
       *has_follower |= !!cmd_buffer->gang.cs;
    }
 
@@ -1287,7 +1273,7 @@ radv_update_preambles(struct radv_queue_state *queue, struct radv_device *device
        queue->ring_info.sample_positions == needs.sample_positions)
       return VK_SUCCESS;
 
-   return radv_update_preamble_cs(queue, device, &needs);
+   return radv_update_preamble_cs(queue, device, &needs, secure);
 }
 
 /**
@@ -1435,15 +1421,15 @@ radv_create_gang_wait_preambles_postambles(struct radv_queue *queue)
    if (r != VK_SUCCESS)
       goto fail;
 
-   radv_create_cmd_stream(device, ip, false, &leader_post_cs);
+   r = radv_create_cmd_stream(device, ip, false, &leader_post_cs);
    if (r != VK_SUCCESS)
       goto fail;
 
-   radv_create_cmd_stream(device, AMD_IP_COMPUTE, false, &ace_pre_cs);
+   r = radv_create_cmd_stream(device, AMD_IP_COMPUTE, false, &ace_pre_cs);
    if (r != VK_SUCCESS)
       goto fail;
 
-   radv_create_cmd_stream(device, AMD_IP_COMPUTE, false, &ace_post_cs);
+   r = radv_create_cmd_stream(device, AMD_IP_COMPUTE, false, &ace_post_cs);
    if (r != VK_SUCCESS)
       goto fail;
 
@@ -1533,7 +1519,7 @@ radv_queue_init_follower_state(struct radv_queue *queue)
 }
 
 static VkResult
-radv_update_gang_preambles(struct radv_queue *queue)
+radv_update_gang_preambles(struct radv_queue *queue, bool secure)
 {
    struct radv_device *device = radv_queue_device(queue);
 
@@ -1558,7 +1544,7 @@ radv_update_gang_preambles(struct radv_queue *queue)
    needs.compute_scratch_waves = queue->state.ring_info.scratch_waves;
    needs.task_rings = queue->state.ring_info.task_rings;
 
-   r = radv_update_preamble_cs(queue->follower_state, device, &needs);
+   r = radv_update_preamble_cs(queue->follower_state, device, &needs, secure);
    if (r != VK_SUCCESS)
       return r;
 
@@ -1654,12 +1640,12 @@ radv_queue_submit_normal(struct radv_queue *queue, struct vk_queue_submit *submi
    struct vk_sync_wait *waits = submission->waits;
 
    result = radv_update_preambles(&queue->state, device, submission->command_buffers, submission->command_buffer_count,
-                                  &use_perf_counters, &use_ace);
+                                  &use_perf_counters, &use_ace, submission->is_protected);
    if (result != VK_SUCCESS)
       return result;
 
    if (use_ace) {
-      result = radv_update_gang_preambles(queue);
+      result = radv_update_gang_preambles(queue, submission->is_protected);
       if (result != VK_SUCCESS)
          return result;
    }
@@ -1677,7 +1663,7 @@ radv_queue_submit_normal(struct radv_queue *queue, struct vk_queue_submit *submi
 
    for (uint32_t j = 0; j < submission->command_buffer_count; j++) {
       struct radv_cmd_buffer *cmd_buffer = (struct radv_cmd_buffer *)submission->command_buffers[j];
-      shader_upload_seq = MAX2(shader_upload_seq, cmd_buffer->shader_upload_seq);
+      shader_upload_seq = MAX2(shader_upload_seq, cmd_buffer->queue_state.shader_upload_seq);
    }
 
    if (shader_upload_seq > queue->last_shader_upload_seq) {
@@ -1767,6 +1753,7 @@ radv_queue_submit_normal(struct radv_queue *queue, struct vk_queue_submit *submi
       .continue_preamble_cs = continue_preambles,
       .postamble_cs = postambles,
       .uses_shadow_regs = queue->state.uses_shadow_regs,
+      .secure = submission->is_protected,
    };
 
    for (uint32_t j = 0, advance; j < cmd_buffer_count; j += advance) {
@@ -1840,7 +1827,7 @@ radv_queue_submit_normal(struct radv_queue *queue, struct vk_queue_submit *submi
 
    queue->last_shader_upload_seq = MAX2(queue->last_shader_upload_seq, shader_upload_seq);
 
-   radv_dump_printf_data(device, stderr);
+   radv_dump_printf_data(device, stderr, true);
 
 fail:
    free(cs_array);
@@ -2001,6 +1988,19 @@ radv_queue_init(struct radv_device *device, struct radv_queue *queue, int idx,
    } else {
       queue->vk.driver_submit = radv_queue_submit;
    }
+
+   if (device->utrace.context) {
+      VkCommandPoolCreateInfo pool_info = {
+         .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+         .queueFamilyIndex = queue->vk.queue_family_index,
+      };
+
+      result =
+         vk_common_CreateCommandPool(radv_device_to_handle(device), &pool_info, NULL, &queue->utrace_command_pool);
+      if (result != VK_SUCCESS)
+         goto fail;
+   }
+
    return VK_SUCCESS;
 fail:
    vk_queue_finish(&queue->vk);
@@ -2071,6 +2071,8 @@ void
 radv_queue_finish(struct radv_queue *queue)
 {
    struct radv_device *device = radv_queue_device(queue);
+
+   vk_common_DestroyCommandPool(radv_device_to_handle(device), queue->utrace_command_pool, NULL);
 
    if (queue->follower_state) {
       /* Prevent double free */

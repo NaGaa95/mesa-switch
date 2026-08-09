@@ -1,0 +1,27 @@
+[binaries]
+c = 'C:/msys64/opt/devkitpro/devkitA64/bin/aarch64-none-elf-gcc.exe'
+cpp = 'C:/msys64/opt/devkitpro/devkitA64/bin/aarch64-none-elf-g++.exe'
+ar = 'C:/msys64/opt/devkitpro/devkitA64/bin/aarch64-none-elf-gcc-ar.exe'
+nm = 'C:/msys64/opt/devkitpro/devkitA64/bin/aarch64-none-elf-nm.exe'
+strip = 'C:/msys64/opt/devkitpro/devkitA64/bin/aarch64-none-elf-strip.exe'
+pkg-config = ['C:/msys64/usr/bin/bash.exe', '@DIRNAME@/switch-pkg-config-wrapper.sh']
+rust = ['C:/msys64/usr/bin/bash.exe', '@DIRNAME@/rustc-switch-wrapper.sh']
+bindgen = ['C:/msys64/usr/bin/bash.exe', '@DIRNAME@/bindgen-switch-wrapper.sh']
+
+[built-in options]
+c_args = ['-D__SWITCH__', '-DHAVE_TIMESPEC_GET', '-IC:/msys64/opt/devkitpro/portlibs/switch/include', '-I@GLOBAL_SOURCE_ROOT@/build/deps/libelf-stage/opt/devkitpro/portlibs/switch/include', '-isystem', 'C:/msys64/opt/devkitpro/libnx/include', '-march=armv8-a+crc+crypto', '-mtune=cortex-a57', '-mtp=soft', '-fPIC', '-ftls-model=local-exec', '-O2', '-ffunction-sections', '-fdata-sections']
+c_link_args = ['-march=armv8-a+crc+crypto', '-mtune=cortex-a57', '-mtp=soft', '-fPIC', '-ftls-model=local-exec', '-L@GLOBAL_SOURCE_ROOT@/build/deps/libelf-stage/opt/devkitpro/portlibs/switch/lib', '-LC:/msys64/opt/devkitpro/portlibs/switch/lib', '-LC:/msys64/opt/devkitpro/libnx/lib', '-lnx']
+cpp_args = ['-D__SWITCH__', '-DHAVE_TIMESPEC_GET', '-IC:/msys64/opt/devkitpro/portlibs/switch/include', '-I@GLOBAL_SOURCE_ROOT@/build/deps/libelf-stage/opt/devkitpro/portlibs/switch/include', '-isystem', 'C:/msys64/opt/devkitpro/libnx/include', '-march=armv8-a+crc+crypto', '-mtune=cortex-a57', '-mtp=soft', '-fPIC', '-ftls-model=local-exec', '-O2', '-ffunction-sections', '-fdata-sections']
+cpp_link_args = ['-march=armv8-a+crc+crypto', '-mtune=cortex-a57', '-mtp=soft', '-fPIC', '-ftls-model=local-exec', '-L@GLOBAL_SOURCE_ROOT@/build/deps/libelf-stage/opt/devkitpro/portlibs/switch/lib', '-LC:/msys64/opt/devkitpro/portlibs/switch/lib', '-LC:/msys64/opt/devkitpro/libnx/lib', '-lnx']
+
+[host_machine]
+system = 'horizon'
+cpu_family = 'aarch64'
+cpu = 'cortex-a57'
+endian = 'little'
+
+[target_machine]
+system = 'horizon'
+cpu_family = 'aarch64'
+cpu = 'cortex-a57'
+endian = 'little'

@@ -168,6 +168,11 @@ impl GOBType {
     }
 
     #[no_mangle]
+    pub extern "C" fn nil_gob_type_extent_B(self) -> Extent4D<units::Bytes> {
+        self.extent_B()
+    }
+
+    #[no_mangle]
     pub extern "C" fn nil_gob_type_height(self) -> u32 {
         self.extent_B().height
     }

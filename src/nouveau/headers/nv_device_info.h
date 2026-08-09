@@ -57,7 +57,7 @@ struct nv_device_info {
    uint8_t max_warps_per_mp;
 
    bool has_transfer_queue;
-   
+
    /** Non-coherent memory map atom size */
    uint16_t nc_atom_size_B;
 

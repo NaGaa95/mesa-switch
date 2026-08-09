@@ -376,8 +376,8 @@ nir_intrinsic_writes_external_memory(const nir_intrinsic_instr *instr)
    case nir_intrinsic_ssbo_atomic_ir3:
    case nir_intrinsic_ssbo_atomic_swap_ir3:
    case nir_intrinsic_store_global:
+   case nir_intrinsic_store_global_offset:
    case nir_intrinsic_store_global_etna:
-   case nir_intrinsic_store_global_ir3:
    case nir_intrinsic_store_global_amd:
    case nir_intrinsic_store_buffer_amd:
    case nir_intrinsic_store_ssbo:
@@ -724,6 +724,7 @@ gather_intrinsic_info(nir_intrinsic_instr *instr, nir_shader *shader)
    case nir_intrinsic_load_invocation_id:
    case nir_intrinsic_load_frag_coord:
    case nir_intrinsic_load_pixel_coord:
+   case nir_intrinsic_load_frag_coord_xy:
    case nir_intrinsic_load_frag_coord_z:
    case nir_intrinsic_load_frag_coord_w:
    case nir_intrinsic_load_frag_coord_w_rcp:
@@ -781,6 +782,8 @@ gather_intrinsic_info(nir_intrinsic_instr *instr, nir_shader *shader)
    case nir_intrinsic_load_tcs_header_ir3:
    case nir_intrinsic_load_ray_triangle_vertex_positions:
    case nir_intrinsic_load_layer_id:
+   case nir_intrinsic_load_color0_amd:
+   case nir_intrinsic_load_color1_amd:
       BITSET_SET(shader->info.system_values_read,
                  nir_system_value_from_intrinsic(instr->intrinsic));
       break;
@@ -791,7 +794,8 @@ gather_intrinsic_info(nir_intrinsic_instr *instr, nir_shader *shader)
 
    case nir_intrinsic_load_barycentric_pixel:
       if (nir_intrinsic_interp_mode(instr) == INTERP_MODE_SMOOTH ||
-          nir_intrinsic_interp_mode(instr) == INTERP_MODE_NONE) {
+          (!shader->options->ignore_none_interpolation_in_sysval_gathering &&
+           nir_intrinsic_interp_mode(instr) == INTERP_MODE_NONE)) {
          BITSET_SET(shader->info.system_values_read,
                     SYSTEM_VALUE_BARYCENTRIC_PERSP_PIXEL);
       } else if (nir_intrinsic_interp_mode(instr) == INTERP_MODE_NOPERSPECTIVE) {
@@ -802,7 +806,8 @@ gather_intrinsic_info(nir_intrinsic_instr *instr, nir_shader *shader)
 
    case nir_intrinsic_load_barycentric_centroid:
       if (nir_intrinsic_interp_mode(instr) == INTERP_MODE_SMOOTH ||
-          nir_intrinsic_interp_mode(instr) == INTERP_MODE_NONE) {
+          (!shader->options->ignore_none_interpolation_in_sysval_gathering &&
+           nir_intrinsic_interp_mode(instr) == INTERP_MODE_NONE)) {
          BITSET_SET(shader->info.system_values_read,
                     SYSTEM_VALUE_BARYCENTRIC_PERSP_CENTROID);
       } else if (nir_intrinsic_interp_mode(instr) == INTERP_MODE_NOPERSPECTIVE) {
@@ -813,7 +818,8 @@ gather_intrinsic_info(nir_intrinsic_instr *instr, nir_shader *shader)
 
    case nir_intrinsic_load_barycentric_sample:
       if (nir_intrinsic_interp_mode(instr) == INTERP_MODE_SMOOTH ||
-          nir_intrinsic_interp_mode(instr) == INTERP_MODE_NONE) {
+          (!shader->options->ignore_none_interpolation_in_sysval_gathering &&
+           nir_intrinsic_interp_mode(instr) == INTERP_MODE_NONE)) {
          BITSET_SET(shader->info.system_values_read,
                     SYSTEM_VALUE_BARYCENTRIC_PERSP_SAMPLE);
       } else if (nir_intrinsic_interp_mode(instr) == INTERP_MODE_NOPERSPECTIVE) {
@@ -868,6 +874,7 @@ gather_intrinsic_info(nir_intrinsic_instr *instr, nir_shader *shader)
       shader->info.outputs_written |= BITFIELD64_BIT(FRAG_RESULT_SAMPLE_MASK);
       break;
 
+   case nir_intrinsic_load_tile_image:
    case nir_intrinsic_load_tile_pan:
    case nir_intrinsic_load_tile_res_pan: {
       const nir_io_semantics io = nir_intrinsic_io_semantics(instr);
@@ -899,6 +906,10 @@ gather_intrinsic_info(nir_intrinsic_instr *instr, nir_shader *shader)
       }
       break;
    }
+
+   case nir_intrinsic_abort:
+      shader->info.uses_abort = true;
+      break;
 
    default:
       shader->info.uses_bindless |= intrinsic_is_bindless(instr);

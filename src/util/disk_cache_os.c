@@ -968,7 +968,7 @@ disk_cache_generate_cache_dir(void *mem_ctx, const char *gpu_name,
    if (!path) {
 #if defined(__SWITCH__)
       char *home = getenv("HOME");
-      
+
       if (home) {
          path = concatenate_and_mkdir(mem_ctx, home, ".mesa", mkdir);
       } else {

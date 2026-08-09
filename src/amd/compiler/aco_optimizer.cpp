@@ -11,7 +11,6 @@
 #include "util/memstream.h"
 
 #include <algorithm>
-#include <array>
 #include <vector>
 
 namespace aco {
@@ -1913,7 +1912,7 @@ skip_smem_offset_align(opt_ctx& ctx, SMEM_instruction* smem, uint32_t align)
          continue;
 
       if (new_op.isTemp()) {
-         op.setTemp(op.getTemp());
+         op.setTemp(new_op.getTemp());
       } else {
          assert(new_op.isFixed());
          op = new_op;
@@ -1926,25 +1925,25 @@ skip_smem_offset_align(opt_ctx& ctx, SMEM_instruction* smem, uint32_t align)
 void
 smem_combine(opt_ctx& ctx, aco_ptr<Instruction>& instr)
 {
+   /* Optimize offsets for SMEM buffer loads. */
+   if (instr->operands.empty() || instr->operands[0].size() < 4)
+      return;
+
    uint32_t align = 4;
    switch (instr->opcode) {
-   case aco_opcode::s_load_sbyte:
-   case aco_opcode::s_load_ubyte:
    case aco_opcode::s_buffer_load_sbyte:
    case aco_opcode::s_buffer_load_ubyte: align = 1; break;
-   case aco_opcode::s_load_sshort:
-   case aco_opcode::s_load_ushort:
    case aco_opcode::s_buffer_load_sshort:
    case aco_opcode::s_buffer_load_ushort: align = 2; break;
    default: break;
    }
 
    /* skip &-4 before offset additions: load((a + 16) & -4, 0) */
-   if (!instr->operands.empty() && align > 1)
+   if (align > 1)
       skip_smem_offset_align(ctx, &instr->smem(), align);
 
    /* propagate constants and combine additions */
-   if (!instr->operands.empty() && instr->operands[1].isTemp()) {
+   if (instr->operands[1].isTemp()) {
       SMEM_instruction& smem = instr->smem();
       ssa_info info = ctx.info[instr->operands[1].tempId()];
 
@@ -1981,7 +1980,7 @@ smem_combine(opt_ctx& ctx, aco_ptr<Instruction>& instr)
    }
 
    /* skip &-4 after offset additions: load(a & -4, 16) */
-   if (!instr->operands.empty() && align > 1)
+   if (align > 1)
       skip_smem_offset_align(ctx, &instr->smem(), align);
 }
 
@@ -3257,6 +3256,7 @@ backpropagate_input_modifiers(opt_ctx& ctx, alu_opt_info& info, const alu_opt_op
    case aco_opcode::s_add_f32:
    case aco_opcode::s_add_f16:
    case aco_opcode::v_pk_add_f16:
+   case aco_opcode::p_v_add_f64_rtne:
    case aco_opcode::v_fma_f64:
    case aco_opcode::v_fma_f32:
    case aco_opcode::v_fma_f16:
@@ -4309,7 +4309,7 @@ combine_instruction(opt_ctx& ctx, aco_ptr<Instruction>& instr)
          add_opt(v_mul_f32, v_fma_f32, 0x3, "120", create_fma_cb);
          add_opt(s_mul_f32, v_fma_f32, 0x3, "120", create_fma_cb);
       }
-      if (ctx.program->gfx_level >= GFX10_3)
+      if (ctx.program->gfx_level >= GFX10_3 && ctx.fp_mode.denorm32 == 0)
          add_opt(v_mul_legacy_f32, v_fma_legacy_f32, 0x3, "120", create_fma_cb);
    } else if (info.opcode == aco_opcode::v_add_f16) {
       if (ctx.program->gfx_level < GFX9 && ctx.fp_mode.denorm16_64 == 0) {

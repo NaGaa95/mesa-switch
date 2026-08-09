@@ -231,7 +231,7 @@ build_blit_shader(const struct vk_meta_blit_key *key)
 
    nir_def *out_coord_xy = nir_load_frag_coord(b);
    out_coord_xy = nir_trim_vector(b, out_coord_xy, 2);
-   nir_def *src_coord_xy = nir_ffma(b, out_coord_xy, xy_scale, xy_off);
+   nir_def *src_coord_xy = nir_ffma_weak(b, out_coord_xy, xy_scale, xy_off);
 
    nir_def *z_xform = load_struct_var(b, push, 1);
    nir_def *z_off = nir_channel(b, z_xform, 0);
@@ -240,7 +240,7 @@ build_blit_shader(const struct vk_meta_blit_key *key)
    nir_def *out_layer = nir_load_layer_id(b);
    /* Add 0.5 to get center-pixel sampling. */
    nir_def *out_coord_z = nir_fadd_imm(b, nir_u2f32(b, out_layer), 0.5);
-   nir_def *src_coord_z = nir_ffma(b, out_coord_z, z_scale, z_off);
+   nir_def *src_coord_z = nir_ffma_weak(b, out_coord_z, z_scale, z_off);
 
    /* We use center-pixel coordinates for the transform calculation but
     * texelFetch() will round the array index to the nearest integer.

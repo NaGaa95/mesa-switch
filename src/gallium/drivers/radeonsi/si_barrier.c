@@ -6,6 +6,7 @@
 
 #include "si_build_pm4.h"
 #include "si_query.h"
+#include "gfx/si_gfx.h"
 
 static struct si_resource *si_get_wait_mem_scratch_bo(struct si_context *ctx,
                                                       struct radeon_cmdbuf *cs, bool is_secure)
@@ -296,7 +297,7 @@ static void gfx10_emit_barrier(struct si_context *ctx, struct radeon_cmdbuf *cs)
    /* Ignore fields that only modify the behavior of other fields. */
    if (gcr_cntl & C_587_GL2_RANGE & C_587_SEQ & (ctx->gfx_level >= GFX12 ? ~0 : C_587_GL1_RANGE)) {
       si_cp_acquire_mem(ctx, cs, gcr_cntl,
-                        flags & SI_BARRIER_PFP_SYNC_ME ? V_581B_CP_PFP : V_581B_CP_ME);
+                        flags & SI_BARRIER_PFP_SYNC_ME ? V_581A_PREFETCH_PARSER : V_581A_MICRO_ENGINE);
    } else if (flags & SI_BARRIER_PFP_SYNC_ME) {
       si_cp_pfp_sync_me(cs);
    }
@@ -457,7 +458,7 @@ static void gfx6_emit_barrier(struct si_context *sctx, struct radeon_cmdbuf *cs)
     *
     * GFX6-GFX7 don't support L2 write-back.
     */
-   unsigned engine = flags & SI_BARRIER_PFP_SYNC_ME ? V_581B_CP_PFP : V_581B_CP_ME;
+   unsigned engine = flags & SI_BARRIER_PFP_SYNC_ME ? V_581A_PREFETCH_PARSER : V_581A_MICRO_ENGINE;
 
    if (flags & SI_BARRIER_INV_L2 || (sctx->gfx_level <= GFX7 && flags & SI_BARRIER_WB_L2)) {
       /* Invalidate L1 & L2. WB must be set on GFX8+ when TC_ACTION is set. */
@@ -485,7 +486,7 @@ static void gfx6_emit_barrier(struct si_context *sctx, struct radeon_cmdbuf *cs)
                            S_0301F0_TC_NC_ACTION_ENA(1),
                            /* If this is not the last ACQUIRE_MEM, flush in ME.
                             * We only want to synchronize with PFP in the last ACQUIRE_MEM. */
-                           last_acquire_mem ? engine : V_581B_CP_ME);
+                           last_acquire_mem ? engine : V_581A_MICRO_ENGINE);
 
          if (last_acquire_mem)
             flags &= ~SI_BARRIER_PFP_SYNC_ME;

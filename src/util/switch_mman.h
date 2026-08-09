@@ -10,7 +10,7 @@
 #ifndef _SWITCH_MMAN_H_
 #define _SWITCH_MMAN_H_
 
-#include <sys/types.h>  
+#include <sys/types.h>
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>

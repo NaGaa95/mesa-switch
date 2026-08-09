@@ -5,6 +5,7 @@
 *.pyo
 *.out
 /build
+/builddir-*
 knowledge
 libnx
 libdrm-nouveau

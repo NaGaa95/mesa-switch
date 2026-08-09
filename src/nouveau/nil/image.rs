@@ -756,7 +756,7 @@ impl Image {
     fn gb202_choose_pte_kind(_format: Format, compressed: bool) -> u8 {
         use nvidia_headers::hwref::tu102::mmu::*;
         if compressed {
-            NV_MMU_PTE_KIND_GENERIC_MEMORY_COMPRESSIBLE_DISABLE_PLC
+            NV_MMU_PTE_KIND_GENERIC_MEMORY_COMPRESSIBLE
         } else {
             NV_MMU_PTE_KIND_GENERIC_MEMORY
         }
@@ -801,7 +801,7 @@ impl Image {
             }
             PIPE_FORMAT_Z32_FLOAT => {
                 if compressed {
-                    NV_MMU_PTE_KIND_GENERIC_MEMORY_COMPRESSIBLE_DISABLE_PLC
+                    NV_MMU_PTE_KIND_GENERIC_MEMORY_COMPRESSIBLE
                 } else {
                     NV_MMU_PTE_KIND_GENERIC_MEMORY
                 }
@@ -815,7 +815,7 @@ impl Image {
             }
             _ => {
                 if compressed {
-                    NV_MMU_PTE_KIND_GENERIC_MEMORY_COMPRESSIBLE_DISABLE_PLC
+                    NV_MMU_PTE_KIND_GENERIC_MEMORY_COMPRESSIBLE
                 } else {
                     NV_MMU_PTE_KIND_GENERIC_MEMORY
                 }

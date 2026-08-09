@@ -1,0 +1,17 @@
+[binaries]
+c = 'C:/msys64/clang64/bin/clang.exe'
+cpp = 'C:/msys64/clang64/bin/clang++.exe'
+ar = 'C:/msys64/clang64/bin/llvm-ar.exe'
+strip = 'C:/msys64/clang64/bin/llvm-strip.exe'
+nm = 'C:/msys64/clang64/bin/llvm-nm.exe'
+pkg-config = 'C:/msys64/clang64/bin/pkg-config.exe'
+cmake = 'C:/msys64/clang64/bin/cmake.exe'
+
+[properties]
+needs_exe_wrapper = false
+
+[host_machine]
+system = 'windows'
+cpu_family = 'x86_64'
+cpu = 'x86_64'
+endian = 'little'

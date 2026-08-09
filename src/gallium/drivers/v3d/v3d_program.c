@@ -181,7 +181,7 @@ v3d_set_transform_feedback_outputs(struct v3d_uncompiled_shader *so,
         memcpy(so->tf_outputs, slots, sizeof(*slots) * slot_count);
 }
 
-static int
+static unsigned
 type_size(const struct glsl_type *type, bool bindless)
 {
         return glsl_count_attribute_slots(type, false);
@@ -392,8 +392,6 @@ v3d_uncompiled_shader_create(struct pipe_context *pctx,
         v3d_optimize_nir(NULL, s);
 
         NIR_PASS(_, s, nir_remove_dead_variables, nir_var_function_temp, NULL);
-
-        NIR_PASS(_, s, nir_lower_frexp);
 
         /* Since we can't expose pipe_caps.packed_uniforms the state tracker
          * will produce uniform intrinsics with offsets in vec4 units but
