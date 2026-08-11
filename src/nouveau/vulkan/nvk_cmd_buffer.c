@@ -400,7 +400,29 @@ nvk_cmd_buffer_switch_report_semaphore(struct nvk_cmd_buffer *cmd,
          .operation = OPERATION_RELEASE,
          .structure_size = STRUCTURE_SIZE_ONE_WORD,
       });
+   } else if (subc == SUBC_NV90B5) {
+      /* A pipelined copy-engine launch may signal its semaphore before all
+       * earlier writes are globally visible on GM20B.  Use a non-pipelined,
+       * flushed release before the cross-engine acquire below.
+       */
+      struct nv_push *p = nvk_cmd_buffer_push(cmd, 9);
+      P_MTHD(p, NV90B5, SET_SEMAPHORE_A);
+      P_NV90B5_SET_SEMAPHORE_A(p, addr >> 32);
+      P_NV90B5_SET_SEMAPHORE_B(p, addr);
+      P_NV90B5_SET_SEMAPHORE_PAYLOAD(p, value);
+
+      P_MTHD(p, NV90B5, LINE_LENGTH_IN);
+      P_NV90B5_LINE_LENGTH_IN(p, 0);
+      P_NV90B5_LINE_COUNT(p, 0);
+
+      P_IMMD(p, NV90B5, LAUNCH_DMA, {
+         .data_transfer_type = DATA_TRANSFER_TYPE_NON_PIPELINED,
+         .semaphore_type = SEMAPHORE_TYPE_RELEASE_ONE_WORD_SEMAPHORE,
+         .flush_enable = FLUSH_ENABLE_TRUE,
+         /* Note: FLUSH_TYPE=SYS implicitly for NVC3B5+ */
+      });
    } else {
+      assert(subc == SUBC_NV9097);
       struct nv_push *p = nvk_cmd_buffer_push(cmd, 7);
       P_IMMD(p, NV9097, FLUSH_PENDING_WRITES, 0);
       P_MTHD(p, NV9097, SET_REPORT_SEMAPHORE_A);
