@@ -391,8 +391,16 @@ nvk_CmdResetQueryPool(VkCommandBuffer commandBuffer,
       P_NVC86F_MEM_OP_C(p, { .membar_type = 0 });
       P_NVC86F_MEM_OP_D(p, { .operation = OPERATION_MEMBAR });
    } else {
+#ifdef HAVE_SWITCH_PLATFORM
+      /* Horizon does not provide SET_REFERENCE's host-WFI semantics when it
+       * is embedded in an ordinary, prefetchable GPFIFO entry.  Hand the
+       * producing engine to 3D through a semaphore and no-prefetch boundary.
+       */
+      nvk_cmd_buffer_switch_sync_host(cmd);
+#else
       struct nv_push *p = nvk_cmd_buffer_push(cmd, 1);
       __push_immd(p, SUBC_NV9097, NV906F_SET_REFERENCE, 0);
+#endif
    }
 }
 

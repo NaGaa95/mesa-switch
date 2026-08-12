@@ -261,6 +261,20 @@ nvk_meta_end_generic(struct nvk_cmd_buffer *cmd,
    }
 }
 
+static void
+nvk_meta_sync_image_copy(struct nvk_cmd_buffer *cmd)
+{
+#ifdef HAVE_SWITCH_PLATFORM
+   /* Shader-backed image copies on GM20B must retire before meta state is
+    * restored.  The semaphore/no-prefetch split also prevents later GPFIFO
+    * entries from racing image VA release or reuse.
+    */
+   nvk_cmd_buffer_switch_sync_host(cmd);
+#else
+   (void)cmd;
+#endif
+}
+
 VKAPI_ATTR void VKAPI_CALL
 nvk_CmdBlitImage2(VkCommandBuffer commandBuffer,
                   const VkBlitImageInfo2 *pBlitImageInfo)
@@ -413,6 +427,7 @@ nvk_cmd_copy_image_to_buffer_meta(struct nvk_cmd_buffer *cmd,
    nvk_meta_begin_compute(cmd, &save);
    vk_meta_copy_image_to_buffer(&cmd->vk, &dev->meta, pCopyImageToBufferInfo,
                                 &src_img_props);
+   nvk_meta_sync_image_copy(cmd);
    nvk_meta_end_compute(cmd, &save);
 }
 
@@ -447,6 +462,7 @@ nvk_cmd_copy_buffer_to_image_meta(struct nvk_cmd_buffer *cmd,
    nvk_meta_begin_generic(cmd, &save, engine);
    vk_meta_copy_buffer_to_image(&cmd->vk, &dev->meta, pCopyBufferToImageInfo,
                                 &dst_img_props, engine);
+   nvk_meta_sync_image_copy(cmd);
    nvk_meta_end_generic(cmd, &save, engine);
 }
 
@@ -486,6 +502,7 @@ nvk_cmd_copy_image_meta(struct nvk_cmd_buffer *cmd,
    nvk_meta_begin_generic(cmd, &save, engine);
    vk_meta_copy_image(&cmd->vk, &dev->meta, pCopyImageInfo,
                       &src_img_props, &dst_img_props, engine);
+   nvk_meta_sync_image_copy(cmd);
    nvk_meta_end_generic(cmd, &save, engine);
 }
 
