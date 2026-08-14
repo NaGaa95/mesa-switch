@@ -592,6 +592,7 @@ _eglCreateExtensionsString(_EGLDisplay *disp)
    if (disp->Extensions.KHR_no_config_context)
       _eglAppendExtension(&exts, "EGL_MESA_configless_context");
    _EGL_CHECK_EXTENSION(MESA_gl_interop);
+   _EGL_CHECK_EXTENSION(MESA_horizon_surface_resize);
    _EGL_CHECK_EXTENSION(MESA_image_dma_buf_export);
    _EGL_CHECK_EXTENSION(MESA_query_driver);
    _EGL_CHECK_EXTENSION(MESA_x11_native_visual_id);
@@ -1455,6 +1456,42 @@ eglSwapBuffers(EGLDisplay dpy, EGLSurface surface)
    if (ret) {
       surf->SetDamageRegionCalled = EGL_FALSE;
       surf->BufferAgeRead = EGL_FALSE;
+   }
+
+   RETURN_EGL_EVAL(disp, ret);
+}
+
+static EGLBoolean EGLAPIENTRY
+eglResizeSurfaceMESA(EGLDisplay dpy, EGLSurface surface,
+                     EGLint width, EGLint height)
+{
+   _EGLContext *ctx = _eglGetCurrentContext();
+   _EGLDisplay *disp = _eglLockDisplay(dpy);
+   _EGLSurface *surf = _eglLookupSurface(surface, disp);
+   EGLBoolean ret = EGL_FALSE;
+
+   _EGL_FUNC_START(disp, EGL_OBJECT_SURFACE_KHR, surf);
+   _EGL_CHECK_SURFACE(disp, surf, EGL_FALSE);
+
+   if (!disp->Extensions.MESA_horizon_surface_resize ||
+       !disp->Driver->ResizeSurfaceMESA)
+      RETURN_EGL_ERROR(disp, EGL_BAD_MATCH, EGL_FALSE);
+
+   if (width <= 0 || height <= 0)
+      RETURN_EGL_ERROR(disp, EGL_BAD_PARAMETER, EGL_FALSE);
+
+   /* Reconfiguration must be serialized with the context which can own a
+    * dequeued back buffer.  This also gives the backend a context whose
+    * glthread queue and native channel can be drained safely. */
+   if (_eglGetContextHandle(ctx) == EGL_NO_CONTEXT ||
+       surf->Type != EGL_WINDOW_BIT || ctx->DrawSurface != surf)
+      RETURN_EGL_ERROR(disp, EGL_BAD_MATCH, EGL_FALSE);
+
+   if (surf->Lost)
+      RETURN_EGL_ERROR(disp, EGL_BAD_NATIVE_WINDOW, EGL_FALSE);
+
+   egl_relax (disp, &surf->Resource) {
+      ret = disp->Driver->ResizeSurfaceMESA(disp, surf, width, height);
    }
 
    RETURN_EGL_EVAL(disp, ret);
@@ -2788,6 +2825,12 @@ eglGetProcAddress(const char *procname)
 
    if (!ret)
       ret = _mesa_glapi_get_proc_address(procname);
+
+   /* Private Horizon frontend entrypoint.  Keep this out of the generic EGL
+    * registry/GLVND dispatch tables; the advertised display extension is
+    * implemented by Mesa's in-process Switch EGL frontend only. */
+   if (!ret && strcmp(procname, "eglResizeSurfaceMESA") == 0)
+      ret = (_EGLProc)eglResizeSurfaceMESA;
 
    RETURN_EGL_SUCCESS(NULL, ret);
 }

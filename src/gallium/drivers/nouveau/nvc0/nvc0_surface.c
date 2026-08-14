@@ -216,12 +216,20 @@ nvc0_resource_copy_region(struct pipe_context *pipe,
    bool m2mf;
    unsigned dst_layer = dstz, src_layer = src_box->z;
 
+#ifdef __SWITCH__
+   /* Every copy path below records into the screen-owned Horizon pushbuf and
+    * PUSH_VAL/PUSH_SPACE may submit it.  Preserve context attribution across
+    * buffer, M2MF and 2D copies as one transaction. */
+   nvc0_screen_state_lock(nvc0->screen);
+   nouveau_pushbuf_bind_context(nvc0->base.pushbuf, &nvc0->base);
+#endif
+
    if (dst->target == PIPE_BUFFER && src->target == PIPE_BUFFER) {
       nouveau_copy_buffer(&nvc0->base,
                           nv04_resource(dst), dstx,
                           nv04_resource(src), src_box->x, src_box->width);
       NOUVEAU_DRV_STAT(&nvc0->screen->base, buf_copy_bytes, src_box->width);
-      return;
+      goto out;
    }
    NOUVEAU_DRV_STAT(&nvc0->screen->base, tex_copy_count, 1);
 
@@ -261,7 +269,7 @@ nvc0_resource_copy_region(struct pipe_context *pipe,
          else
             srect.base += src_mt->layer_stride;
       }
-      return;
+      goto out;
    }
 
    assert(nv50_2d_dst_format_faithful(dst->format));
@@ -283,6 +291,12 @@ nvc0_resource_copy_region(struct pipe_context *pipe,
          break;
    }
    nouveau_bufctx_reset(nvc0->bufctx, 0);
+
+out:
+   (void)0;
+#ifdef __SWITCH__
+   nvc0_screen_state_unlock(nvc0->screen);
+#endif
 }
 
 static void
@@ -301,8 +315,23 @@ nvc0_clear_render_target(struct pipe_context *pipe,
 
    assert(dst->texture->target != PIPE_BUFFER);
 
+#ifdef __SWITCH__
+   /* Horizon uses one screen-owned pushbuf.  Direct clear callbacks bypass
+    * normal state validation, so serialize and bind explicitly.  If another
+    * context owns the hardware shadow, a zero-mask validation transfers that
+    * ownership (and updates ZBC) without emitting unrelated dirty state.
+    * Otherwise only the cheap ZBC generation check is needed. */
+   nvc0_screen_state_lock(nvc0->screen);
+   nouveau_pushbuf_bind_context(push, &nvc0->base);
+   if (nvc0->screen->cur_ctx != nvc0 ?
+          !nvc0_state_validate_3d(nvc0, 0) :
+          !nvc0_switch_zbc_update(nvc0->screen, push,
+                                  &nvc0->switch_zbc_generation))
+      goto out;
+#endif
+
    if (!PUSH_SPACE(push, 32 + sf->depth))
-      return;
+      goto out;
 
    PUSH_REF1 (push, res->bo, res->domain | NOUVEAU_BO_WR);
 
@@ -367,6 +396,12 @@ nvc0_clear_render_target(struct pipe_context *pipe,
       IMMED_NVC0(push, NVC0_3D(COND_MODE), nvc0->cond_condmode);
 
    nvc0->dirty_3d |= NVC0_NEW_3D_FRAMEBUFFER;
+
+out:
+   (void)0;
+#ifdef __SWITCH__
+   nvc0_screen_state_unlock(nvc0->screen);
+#endif
 }
 
 static void
@@ -508,6 +543,19 @@ nvc0_clear_buffer(struct pipe_context *pipe,
    assert(res->target == PIPE_BUFFER);
    assert(nouveau_bo_memtype(buf->bo) == 0);
 
+#ifdef __SWITCH__
+   /* This callback may use either the 3D clear path or the push uploader; both
+    * target the shared Horizon command stream and must remain one bound
+    * context transaction. */
+   nvc0_screen_state_lock(nvc0->screen);
+   nouveau_pushbuf_bind_context(push, &nvc0->base);
+   if (nvc0->screen->cur_ctx != nvc0 ?
+          !nvc0_state_validate_3d(nvc0, 0) :
+          !nvc0_switch_zbc_update(nvc0->screen, push,
+                                  &nvc0->switch_zbc_generation))
+      goto out;
+#endif
+
    switch (data_size) {
    case 16:
       dst_fmt = PIPE_FORMAT_R32G32B32A32_UINT;
@@ -542,7 +590,7 @@ nvc0_clear_buffer(struct pipe_context *pipe,
       break;
    default:
       assert(!"Unsupported element size");
-      return;
+      goto out;
    }
 
    util_range_add(&buf->base, &buf->valid_buffer_range, offset, offset + size);
@@ -551,7 +599,7 @@ nvc0_clear_buffer(struct pipe_context *pipe,
 
    if (data_size == 12) {
       nvc0_clear_buffer_push(pipe, res, offset, size, data, data_size);
-      return;
+      goto out;
    }
 
    if (offset & 0xff) {
@@ -561,7 +609,7 @@ nvc0_clear_buffer(struct pipe_context *pipe,
       offset += fixup_size;
       size -= fixup_size;
       if (!size)
-         return;
+         goto out;
    }
 
    elements = size / data_size;
@@ -572,7 +620,7 @@ nvc0_clear_buffer(struct pipe_context *pipe,
    assert(width > 0);
 
    if (!PUSH_SPACE(push, 40))
-      return;
+      goto out;
 
    PUSH_REF1 (push, buf->bo, buf->domain | NOUVEAU_BO_WR);
 
@@ -617,6 +665,12 @@ nvc0_clear_buffer(struct pipe_context *pipe,
    }
 
    nvc0->dirty_3d |= NVC0_NEW_3D_FRAMEBUFFER;
+
+out:
+   (void)0;
+#ifdef __SWITCH__
+   nvc0_screen_state_unlock(nvc0->screen);
+#endif
 }
 
 static void
@@ -639,8 +693,18 @@ nvc0_clear_depth_stencil(struct pipe_context *pipe,
 
    assert(dst->texture->target != PIPE_BUFFER);
 
+#ifdef __SWITCH__
+   nvc0_screen_state_lock(nvc0->screen);
+   nouveau_pushbuf_bind_context(push, &nvc0->base);
+   if (nvc0->screen->cur_ctx != nvc0 ?
+          !nvc0_state_validate_3d(nvc0, 0) :
+          !nvc0_switch_zbc_update(nvc0->screen, push,
+                                  &nvc0->switch_zbc_generation))
+      goto out;
+#endif
+
    if (!PUSH_SPACE(push, 32 + sf->depth))
-      return;
+      goto out;
 
    PUSH_REF1 (push, mt->base.bo, mt->base.domain | NOUVEAU_BO_WR);
 
@@ -689,6 +753,12 @@ nvc0_clear_depth_stencil(struct pipe_context *pipe,
       IMMED_NVC0(push, NVC0_3D(COND_MODE), nvc0->cond_condmode);
 
    nvc0->dirty_3d |= NVC0_NEW_3D_FRAMEBUFFER;
+
+out:
+   (void)0;
+#ifdef __SWITCH__
+   nvc0_screen_state_unlock(nvc0->screen);
+#endif
 }
 
 void
@@ -704,7 +774,7 @@ nvc0_clear(struct pipe_context *pipe, unsigned buffers,
    unsigned i, j, k;
    uint32_t mode = 0;
 
-   simple_mtx_lock(&nvc0->screen->state_lock);
+   nvc0_screen_state_lock(nvc0->screen);
 
    /* don't need NEW_BLEND, COLOR_MASK doesn't affect CLEAR_BUFFERS */
    if (!nvc0_state_validate_3d(nvc0, NVC0_NEW_3D_FRAMEBUFFER))
@@ -790,7 +860,7 @@ nvc0_clear(struct pipe_context *pipe, unsigned buffers,
 
 out:
    PUSH_KICK(push);
-   simple_mtx_unlock(&nvc0->screen->state_lock);
+   nvc0_screen_state_unlock(nvc0->screen);
 }
 
 static void
@@ -799,11 +869,14 @@ gm200_evaluate_depth_buffer(struct pipe_context *pipe)
    struct nvc0_context *nvc0 = nvc0_context(pipe);
    struct nouveau_pushbuf *push = nvc0->base.pushbuf;
 
-   simple_mtx_lock(&nvc0->screen->state_lock);
-   nvc0_state_validate_3d(nvc0, NVC0_NEW_3D_FRAMEBUFFER);
-   IMMED_NVC0(push, SUBC_3D(0x11fc), 1);
-   PUSH_KICK(push);
-   simple_mtx_unlock(&nvc0->screen->state_lock);
+   nvc0_screen_state_lock(nvc0->screen);
+   if (nvc0_state_validate_3d(nvc0, NVC0_NEW_3D_FRAMEBUFFER)) {
+      IMMED_NVC0(push, SUBC_3D(0x11fc), 1);
+      PUSH_KICK(push);
+   } else {
+      NOUVEAU_ERR("Failed to validate GM200 depth-buffer evaluation state !\n");
+   }
+   nvc0_screen_state_unlock(nvc0->screen);
 }
 
 
@@ -1234,7 +1307,7 @@ nvc0_blitctx_post_blit(struct nvc0_blitctx *blit)
    nvc0->base.pipe.set_min_samples(&nvc0->base.pipe, blit->saved.min_samples);
 }
 
-static void
+static bool
 nvc0_blit_3d(struct nvc0_context *nvc0, const struct pipe_blit_info *info)
 {
    struct nvc0_screen *screen = nvc0->screen;
@@ -1266,7 +1339,15 @@ nvc0_blit_3d(struct nvc0_context *nvc0, const struct pipe_blit_info *info)
 
    nvc0_blitctx_prepare_state(blit);
 
-   nvc0_state_validate_3d(nvc0, ~0);
+   if (!nvc0_state_validate_3d(nvc0, ~0)) {
+      /* Validation also establishes deferred shader-upload visibility on
+       * Switch.  Restore the caller's software state, but do not emit a draw
+       * (or a deferred kick) after that ordering boundary has failed.
+       */
+      NOUVEAU_ERR("Failed to validate 3D blit state !\n");
+      nvc0_blitctx_post_blit(blit);
+      return false;
+   }
 
    x_range = (float)info->src.box.width / (float)info->dst.box.width;
    y_range = (float)info->src.box.height / (float)info->dst.box.height;
@@ -1362,7 +1443,8 @@ nvc0_blit_3d(struct nvc0_context *nvc0, const struct pipe_blit_info *info)
    vbuf = nouveau_scratch_get(&nvc0->base, length, &vtxbuf, &vtxbuf_bo);
    if (!vbuf) {
       assert(vbuf);
-      return;
+      nvc0_blitctx_post_blit(blit);
+      return false;
    }
 
    BCTX_REFN_bo(nvc0->bufctx_3d, 3D_VTX_TMP,
@@ -1453,6 +1535,15 @@ nvc0_blit_3d(struct nvc0_context *nvc0, const struct pipe_blit_info *info)
    if (info->dst.box.z + info->dst.box.depth - 1)
       IMMED_NVC0(push, NVC0_3D(LAYER), 0);
 
+#ifdef __SWITCH__
+   /* The blitter programs are screen-cached and can be selected for
+    * heap-pressure eviction while no context has them bound.  Preserve the
+    * exact logical fence of this direct draw before restoring the caller's
+    * programs, just as the normal draw path does. */
+   nvc0_program_track_use(nvc0, blit->vp);
+   nvc0_program_track_use(nvc0, blit->fp);
+#endif
+
    nvc0_blitctx_post_blit(blit);
 
    /* restore viewport transform */
@@ -1464,6 +1555,8 @@ nvc0_blit_3d(struct nvc0_context *nvc0, const struct pipe_blit_info *info)
        * it's used for writing.
        */
       mt->base.status |= NOUVEAU_BUFFER_STATUS_GPU_READING;
+
+   return true;
 }
 
 static void
@@ -1726,19 +1819,27 @@ nvc0_blit(struct pipe_context *pipe, const struct pipe_blit_info *info)
    if (info->num_window_rectangles > 0 || info->window_rectangle_include)
       eng3d = true;
 
-   simple_mtx_lock(&nvc0->screen->state_lock);
+   nvc0_screen_state_lock(nvc0->screen);
+#ifdef __SWITCH__
+   /* The 2D path does not pass through 3D state validation, and the first
+    * SAMPLECNT method precedes either engine path. */
+   nouveau_pushbuf_bind_context(push, &nvc0->base);
+#endif
    if (nvc0->screen->num_occlusion_queries_active)
       IMMED_NVC0(push, NVC0_3D(SAMPLECNT_ENABLE), 0);
 
+   bool submit = true;
    if (!eng3d)
       nvc0_blit_eng2d(nvc0, info);
    else
-      nvc0_blit_3d(nvc0, info);
+      submit = nvc0_blit_3d(nvc0, info);
 
-   if (nvc0->screen->num_occlusion_queries_active)
-      IMMED_NVC0(push, NVC0_3D(SAMPLECNT_ENABLE), 1);
-   PUSH_KICK(push);
-   simple_mtx_unlock(&nvc0->screen->state_lock);
+   if (submit) {
+      if (nvc0->screen->num_occlusion_queries_active)
+         IMMED_NVC0(push, NVC0_3D(SAMPLECNT_ENABLE), 1);
+      PUSH_KICK(push);
+   }
+   nvc0_screen_state_unlock(nvc0->screen);
 
    NOUVEAU_DRV_STAT(&nvc0->screen->base, tex_blit_count, 1);
 }

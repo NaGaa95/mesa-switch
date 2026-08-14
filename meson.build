@@ -581,7 +581,7 @@ if with_egl
   endif
 
   # All the other platforms can be detected and cannot reach the native platform code
-  _undetectable_platforms = ['x11', 'haiku', 'android', 'surfaceless']
+  _undetectable_platforms = ['x11', 'haiku', 'android', 'switch', 'surfaceless']
 
   # Don't enforce the native platform if none of the undetectable platforms are enabled
   _undetectable_platforms_enabled = []
@@ -2567,6 +2567,13 @@ if with_platform_switch and with_egl
   install_data(
     'OpenGLConfig.cmake',
     install_dir : join_paths(get_option('libdir'), 'cmake', 'OpenGL'),
+  )
+endif
+
+if with_platform_switch and with_nouveau_vk
+  install_data(
+    'VulkanConfig.cmake',
+    install_dir : join_paths(get_option('libdir'), 'cmake', 'Vulkan'),
   )
 endif
 

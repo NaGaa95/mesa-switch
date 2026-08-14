@@ -5,8 +5,8 @@
 #ifndef NVKMD_SWITCH_H
 #define NVKMD_SWITCH_H 1
 
+#include "nouveau/horizon/nouveau_horizon.h"
 #include "nvkmd/nvkmd.h"
-#include "util/vma.h"
 #include "vk_sync.h"
 #include "vk_sync_timeline.h"
 
@@ -26,10 +26,8 @@ struct nvkmd_switch_pdev {
 struct nvkmd_switch_dev {
    struct nvkmd_dev base;
 
-   NvAddressSpace addr_space;
-
-   simple_mtx_t heap_mutex;
-   struct util_vma_heap heap;
+   struct nouveau_horizon_runtime *runtime;
+   struct nouveau_horizon_device *horizon;
 
    /* Persistent four-byte GPU completion payload slabs. */
    simple_mtx_t sync_payload_mutex;
@@ -75,6 +73,15 @@ void nvkmd_switch_sync_import_nvmultifence(struct vk_sync *sync,
  * dummy syncs) when importing fences. */
 bool nvkmd_switch_sync_is_nvfence(const struct vk_sync_type *type);
 
+/* Adapter-neutral forms used by the nvkmd context path.  The NvFence entry
+ * points above remain the WSI boundary only.
+ */
+void nvkmd_switch_sync_import_horizon_fence(
+   struct vk_sync *sync, const struct nouveau_horizon_fence *fence);
+uint32_t nvkmd_switch_sync_peek_horizon_fences(
+   struct vk_sync *sync, uint32_t max_fences,
+   struct nouveau_horizon_fence *fences_out);
+
 /* Copy out the native fence payload currently installed on a vk_sync,
  * without waiting. Returns true iff the sync is a native nvfence-backed
  * binary sync AND a GPU-side fence payload has been imported into it (i.e.
@@ -93,10 +100,23 @@ VkResult nvkmd_switch_sync_copy_payloads(struct vk_device *device,
                                          uint32_t signal_count,
                                          const struct vk_sync_signal *signals);
 
-/* Return the libnx NvMap backing this nvkmd_mem. The pointer is owned by
- * the nvkmd_mem and lives until it is freed. Used by the WSI to register
- * a swapchain image as a scanout buffer with the Horizon compositor.
+/* Return the public NvMap ID backing this nvkmd_mem.  WSI passes the numeric
+ * ID to the compositor without exposing Horizon backend internals.
  */
-NvMap *nvkmd_switch_mem_get_nvmap(struct nvkmd_mem *mem);
+uint32_t nvkmd_switch_mem_get_nvmap_id(struct nvkmd_mem *mem);
+
+/* Thin queue adapters for the process-wide Horizon ZBC snapshot. */
+void nvkmd_switch_dev_get_zbc_state(
+   struct nvkmd_dev *dev, struct nouveau_horizon_zbc_state *state_out);
+uint64_t nvkmd_switch_dev_get_zbc_generation(struct nvkmd_dev *dev);
+void nvkmd_switch_dev_record_zbc_program(struct nvkmd_dev *dev);
+
+/* Destroy a Switch context only when its Horizon channel can prove final
+ * completion.  A false return consumes the channel reference but retains the
+ * adapter context as a quarantine anchor; callers must retain every resource
+ * which may still be referenced by that channel.
+ */
+bool nvkmd_switch_ctx_try_destroy(struct nvkmd_ctx *ctx,
+                                  struct vk_object_base *log_obj);
 
 #endif /* NVKMD_SWITCH_H */

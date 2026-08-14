@@ -246,10 +246,13 @@ nve4_p2mf_push_linear(struct nouveau_context *nv,
    struct nouveau_pushbuf *push = nv->pushbuf;
    uint32_t *src = (uint32_t *)data;
    unsigned count = (size + 3) / 4;
-
    nouveau_bufctx_refn(nvc0->bufctx, 0, dst, domain | NOUVEAU_BO_WR);
    nouveau_pushbuf_bufctx(push, nvc0->bufctx);
-   PUSH_VAL(push);
+   const int validate_ret = PUSH_VAL(push);
+   if (validate_ret) {
+      nouveau_bufctx_reset(nvc0->bufctx, 0);
+      return;
+   }
 
    while (count) {
       unsigned nr = MIN2(count, (NV04_PFIFO_MAX_PACKET_LEN - 1));
@@ -369,6 +372,16 @@ nvc0_mt_sync(struct nvc0_context *nvc0, struct nv50_miptree *mt, unsigned usage)
    return !mt->base.fence_wr || nouveau_fence_wait(mt->base.fence_wr, &nvc0->base.debug);
 }
 
+static inline unsigned
+nvc0_switch_map_access(unsigned access)
+{
+#ifdef __SWITCH__
+   return access;
+#else
+   return 0;
+#endif
+}
+
 void *
 nvc0_miptree_transfer_map(struct pipe_context *pctx,
                           struct pipe_resource *res,
@@ -385,10 +398,18 @@ nvc0_miptree_transfer_map(struct pipe_context *pctx,
    int ret;
    unsigned flags = 0;
 
+   if (usage & PIPE_MAP_READ)
+      flags = NOUVEAU_BO_RD;
+   if (usage & PIPE_MAP_WRITE)
+      flags |= NOUVEAU_BO_WR;
+   if (usage & PIPE_MAP_DONTBLOCK)
+      flags |= NOUVEAU_BO_NOBLOCK;
+
    if (nvc0_mt_transfer_can_map_directly(mt)) {
       ret = !nvc0_mt_sync(nvc0, mt, usage);
       if (!ret)
-         ret = BO_MAP(nvc0->base.screen, mt->base.bo, 0, NULL);
+         ret = BO_MAP(nvc0->base.screen, mt->base.bo,
+                      nvc0_switch_map_access(flags), NULL);
       if (ret &&
           (usage & PIPE_MAP_DIRECTLY))
          return NULL;
@@ -470,15 +491,12 @@ nvc0_miptree_transfer_map(struct pipe_context *pctx,
       tx->rect[1].base = 0;
    }
 
+#ifndef __SWITCH__
    if (tx->rect[1].bo->map) {
       *ptransfer = &tx->base;
       return tx->rect[1].bo->map;
    }
-
-   if (usage & PIPE_MAP_READ)
-      flags = NOUVEAU_BO_RD;
-   if (usage & PIPE_MAP_WRITE)
-      flags |= NOUVEAU_BO_WR;
+#endif
 
    ret = BO_MAP(nvc0->base.screen, tx->rect[1].bo, flags, nvc0->base.client);
    if (ret) {
@@ -502,6 +520,10 @@ nvc0_miptree_transfer_unmap(struct pipe_context *pctx,
    unsigned i;
 
    if (tx->base.usage & PIPE_MAP_DIRECTLY) {
+#ifdef __SWITCH__
+      if (tx->base.usage & PIPE_MAP_WRITE)
+         nouveau_switch_bo_mark_cpu_dirty(mt->base.bo);
+#endif
       pipe_resource_reference(&transfer->resource, NULL);
 
       FREE(tx);

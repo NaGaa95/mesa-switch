@@ -7,6 +7,12 @@
 /build
 /builddir-*
 /mesa-install/
+/mesa-install-*/
+/mesa-unified-install/
+/mesa-unified-install-*/
+/mesa-vulkan-install-*/
+/dist/
+/mesa-*-sdk.zip
 knowledge
 libnx
 libdrm-nouveau

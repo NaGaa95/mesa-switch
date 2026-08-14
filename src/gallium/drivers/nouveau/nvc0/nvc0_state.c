@@ -444,16 +444,23 @@ nvc0_zsa_state_delete(struct pipe_context *pipe, void *hwcso)
 static void
 nvc0_sampler_state_delete(struct pipe_context *pipe, void *hwcso)
 {
+   struct nvc0_context *nvc0 = nvc0_context(pipe);
    unsigned s, i;
 
+#ifdef __SWITCH__
+   nvc0_screen_state_lock(nvc0->screen);
+#endif
    for (s = 0; s < 6; ++s)
-      for (i = 0; i < nvc0_context(pipe)->num_samplers[s]; ++i)
-         if (nvc0_context(pipe)->samplers[s][i] == hwcso)
-            nvc0_context(pipe)->samplers[s][i] = NULL;
+      for (i = 0; i < nvc0->num_samplers[s]; ++i)
+         if (nvc0->samplers[s][i] == hwcso)
+            nvc0->samplers[s][i] = NULL;
 
-   nvc0_screen_tsc_free(nvc0_context(pipe)->screen, nv50_tsc_entry(hwcso));
+   nvc0_screen_tsc_free(nvc0->screen, nv50_tsc_entry(hwcso));
 
    FREE(hwcso);
+#ifdef __SWITCH__
+   nvc0_screen_state_unlock(nvc0->screen);
+#endif
 }
 
 static inline void
@@ -488,28 +495,42 @@ nvc0_bind_sampler_states(struct pipe_context *pipe,
                          mesa_shader_stage shader,
                          unsigned start, unsigned nr, void **samplers)
 {
+   struct nvc0_context *nvc0 = nvc0_context(pipe);
    const unsigned s = nvc0_shader_stage(shader);
 
    assert(start == 0);
-   nvc0_stage_sampler_states_bind(nvc0_context(pipe), s, nr, samplers);
+#ifdef __SWITCH__
+   nvc0_screen_state_lock(nvc0->screen);
+#endif
+   nvc0_stage_sampler_states_bind(nvc0, s, nr, samplers);
 
    if (s == 5)
-      nvc0_context(pipe)->dirty_cp |= NVC0_NEW_CP_SAMPLERS;
+      nvc0->dirty_cp |= NVC0_NEW_CP_SAMPLERS;
    else
-      nvc0_context(pipe)->dirty_3d |= NVC0_NEW_3D_SAMPLERS;
+      nvc0->dirty_3d |= NVC0_NEW_3D_SAMPLERS;
+#ifdef __SWITCH__
+   nvc0_screen_state_unlock(nvc0->screen);
+#endif
 }
 
 
 /* NOTE: only called when not referenced anywhere, won't be bound */
 static void
 nvc0_sampler_view_destroy(struct pipe_context *pipe,
-                          struct pipe_sampler_view *view)
+                           struct pipe_sampler_view *view)
 {
+#ifdef __SWITCH__
+   struct nvc0_context *nvc0 = nvc0_context(pipe);
+   nvc0_screen_state_lock(nvc0->screen);
+#endif
    pipe_resource_reference(&view->texture, NULL);
 
    nvc0_screen_tic_free(nvc0_context(pipe)->screen, nv50_tic_entry(view));
 
    FREE(nv50_tic_entry(view));
+#ifdef __SWITCH__
+   nvc0_screen_state_unlock(nvc0->screen);
+#endif
 }
 
 static inline unsigned
@@ -579,6 +600,9 @@ nvc0_set_sampler_views(struct pipe_context *pipe, mesa_shader_stage shader,
    const unsigned s = nvc0_shader_stage(shader);
 
    assert(start == 0);
+#ifdef __SWITCH__
+   nvc0_screen_state_lock(nvc0->screen);
+#endif
    const unsigned changes =
       nvc0_stage_set_sampler_views(nvc0, s, nr, views);
    if (changes) {
@@ -587,6 +611,9 @@ nvc0_set_sampler_views(struct pipe_context *pipe, mesa_shader_stage shader,
       else
          nvc0->dirty_3d |= NVC0_NEW_3D_TEXTURES;
    }
+#ifdef __SWITCH__
+   nvc0_screen_state_unlock(nvc0->screen);
+#endif
 }
 
 /* ============================= SHADERS =======================================
@@ -634,9 +661,9 @@ nvc0_sp_state_delete(struct pipe_context *pipe, void *hwcso)
    struct nvc0_context *nvc0 = nvc0_context(pipe);
    struct nvc0_program *prog = (struct nvc0_program *)hwcso;
 
-   simple_mtx_lock(&nvc0->screen->state_lock);
+   nvc0_screen_state_lock(nvc0->screen);
    nvc0_program_destroy(nvc0_context(pipe), prog);
-   simple_mtx_unlock(&nvc0->screen->state_lock);
+   nvc0_screen_state_unlock(nvc0->screen);
 
    ralloc_free(prog->nir);
    FREE(prog);
@@ -1158,6 +1185,14 @@ nvc0_set_transform_feedback_targets(struct pipe_context *pipe,
 
    assert(num_targets <= 4);
 
+#ifdef __SWITCH__
+   /* Saving an old transform-feedback offset emits SERIALIZE before the query
+    * callback is reached.  Cover both packets with the same bound transaction;
+    * the query wrapper then recurses through this lock safely. */
+   nvc0_screen_state_lock(nvc0->screen);
+   nouveau_pushbuf_bind_context(nvc0->base.pushbuf, &nvc0->base);
+#endif
+
    for (i = 0; i < num_targets; ++i) {
       const bool changed = nvc0->tfbbuf[i] != targets[i];
       const bool append = (offsets[i] == ((unsigned)-1));
@@ -1186,6 +1221,9 @@ nvc0_set_transform_feedback_targets(struct pipe_context *pipe,
       nouveau_bufctx_reset(nvc0->bufctx_3d, NVC0_BIND_3D_TFB);
       nvc0->dirty_3d |= NVC0_NEW_3D_TFB_TARGETS;
    }
+#ifdef __SWITCH__
+   nvc0_screen_state_unlock(nvc0->screen);
+#endif
 }
 
 static bool
@@ -1284,18 +1322,28 @@ nvc0_set_shader_images(struct pipe_context *pipe,
                        unsigned unbind_num_trailing_slots,
                        const struct pipe_image_view *images)
 {
+   struct nvc0_context *nvc0 = nvc0_context(pipe);
    const unsigned s = nvc0_shader_stage(shader);
 
-   nvc0_bind_images_range(nvc0_context(pipe), s, start + nr,
-                          unbind_num_trailing_slots, NULL);
+#ifdef __SWITCH__
+   nvc0_screen_state_lock(nvc0->screen);
+#endif
+   nvc0_bind_images_range(nvc0, s, start + nr,
+                           unbind_num_trailing_slots, NULL);
 
-   if (!nvc0_bind_images_range(nvc0_context(pipe), s, start, nr, images))
-      return;
+   if (!nvc0_bind_images_range(nvc0, s, start, nr, images))
+      goto out;
 
    if (s == 5)
-      nvc0_context(pipe)->dirty_cp |= NVC0_NEW_CP_SURFACES;
+      nvc0->dirty_cp |= NVC0_NEW_CP_SURFACES;
    else
-      nvc0_context(pipe)->dirty_3d |= NVC0_NEW_3D_SURFACES;
+      nvc0->dirty_3d |= NVC0_NEW_3D_SURFACES;
+
+out:
+   (void)0;
+#ifdef __SWITCH__
+   nvc0_screen_state_unlock(nvc0->screen);
+#endif
 }
 
 static bool

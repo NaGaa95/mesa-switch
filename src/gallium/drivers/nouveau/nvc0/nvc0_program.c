@@ -758,6 +758,204 @@ out:
    return !ret;
 }
 
+#ifdef __SWITCH__
+static bool
+nvc0_switch_text_device_lost(struct nvc0_screen *screen)
+{
+   bool lost;
+
+   simple_mtx_lock(&screen->base.fence.lock);
+   lost = nouveau_switch_pushbuf_device_lost(screen->base.pushbuf);
+   simple_mtx_unlock(&screen->base.fence.lock);
+   return lost;
+}
+
+static void
+nvc0_program_drop_last_use(struct nvc0_screen *screen,
+                           struct nvc0_program *prog)
+{
+   if (prog->switch_last_use_fence)
+      nouveau_fence_ref(NULL, &prog->switch_last_use_fence, &screen->base);
+}
+
+void
+nvc0_program_track_use(struct nvc0_context *nvc0, struct nvc0_program *prog)
+{
+   if (!prog || !prog->mem ||
+       prog->switch_last_use_fence == nvc0->base.fence)
+      return;
+
+   simple_mtx_assert_locked(&nvc0->screen->state_lock);
+   nouveau_fence_ref(nvc0->base.fence, &prog->switch_last_use_fence,
+                     &nvc0->screen->base);
+}
+
+void
+nvc0_program_reclaim_retired(struct nvc0_screen *screen, unsigned max_scan)
+{
+   struct nvc0_switch_text_stats *stats = &screen->switch_text_stats;
+   struct nvc0_switch_text_retirement *retired, *next;
+   unsigned scanned = 0;
+
+   simple_mtx_assert_locked(&screen->state_lock);
+   if (nvc0_switch_text_device_lost(screen))
+      return;
+
+   LIST_FOR_EACH_ENTRY_SAFE(retired, next, &screen->switch_text_retirements,
+                            head) {
+      if (max_scan && scanned++ >= max_scan)
+         break;
+      if (retired->fence && !nouveau_fence_signalled(retired->fence))
+         continue;
+
+      list_del(&retired->head);
+      nouveau_heap_free(&retired->mem);
+      if (retired->fence)
+         nouveau_fence_ref(NULL, &retired->fence, &screen->base);
+      if (screen->switch_diagnostics_enabled)
+         stats->reclaimed_frees++;
+      assert(stats->pending_retirements > 0);
+      stats->pending_retirements--;
+      FREE(retired);
+   }
+}
+
+static unsigned
+nvc0_program_reclaim_retired_after_barrier(struct nvc0_screen *screen)
+{
+   struct nvc0_switch_text_stats *stats = &screen->switch_text_stats;
+   struct nvc0_switch_text_retirement *retired, *next;
+   unsigned reclaimed = 0;
+
+   LIST_FOR_EACH_ENTRY_SAFE(retired, next, &screen->switch_text_retirements,
+                            head) {
+      list_del(&retired->head);
+      nouveau_heap_free(&retired->mem);
+      if (retired->fence)
+         nouveau_fence_ref(NULL, &retired->fence, &screen->base);
+      if (screen->switch_diagnostics_enabled)
+         stats->reclaimed_frees++;
+      assert(stats->pending_retirements > 0);
+      stats->pending_retirements--;
+      reclaimed++;
+      FREE(retired);
+   }
+   return reclaimed;
+}
+
+static bool
+nvc0_program_full_text_barrier(struct nvc0_context *nvc0, bool pressure)
+{
+   struct nvc0_screen *screen = nvc0->screen;
+   struct nvc0_switch_text_stats *stats = &screen->switch_text_stats;
+   struct nouveau_pushbuf *push = nvc0->base.pushbuf;
+   const bool uploads_pending = screen->switch_shader_upload_pending;
+   int ret;
+
+   simple_mtx_assert_locked(&screen->state_lock);
+   nouveau_pushbuf_bind_context(push, &nvc0->base);
+
+   /* One in-stream visibility command covers every P2MF text upload queued
+    * since the previous physical boundary.  The following full barrier makes
+    * that batch precede its first shader consumer in shared-channel order.
+    */
+   if (uploads_pending)
+      IMMED_NVC0(push, NVC0_3D(MEM_BARRIER), 0x1011);
+
+   ret = PUSH_KICK_FULL_BARRIER(push);
+   if (ret) {
+      if (screen->switch_diagnostics_enabled) {
+         if (uploads_pending)
+            stats->upload_barrier_failures++;
+         if (pressure)
+            stats->pressure_barrier_failures++;
+      }
+      _debug_printf("nouveau/switch: shader text barrier failed ctx=%p "
+                    "pressure=%u error=%d\n", (void *)nvc0, pressure, ret);
+      return false;
+   }
+
+   if (uploads_pending) {
+      screen->switch_shader_upload_pending = false;
+      if (screen->switch_diagnostics_enabled)
+         stats->upload_batches++;
+   }
+   if (pressure && screen->switch_diagnostics_enabled)
+      stats->pressure_barriers++;
+
+   return true;
+}
+
+bool
+nvc0_program_flush_uploads(struct nvc0_context *nvc0)
+{
+   if (!nvc0->screen->switch_shader_upload_pending)
+      return true;
+   return nvc0_program_full_text_barrier(nvc0, false);
+}
+
+void
+nvc0_program_fini_retirements(struct nvc0_screen *screen)
+{
+   struct nvc0_switch_text_stats *stats = &screen->switch_text_stats;
+   struct nvc0_switch_text_retirement *retired, *next;
+
+   nvc0_screen_state_lock(screen);
+   nvc0_program_reclaim_retired(screen, 0);
+
+   /* Screen teardown has no future heap consumer.  Retained allocations whose
+    * completion cannot be proven are deliberately not returned to the heap;
+    * discard only their bookkeeping before the heap and text BO go away.
+    */
+   LIST_FOR_EACH_ENTRY_SAFE(retired, next, &screen->switch_text_retirements,
+                            head) {
+      list_del(&retired->head);
+      if (retired->fence)
+         nouveau_fence_ref(NULL, &retired->fence, &screen->base);
+      if (screen->switch_diagnostics_enabled)
+         stats->quarantined_frees++;
+      assert(stats->pending_retirements > 0);
+      stats->pending_retirements--;
+      FREE(retired);
+   }
+   nvc0_screen_state_unlock(screen);
+
+   if (screen->switch_diagnostics_enabled) {
+      _debug_printf(
+         "nouveau/switch: shader text final uploads=%llu batches=%llu "
+         "upload_failures=%llu frees=immediate:%llu,deferred:%llu,"
+         "reclaimed:%llu,quarantined:%llu pressure=barriers:%llu,"
+         "reclaimed:%llu,failures:%llu peak=%u pending=%u bytes=%llu\n",
+         (unsigned long long)stats->uploads,
+         (unsigned long long)stats->upload_batches,
+         (unsigned long long)stats->upload_barrier_failures,
+         (unsigned long long)stats->immediate_frees,
+         (unsigned long long)stats->deferred_frees,
+         (unsigned long long)stats->reclaimed_frees,
+         (unsigned long long)stats->quarantined_frees,
+         (unsigned long long)stats->pressure_barriers,
+         (unsigned long long)stats->pressure_reclaims,
+         (unsigned long long)stats->pressure_barrier_failures,
+         stats->peak_retirements, stats->pending_retirements,
+         (unsigned long long)stats->retired_bytes);
+   }
+}
+#else
+void
+nvc0_program_track_use(struct nvc0_context *nvc0, struct nvc0_program *prog)
+{
+   (void)nvc0;
+   (void)prog;
+}
+
+bool
+nvc0_program_flush_uploads(struct nvc0_context *nvc0)
+{
+   (void)nvc0;
+   return true;
+}
+#endif
+
 static inline int
 nvc0_program_alloc_code(struct nvc0_context *nvc0, struct nvc0_program *prog)
 {
@@ -784,6 +982,9 @@ nvc0_program_alloc_code(struct nvc0_context *nvc0, struct nvc0_program *prog)
    ret = nouveau_heap_alloc(screen->text_heap, size, prog, &prog->mem);
    if (ret)
       return ret;
+#ifdef __SWITCH__
+   prog->switch_screen = screen;
+#endif
    prog->code_base = prog->mem->start;
 
    if (!is_cp) {
@@ -874,62 +1075,157 @@ nvc0_program_upload(struct nvc0_context *nvc0, struct nvc0_program *prog)
    }
 
    simple_mtx_assert_locked(&nvc0->screen->state_lock);
+#ifdef __SWITCH__
+   if (unlikely(screen->switch_shader_library_failed)) {
+      NOUVEAU_ERR("shader text generation has an incomplete builtin library\n");
+      return false;
+   }
+#endif
+   if (unlikely(prog->relocs && !screen->lib_code)) {
+      NOUVEAU_ERR("shader requires an unavailable builtin library\n");
+      return false;
+   }
+#ifdef __SWITCH__
+   /* Poll exact last-use fences without waiting.  This is deliberately done
+    * under state_lock (state_lock -> fence.lock is the established order), not
+    * from a fence-work callback which runs with fence.lock held.
+    */
+   nvc0_program_reclaim_retired(screen, 64);
+#endif
    ret = nvc0_program_alloc_code(nvc0, prog);
    if (ret) {
-      struct nouveau_heap *heap = screen->text_heap;
-      struct nvc0_program *progs[] = { /* Sorted accordingly to SP_START_ID */
-         nvc0->compprog, nvc0->vertprog, nvc0->tctlprog,
-         nvc0->tevlprog, nvc0->gmtyprog, nvc0->fragprog
-      };
+       struct nouveau_heap *heap = screen->text_heap;
+       struct nvc0_program *progs[] = { /* Sorted accordingly to SP_START_ID */
+          nvc0->compprog, nvc0->vertprog,
+          nvc0->tctlprog ? nvc0->tctlprog : nvc0->tcp_empty,
+          nvc0->tevlprog, nvc0->gmtyprog, nvc0->fragprog
+       };
+#ifdef __SWITCH__
+      bool barrier_done = false;
 
-      /* Note that the code library, which is allocated before anything else,
-       * does not have a priv pointer. We can stop once we hit it.
+      /* Retired ranges are the cheapest pressure relief.  One channel-ordered
+       * full barrier proves that all older consumers precede any subsequent
+       * P2MF overwrite, so the ranges can be returned without a CPU wait.
        */
-      while (heap->next && heap->next->priv) {
-         struct nvc0_program *evict = heap->next->priv;
-         nouveau_heap_free(&evict->mem);
-      }
-      debug_printf("WARNING: out of code space, evicting all shaders.\n");
-
-      /* Make sure to synchronize before deleting the code segment. */
-      IMMED_NVC0(nvc0->base.pushbuf, NVC0_3D(SERIALIZE), 0);
-
-      if ((screen->text->size << 1) <= (1 << 23)) {
-         ret = nvc0_screen_resize_text_area(screen, nvc0->base.pushbuf, screen->text->size << 1);
-         if (ret) {
-            NOUVEAU_ERR("Error allocating TEXT area: %d\n", ret);
+      if (!list_is_empty(&screen->switch_text_retirements)) {
+         if (!nvc0_program_full_text_barrier(nvc0, true))
             return false;
-         }
-
-         /* Re-upload the builtin function into the new code segment. */
-         nvc0_program_library_upload(nvc0);
+         barrier_done = true;
+         const unsigned reclaimed =
+            nvc0_program_reclaim_retired_after_barrier(screen);
+         if (screen->switch_diagnostics_enabled)
+            screen->switch_text_stats.pressure_reclaims += reclaimed;
+         ret = nvc0_program_alloc_code(nvc0, prog);
       }
+#endif
 
-      ret = nvc0_program_alloc_code(nvc0, prog);
       if (ret) {
-         NOUVEAU_ERR("shader too large (0x%x) to fit in code space ?\n", size);
-         return false;
-      }
+         /* Establish a GPU boundary before any active or quarantined text
+          * range can be reused by the P2MF uploads below.
+          */
+#ifdef __SWITCH__
+         if (!barrier_done && !nvc0_program_full_text_barrier(nvc0, true))
+            return false;
+#else
+         IMMED_NVC0(nvc0->base.pushbuf, NVC0_3D(SERIALIZE), 0);
+#endif
 
-      /* All currently bound shaders have to be reuploaded. */
-      for (int i = 0; i < ARRAY_SIZE(progs); i++) {
-         if (!progs[i] || progs[i] == prog)
-            continue;
+         /* Free every shader allocation while retaining the builtin library.
+          * A priv-less in-use block is a previously quarantined shader range;
+          * the successful barrier above now makes it safe to recover too.
+          * Mark every bound stage dirty before making this destructive: any
+          * later allocation failure must force a complete retry rather than
+          * leave a previously-clean stage pointing at reclaimed text.
+          */
+         nvc0->dirty_3d |= NVC0_NEW_3D_VERTPROG |
+                           NVC0_NEW_3D_TCTLPROG |
+                           NVC0_NEW_3D_TEVLPROG |
+                           NVC0_NEW_3D_GMTYPROG |
+                           NVC0_NEW_3D_FRAGPROG;
+         nvc0->dirty_cp |= NVC0_NEW_CP_PROGRAM;
+         for (;;) {
+            struct nouveau_heap *mem = heap->next;
+            while (mem && (!mem->in_use || mem == screen->lib_code))
+               mem = mem->next;
+            if (!mem)
+               break;
 
-         ret = nvc0_program_alloc_code(nvc0, progs[i]);
+            if (mem->priv) {
+               struct nvc0_program *evict = mem->priv;
+#ifdef __SWITCH__
+               nvc0_program_drop_last_use(screen, evict);
+#endif
+               nouveau_heap_free(&evict->mem);
+            } else {
+               nouveau_heap_free(&mem);
+            }
+         }
+         debug_printf("WARNING: out of code space, evicting all shaders.\n");
+
+         if ((screen->text->size << 1) <= (1 << 23)) {
+            ret = nvc0_screen_resize_text_area(
+               screen, nvc0->base.pushbuf, screen->text->size << 1);
+            if (ret) {
+               NOUVEAU_ERR("Error allocating TEXT area: %d\n", ret);
+               return false;
+            }
+
+            /* Re-upload the builtin function into the new code segment. */
+            if (!nvc0_program_library_upload(nvc0)) {
+               NOUVEAU_ERR("failed to re-upload the builtin shader library\n");
+               return false;
+            }
+         }
+
+         ret = nvc0_program_alloc_code(nvc0, prog);
          if (ret) {
-            NOUVEAU_ERR("failed to re-upload a shader after code eviction.\n");
+            NOUVEAU_ERR("shader too large (0x%x) to fit in code space ?\n",
+                        size);
             return false;
          }
-         nvc0_program_upload_code(nvc0, progs[i]);
 
-         if (progs[i]->type == MESA_SHADER_COMPUTE) {
-            /* Caches have to be invalidated but the CP_START_ID will be
-             * updated in the launch_grid functions. */
-            BEGIN_NVC0(nvc0->base.pushbuf, NVC0_CP(FLUSH), 1);
-            PUSH_DATA (nvc0->base.pushbuf, NVC0_COMPUTE_FLUSH_CODE);
-         } else {
-            nvc0_program_sp_start_id(nvc0, i, progs[i]);
+         /* Allocate every bound shader before emitting any P2MF upload.  If
+          * one allocation fails, all allocations can then be rolled back
+          * without leaving queued writes targeting ranges returned to the
+          * heap or a non-NULL mem pointer containing uninitialized code.
+          */
+         for (int i = 0; i < ARRAY_SIZE(progs); i++) {
+            if (!progs[i] || progs[i] == prog)
+               continue;
+
+            ret = nvc0_program_alloc_code(nvc0, progs[i]);
+            if (ret) {
+               NOUVEAU_ERR("failed to re-upload a shader after code "
+                           "eviction.\n");
+               for (int j = 0; j < ARRAY_SIZE(progs); j++) {
+                  if (progs[j] && progs[j] != prog)
+                     nouveau_heap_free(&progs[j]->mem);
+               }
+               nouveau_heap_free(&prog->mem);
+               return false;
+            }
+         }
+
+         /* All currently bound shaders have to be reuploaded. */
+         for (int i = 0; i < ARRAY_SIZE(progs); i++) {
+            if (!progs[i] || progs[i] == prog)
+               continue;
+
+            nvc0_program_upload_code(nvc0, progs[i]);
+#ifdef __SWITCH__
+            screen->switch_shader_upload_pending = true;
+            if (screen->switch_diagnostics_enabled)
+               screen->switch_text_stats.uploads++;
+#endif
+
+            if (progs[i]->type == MESA_SHADER_COMPUTE) {
+               /* Caches have to be invalidated but the CP_START_ID will be
+                * updated in the launch_grid functions. */
+               BEGIN_NVC0(nvc0->base.pushbuf, NVC0_CP(FLUSH), 1);
+               PUSH_DATA (nvc0->base.pushbuf, NVC0_COMPUTE_FLUSH_CODE);
+            } else {
+               nvc0_program_sp_start_id(nvc0, i, progs[i]);
+            }
          }
       }
    }
@@ -941,14 +1237,22 @@ nvc0_program_upload(struct nvc0_context *nvc0, struct nvc0_program *prog)
       nvc0_program_dump(prog);
 #endif
 
+#ifdef __SWITCH__
+   /* Defer the expensive physical visibility boundary until validation has
+    * queued every shader needed by the next draw/dispatch. */
+   screen->switch_shader_upload_pending = true;
+   if (screen->switch_diagnostics_enabled)
+      screen->switch_text_stats.uploads++;
+#else
    BEGIN_NVC0(nvc0->base.pushbuf, NVC0_3D(MEM_BARRIER), 1);
    PUSH_DATA (nvc0->base.pushbuf, 0x1011);
+#endif
 
    return true;
 }
 
 /* Upload code for builtin functions like integer division emulation. */
-void
+bool
 nvc0_program_library_upload(struct nvc0_context *nvc0)
 {
    struct nvc0_screen *screen = nvc0->screen;
@@ -956,22 +1260,158 @@ nvc0_program_library_upload(struct nvc0_context *nvc0)
    uint32_t size;
    const uint32_t *code;
 
+   simple_mtx_assert_locked(&screen->state_lock);
+
+#ifdef __SWITCH__
+   if (screen->switch_shader_library_failed)
+      return false;
+#endif
    if (screen->lib_code)
-      return;
+      return true;
 
    nv50_ir_get_target_library(screen->base.device->chipset, &code, &size);
    if (!size)
-      return;
+      return true;
 
    ret = nouveau_heap_alloc(screen->text_heap, align(size, 0x100), NULL,
                             &screen->lib_code);
    if (ret)
-      return;
+      return false;
 
    nvc0->base.push_data(&nvc0->base,
                         screen->text, screen->lib_code->start, NV_VRAM_DOMAIN(&screen->base),
                         size, code);
+#ifdef __SWITCH__
+   screen->switch_shader_upload_pending = true;
+   if (screen->switch_diagnostics_enabled)
+      screen->switch_text_stats.uploads++;
+
+   simple_mtx_lock(&screen->base.fence.lock);
+   ret = nouveau_switch_pushbuf_get_error(nvc0->base.pushbuf);
+   simple_mtx_unlock(&screen->base.fence.lock);
+   if (ret) {
+      /* The upload may have reached native submission before the durable
+       * channel error was observed.  Keep its heap node occupied, but never
+       * advertise this partial library as ready or recycle it for a retry.
+       */
+      screen->switch_shader_library_failed = true;
+      return false;
+   }
+#endif
    /* no need for a memory barrier, will be emitted with first program */
+   return true;
+}
+
+bool
+nvc0_program_release_code(struct nvc0_context *nvc0,
+                          struct nvc0_program *prog)
+{
+   if (!prog->mem)
+      return true;
+
+#ifdef __SWITCH__
+   struct nvc0_screen *screen = nvc0 ? nvc0->screen : prog->switch_screen;
+   struct nouveau_heap *mem = prog->mem;
+   struct nouveau_fence *fence = prog->switch_last_use_fence;
+   bool locked_here = false;
+
+   if (!screen) {
+      /* There is no allocator owner with which to prove completion.  Detach
+       * the state object and leave the range occupied permanently.
+       */
+      mem->priv = NULL;
+      prog->mem = NULL;
+      prog->switch_last_use_fence = NULL;
+      if (fence)
+         nouveau_fence_ref(NULL, &fence, fence->screen);
+      return false;
+   }
+
+   if (nvc0) {
+      simple_mtx_assert_locked(&screen->state_lock);
+   } else {
+      nvc0_screen_state_lock(screen);
+      locked_here = true;
+   }
+
+   const uint32_t start = mem->start;
+   const uint32_t mem_size = mem->size;
+
+   /* Detach before the caller destroys or reinitializes the program object.
+    * From this point ownership is either local or in the screen retirement
+    * list, never through mem->priv.
+    */
+   mem->priv = NULL;
+   prog->mem = NULL;
+   prog->switch_last_use_fence = NULL;
+
+   if (nvc0_switch_text_device_lost(screen)) {
+      if (screen->switch_diagnostics_enabled)
+         screen->switch_text_stats.quarantined_frees++;
+      if (fence)
+         nouveau_fence_ref(NULL, &fence, &screen->base);
+      _debug_printf("nouveau/switch: quarantined shader text range "
+                    "ctx=%p start=0x%x size=0x%x reason=device-lost\n",
+                    (void *)nvc0, start, mem_size);
+      if (locked_here)
+         nvc0_screen_state_unlock(screen);
+      return false;
+   }
+
+   if (!fence || nouveau_fence_signalled(fence)) {
+      nouveau_heap_free(&mem);
+      if (fence)
+         nouveau_fence_ref(NULL, &fence, &screen->base);
+      if (screen->switch_diagnostics_enabled)
+         screen->switch_text_stats.immediate_frees++;
+      if (locked_here)
+         nvc0_screen_state_unlock(screen);
+      return true;
+   }
+
+   struct nvc0_switch_text_retirement *retired =
+      CALLOC_STRUCT(nvc0_switch_text_retirement);
+   if (!retired) {
+      /* Allocation metadata is intentionally leaked in-use.  Reusing it
+       * without a retained exact fence would be unsafe.
+       */
+      if (screen->switch_diagnostics_enabled)
+         screen->switch_text_stats.quarantined_frees++;
+      nouveau_fence_ref(NULL, &fence, &screen->base);
+      _debug_printf("nouveau/switch: quarantined shader text range "
+                    "ctx=%p start=0x%x size=0x%x reason=retire-oom\n",
+                    (void *)nvc0, start, mem_size);
+      if (locked_here)
+         nvc0_screen_state_unlock(screen);
+      return true;
+   }
+
+   retired->mem = mem;
+   retired->fence = fence; /* transfer the program's existing reference */
+   retired->start = start;
+   retired->size = mem_size;
+   list_addtail(&retired->head, &screen->switch_text_retirements);
+
+   struct nvc0_switch_text_stats *stats = &screen->switch_text_stats;
+   if (screen->switch_diagnostics_enabled) {
+      stats->deferred_frees++;
+      stats->retired_bytes += mem_size;
+   }
+   stats->pending_retirements++;
+   if (screen->switch_diagnostics_enabled) {
+      stats->peak_retirements =
+         MAX2(stats->peak_retirements, stats->pending_retirements);
+   }
+
+   if (locked_here)
+      nvc0_screen_state_unlock(screen);
+   return true;
+#else
+   if (nvc0)
+      simple_mtx_assert_locked(&nvc0->screen->state_lock);
+   nouveau_heap_free(&prog->mem);
+   return true;
+#endif
 }
 
 void
@@ -980,16 +1420,20 @@ nvc0_program_destroy(struct nvc0_context *nvc0, struct nvc0_program *prog)
    struct nir_shader *nir = prog->nir;
    const uint8_t type = prog->type;
 
-   if (prog->mem) {
-      if (nvc0)
-         simple_mtx_assert_locked(&nvc0->screen->state_lock);
-      nouveau_heap_free(&prog->mem);
+   if (prog->mem)
+      (void)nvc0_program_release_code(nvc0, prog);
+#ifdef __SWITCH__
+   if (prog->switch_last_use_fence) {
+      struct nvc0_screen *screen = nvc0 ? nvc0->screen : prog->switch_screen;
+      if (screen)
+         nouveau_fence_ref(NULL, &prog->switch_last_use_fence, &screen->base);
    }
+#endif
    FREE(prog->code); /* may be 0 for hardcoded shaders */
    FREE(prog->relocs);
    FREE(prog->fixups);
    if (prog->tfb) {
-      if (nvc0->state.tfb == prog->tfb)
+      if (nvc0 && nvc0->state.tfb == prog->tfb)
          nvc0->state.tfb = NULL;
       FREE(prog->tfb);
    }

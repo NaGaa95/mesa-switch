@@ -156,6 +156,9 @@ struct glthread_batch
     */
    unsigned used;
 
+   /** Diagnostic timestamp set immediately before queue submission. */
+   uint64_t perf_submit_ns;
+
    /** Data contained in the command buffer. */
    uint64_t buffer[MARSHAL_MAX_CMD_BUFFER_SIZE / 8];
 };
@@ -207,6 +210,33 @@ struct glthread_state
    bool enabled;
    bool inside_begin_end;
    bool thread_sched_enabled;
+
+   /** Opt-in MESA_GLTHREAD_PERF queue/worker/synchronization telemetry. */
+   bool perf_enabled;
+   uint64_t perf_start_ns;
+   uint64_t perf_last_report_ns;
+   struct {
+      uint64_t submit_batches;
+      uint64_t submit_words;
+      uint64_t enqueue_ns;
+      uint64_t enqueue_max_ns;
+      uint64_t worker_batches;
+      uint64_t worker_commands;
+      uint64_t worker_words;
+      uint64_t worker_ns;
+      uint64_t worker_max_ns;
+      uint64_t queue_latency_ns;
+      uint64_t queue_latency_max_ns;
+      uint64_t direct_batches;
+      uint64_t direct_commands;
+      uint64_t direct_words;
+      uint64_t direct_ns;
+      uint64_t direct_max_ns;
+      uint64_t finish_calls;
+      uint64_t wait_calls;
+      uint64_t wait_ns;
+      uint64_t wait_max_ns;
+   } perf;
 
    /** Display lists. */
    GLenum16 ListMode; /**< Zero if not inside display list, else list mode. */

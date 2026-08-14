@@ -7,28 +7,18 @@
 
 #include "nvk_device.h"
 #include "vk_log.h"
-#include "vk_sync_dummy.h"
 #include "util/cnd_monotonic.h"
 #include "util/os_time.h"
 #include "util/u_memory.h"
 #include "util/macros.h"
 #include "util/timespec.h"
 
-#include <limits.h>
 #include <string.h>
-
-/* Class IDs for GM20B (Tegra X1) — see src/nouveau/drm/nvif/class.h */
-#define NVKMD_SWITCH_CLS_ENG3D    0xb197 /* MAXWELL_B */
-#define NVKMD_SWITCH_CLS_COMPUTE  0xb1c0 /* MAXWELL_COMPUTE_B */
-#define NVKMD_SWITCH_CLS_COPY     0xb0b5 /* MAXWELL_DMA_COPY_A */
-#define NVKMD_SWITCH_CLS_ENG2D    0x902d /* FERMI_TWOD_A */
-#define NVKMD_SWITCH_CLS_M2MF     0xa140 /* KEPLER_INLINE_TO_MEMORY_B */
-#define NVKMD_SWITCH_CLS_GPFIFO   0xb06f /* MAXWELL_CHANNEL_GPFIFO_A */
 
 /* Horizon maps every nvkmd memory allocation at the 64 KiB GPU bind
  * granularity.  A native-fence sync only needs one four-byte completion
  * payload, so allocating one BO per sync wastes almost the entire mapping and
- * repeats NvMap, VA-allocation and address-space-map work on every submit.
+ * repeats shared-backend memory and VA-allocation work on every submit.
  *
  * Keep slots on separate 64-byte lines.  The memory is CPU-uncached and
  * GPU-uncached, so this is not required for cache coherence, but it prevents
@@ -67,22 +57,22 @@ struct nvkmd_switch_sync_payload_slab {
  *  - init():   fence not present, not signaled.
  *  - signal(): CPU-side pre-signal (used by runtime for reset/initial
  *              value paths). Marks `signaled=true` without a native fence.
- *  - import(): called from the ctx submit path right after
- *              nvGpuChannelGetFence() or from WSI acquire import. Installs
- *              the native fence payload and wakes any CPU-side waiters that
- *              were blocking on the condvar.
+ *  - import(): called from the ctx submit path with a Horizon fence, or from
+ *              WSI acquire with the equivalent libnx payload. Installs the
+ *              adapter-neutral fence and wakes CPU-side waiters.
  *  - reset():  clears both fence and signaled state.
- *  - wait():   if a native fence payload is installed, delegates to
- *              nvMultiFenceWait() (dropping the mutex first to avoid
- *              blocking import() broadcasts). Otherwise spins on the
- *              condvar waiting for either a CPU signal or a GPU-side
- *              fence import.
+ *  - wait():   if a native fence payload is installed, delegates each fence
+ *              to the shared Horizon wait primitive (dropping the mutex
+ *              first). Otherwise it blocks on the condvar for a CPU signal
+ *              or a GPU-side fence import.
  */
 struct nvkmd_switch_sync {
    struct vk_sync sync;
    mtx_t mutex;
    struct u_cnd_monotonic cond;
-   NvMultiFence fence;
+   struct nouveau_horizon_device *horizon;
+   struct nouveau_horizon_fence fences[4];
+   uint32_t fence_count;
    struct nvkmd_switch_sync_payload_slab *payload_slab;
    struct nvkmd_mem *payload_mem;
    uint16_t payload_slot;
@@ -236,36 +226,41 @@ nvkmd_switch_payload_reached(uint32_t payload, uint32_t wait_value)
 }
 
 static void
-nvkmd_switch_multifence_reset(NvMultiFence *fence)
+nvkmd_switch_fences_reset(struct nvkmd_switch_sync *sync)
 {
-   memset(fence, 0, sizeof(*fence));
-   for (uint32_t i = 0; i < ARRAY_SIZE(fence->fences); i++)
-      fence->fences[i].id = UINT32_MAX;
+   sync->fence_count = 0;
+   for (uint32_t i = 0; i < ARRAY_SIZE(sync->fences); i++) {
+      sync->fences[i].id = NOUVEAU_HORIZON_INVALID_FENCE_ID;
+      sync->fences[i].value = 0;
+   }
 }
 
 static uint32_t
-nvkmd_switch_multifence_copy_valid(NvMultiFence *dst, const NvMultiFence *src)
+nvkmd_switch_fences_import_native(struct nvkmd_switch_sync *dst,
+                                  const NvMultiFence *src)
 {
-   nvkmd_switch_multifence_reset(dst);
+   nvkmd_switch_fences_reset(dst);
 
    if (src == NULL)
       return 0;
 
    const uint32_t src_count = MIN2(src->num_fences, ARRAY_SIZE(src->fences));
-   uint32_t dst_count = 0;
 
    for (uint32_t i = 0; i < src_count; i++) {
       if ((int32_t)src->fences[i].id < 0)
          continue;
 
-      if (dst_count >= ARRAY_SIZE(dst->fences))
+      if (dst->fence_count >= ARRAY_SIZE(dst->fences))
          break;
 
-      dst->fences[dst_count++] = src->fences[i];
+      dst->fences[dst->fence_count++] =
+         (struct nouveau_horizon_fence) {
+            .id = src->fences[i].id,
+            .value = src->fences[i].value,
+         };
    }
 
-   dst->num_fences = dst_count;
-   return dst_count;
+   return dst->fence_count;
 }
 
 static struct nvkmd_switch_sync *
@@ -334,7 +329,8 @@ nvkmd_switch_sync_init(struct vk_device *device,
    ssync->has_payload_wait = initial_value != 0;
    *ssync->payload = ssync->next_payload_value;
 
-   nvkmd_switch_multifence_reset(&ssync->fence);
+   ssync->horizon = nouveau_horizon_device_ref(sdev->horizon);
+   nvkmd_switch_fences_reset(ssync);
    ssync->signaled = initial_value != 0;
    return VK_SUCCESS;
 }
@@ -354,6 +350,7 @@ nvkmd_switch_sync_finish(struct vk_device *device,
       nvkmd_mem_unref(ssync->payload_mem);
    }
 
+   nouveau_horizon_device_put(ssync->horizon);
    u_cnd_monotonic_destroy(&ssync->cond);
    mtx_destroy(&ssync->mutex);
 }
@@ -367,7 +364,7 @@ nvkmd_switch_sync_signal(struct vk_device *device,
    int ret;
 
    mtx_lock(&ssync->mutex);
-   if (ssync->fence.num_fences == 0) {
+   if (ssync->fence_count == 0) {
       ssync->next_payload_value++;
       if (ssync->next_payload_value == 0)
          ssync->next_payload_value = 1;
@@ -394,7 +391,7 @@ nvkmd_switch_sync_reset(struct vk_device *device,
 
    mtx_lock(&ssync->mutex);
    ssync->signaled = false;
-   nvkmd_switch_multifence_reset(&ssync->fence);
+   nvkmd_switch_fences_reset(ssync);
    ssync->has_payload_wait = false;
    ssync->next_payload_value = 0;
    ssync->payload_wait_value = 0;
@@ -411,19 +408,22 @@ nvkmd_switch_sync_move(struct vk_device *device,
 {
    struct nvkmd_switch_sync *dst_sync = nvkmd_switch_sync_from_vk(dst);
    struct nvkmd_switch_sync *src_sync = nvkmd_switch_sync_from_vk(src);
-   NvMultiFence fence;
+   struct nouveau_horizon_fence fences[4];
+   uint32_t fence_count;
    bool signaled;
 
    mtx_lock(&src_sync->mutex);
-   fence = src_sync->fence;
+   fence_count = src_sync->fence_count;
+   memcpy(fences, src_sync->fences, sizeof(fences));
    signaled = src_sync->signaled;
    src_sync->signaled = false;
-   nvkmd_switch_multifence_reset(&src_sync->fence);
+   nvkmd_switch_fences_reset(src_sync);
    src_sync->has_payload_wait = false;
    mtx_unlock(&src_sync->mutex);
 
    mtx_lock(&dst_sync->mutex);
-   dst_sync->fence = fence;
+   dst_sync->fence_count = fence_count;
+   memcpy(dst_sync->fences, fences, sizeof(fences));
    dst_sync->signaled = signaled;
    dst_sync->has_payload_wait = false;
    u_cnd_monotonic_broadcast(&dst_sync->cond);
@@ -432,41 +432,36 @@ nvkmd_switch_sync_move(struct vk_device *device,
    return VK_SUCCESS;
 }
 
-/* Clamp abs-timeout-ns to an s32 microsecond value for nvFenceWait.
- * UINT64_MAX maps to "wait forever" (-1). Past deadlines clamp to 0.
- */
-static s32
-nvkmd_switch_abs_ns_to_us(uint64_t abs_timeout_ns)
+static uint64_t
+nvkmd_switch_remaining_timeout_ns(uint64_t abs_timeout_ns)
 {
    if (abs_timeout_ns == UINT64_MAX)
-      return -1;
+      return UINT64_MAX;
 
    const uint64_t now_ns = os_time_get_nano();
    if (abs_timeout_ns <= now_ns)
       return 0;
 
-   const uint64_t delta_us = (abs_timeout_ns - now_ns) / 1000u;
-   if (delta_us > (uint64_t)INT32_MAX)
-      return INT32_MAX;
-
-   return (s32)delta_us;
+   return abs_timeout_ns - now_ns;
 }
 
-static bool
-nvkmd_switch_result_is_timeout(Result rc)
+static VkResult
+nvkmd_switch_sync_wait_result(struct vk_device *device,
+                              enum nouveau_horizon_status status)
 {
-   if (R_VALUE(rc) == R_VALUE(KERNELRESULT(TimedOut)))
-      return true;
-
-   switch (R_MODULE(rc)) {
-   case Module_Libnx:
-      return R_DESCRIPTION(rc) == LibnxError_Timeout;
-   case Module_LibnxNvidia:
-      return R_DESCRIPTION(rc) == LibnxNvidiaError_Timeout;
-   case Module_LibnxBinder:
-      return R_DESCRIPTION(rc) == LibnxBinderError_TimedOut;
+   switch (status) {
+   case NOUVEAU_HORIZON_SUCCESS:
+      return VK_SUCCESS;
+   case NOUVEAU_HORIZON_ERROR_TIMEOUT:
+      return VK_TIMEOUT;
+   case NOUVEAU_HORIZON_ERROR_OUT_OF_HOST_MEMORY:
+      return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
+   case NOUVEAU_HORIZON_ERROR_OUT_OF_DEVICE_MEMORY:
+      return vk_error(device, VK_ERROR_OUT_OF_DEVICE_MEMORY);
    default:
-      return false;
+      return vk_errorf(device, VK_ERROR_DEVICE_LOST,
+                       "nvkmd-switch: native fence wait failed: %s",
+                       nouveau_horizon_status_string(status));
    }
 }
 
@@ -489,7 +484,7 @@ nvkmd_switch_sync_wait(struct vk_device *device,
     * payload" counts as a pending op, and "CPU pre-signaled" is
     * trivially satisfied.
     */
-   while (!ssync->signaled && ssync->fence.num_fences == 0) {
+   while (!ssync->signaled && ssync->fence_count == 0) {
       int ret = u_cnd_monotonic_timedwait(&ssync->cond, &ssync->mutex,
                                           &abs_timeout_ts);
       if (ret == thrd_timedout) {
@@ -505,29 +500,38 @@ nvkmd_switch_sync_wait(struct vk_device *device,
    }
 
    const bool do_fence_wait =
-      ssync->fence.num_fences > 0 && !(wait_flags & VK_SYNC_WAIT_PENDING);
-   NvMultiFence fence_copy = ssync->fence;
+      ssync->fence_count > 0 && !(wait_flags & VK_SYNC_WAIT_PENDING);
+   struct nouveau_horizon_fence fences[4];
+   const uint32_t fence_count = ssync->fence_count;
+   memcpy(fences, ssync->fences, sizeof(fences));
+   struct nouveau_horizon_device *horizon =
+      nouveau_horizon_device_ref(ssync->horizon);
    const bool has_payload_wait = ssync->has_payload_wait;
    const uint32_t payload_wait_value = ssync->payload_wait_value;
    volatile uint32_t *payload = ssync->payload;
    mtx_unlock(&ssync->mutex);
 
-   if (!do_fence_wait)
+   if (!do_fence_wait) {
+      nouveau_horizon_device_put(horizon);
       return VK_SUCCESS;
+   }
 
    if (has_payload_wait &&
-       nvkmd_switch_payload_reached(*payload, payload_wait_value))
+       nvkmd_switch_payload_reached(*payload, payload_wait_value)) {
+      nouveau_horizon_device_put(horizon);
       return VK_SUCCESS;
-
-   const s32 timeout_us = nvkmd_switch_abs_ns_to_us(abs_timeout_ns);
-   Result rc = nvMultiFenceWait(&fence_copy, timeout_us);
-   if (R_FAILED(rc)) {
-      if (nvkmd_switch_result_is_timeout(rc))
-         return VK_TIMEOUT;
-
-      return vk_errorf(device, VK_ERROR_DEVICE_LOST,
-                       "nvkmd-switch: nvMultiFenceWait failed: 0x%x", rc);
    }
+
+   for (uint32_t i = 0; i < fence_count; i++) {
+      const enum nouveau_horizon_status status = nouveau_horizon_fence_wait(
+         horizon, &fences[i],
+         nvkmd_switch_remaining_timeout_ns(abs_timeout_ns));
+      if (status != NOUVEAU_HORIZON_SUCCESS) {
+         nouveau_horizon_device_put(horizon);
+         return nvkmd_switch_sync_wait_result(device, status);
+      }
+   }
+   nouveau_horizon_device_put(horizon);
 
    while (has_payload_wait &&
           !nvkmd_switch_payload_reached(*payload, payload_wait_value)) {
@@ -567,9 +571,14 @@ nvkmd_switch_sync_is_nvfence(const struct vk_sync_type *type)
 void
 nvkmd_switch_sync_import_nvfence(struct vk_sync *sync, const NvFence *fence)
 {
-   NvMultiFence mf;
-   nvMultiFenceCreate(&mf, fence);
-   nvkmd_switch_sync_import_nvmultifence(sync, &mf);
+   if (fence == NULL)
+      return;
+
+   const struct nouveau_horizon_fence horizon_fence = {
+      .id = fence->id,
+      .value = fence->value,
+   };
+   nvkmd_switch_sync_import_horizon_fence(sync, &horizon_fence);
 }
 
 void
@@ -579,10 +588,47 @@ nvkmd_switch_sync_import_nvmultifence(struct vk_sync *sync,
    struct nvkmd_switch_sync *ssync = nvkmd_switch_sync_from_vk(sync);
 
    mtx_lock(&ssync->mutex);
-   nvkmd_switch_multifence_copy_valid(&ssync->fence, fence);
+   nvkmd_switch_fences_import_native(ssync, fence);
    ssync->has_payload_wait = false;
    u_cnd_monotonic_broadcast(&ssync->cond);
    mtx_unlock(&ssync->mutex);
+}
+
+void
+nvkmd_switch_sync_import_horizon_fence(
+   struct vk_sync *sync, const struct nouveau_horizon_fence *fence)
+{
+   if (sync == NULL || fence == NULL ||
+       sync->type != &nvkmd_switch_point_sync_type)
+      return;
+
+   struct nvkmd_switch_sync *ssync = nvkmd_switch_sync_from_vk(sync);
+   mtx_lock(&ssync->mutex);
+   nvkmd_switch_fences_reset(ssync);
+   if (nouveau_horizon_fence_is_valid(fence)) {
+      ssync->fences[0] = *fence;
+      ssync->fence_count = 1;
+   }
+   ssync->has_payload_wait = false;
+   u_cnd_monotonic_broadcast(&ssync->cond);
+   mtx_unlock(&ssync->mutex);
+}
+
+uint32_t
+nvkmd_switch_sync_peek_horizon_fences(
+   struct vk_sync *sync, uint32_t max_fences,
+   struct nouveau_horizon_fence *fences_out)
+{
+   if (sync == NULL || sync->type != &nvkmd_switch_point_sync_type)
+      return 0;
+
+   struct nvkmd_switch_sync *ssync = nvkmd_switch_sync_from_vk(sync);
+   mtx_lock(&ssync->mutex);
+   const uint32_t count = MIN2(ssync->fence_count, max_fences);
+   if (count > 0 && fences_out != NULL)
+      memcpy(fences_out, ssync->fences, count * sizeof(*fences_out));
+   mtx_unlock(&ssync->mutex);
+   return count;
 }
 
 bool
@@ -592,18 +638,31 @@ nvkmd_switch_sync_peek_nvmultifence(struct vk_sync *sync, NvMultiFence *out)
       return false;
 
    struct nvkmd_switch_sync *ssync = nvkmd_switch_sync_from_vk(sync);
-   NvMultiFence local;
+   struct nouveau_horizon_fence fences[4];
+   uint32_t fence_count;
 
    mtx_lock(&ssync->mutex);
-   const bool have_fence = ssync->fence.num_fences > 0;
-   if (have_fence)
-      local = ssync->fence;
+   fence_count = ssync->fence_count;
+   memcpy(fences, ssync->fences, sizeof(fences));
    mtx_unlock(&ssync->mutex);
 
-   if (have_fence && out != NULL)
-      *out = local;
+   if (fence_count == 0)
+      return false;
 
-   return have_fence;
+   if (out != NULL) {
+      memset(out, 0, sizeof(*out));
+      out->num_fences = fence_count;
+      for (uint32_t i = 0; i < fence_count; i++) {
+         out->fences[i] = (NvFence) {
+            .id = fences[i].id,
+            .value = fences[i].value,
+         };
+      }
+      for (uint32_t i = fence_count; i < ARRAY_SIZE(out->fences); i++)
+         out->fences[i].id = UINT32_MAX;
+   }
+
+   return true;
 }
 
 bool
@@ -700,44 +759,11 @@ nvkmd_switch_try_create_pdev(struct vk_object_base *log_obj,
    pdev->base.ops = &nvkmd_switch_pdev_ops;
    pdev->base.debug_flags = debug_flags;
 
-   /* Hard-coded Tegra X1 (GM20B) device info. The Tegra X1+ in the Switch OLED
-    * uses the same GM20B die at higher clocks, so this is a reasonable default
-    * for both. We synthesize the values nouveau would normally read from the
-    * NVIF device-info ioctl. */
-   struct nv_device_info *info = &pdev->base.dev_info;
-   info->type = NV_DEVICE_TYPE_SOC;
-   info->device_id = 0x0fe0; /* placeholder; not exposed via PCI on SoC */
-   info->chipset = 0x12b;    /* GM20B */
-   strncpy(info->device_name, "NVIDIA Tegra X1 (GM20B)",
-           sizeof(info->device_name) - 1);
-   strncpy(info->chipset_name, "GM20B", sizeof(info->chipset_name) - 1);
-
-   info->sm = 53;
-   /* Tegra X1: 1 GPC, 2 SMs (TPCs); each TPC has 1 MP. */
-   info->gpc_count = 1;
-   info->tpc_count = 2;
-   info->mp_per_tpc = 1;
-   info->max_warps_per_mp = 64; /* sm 53 → 64 per max_warps_per_mp_for_sm */
-
-   info->cls_eng3d   = NVKMD_SWITCH_CLS_ENG3D;
-   info->cls_compute = NVKMD_SWITCH_CLS_COMPUTE;
-   info->cls_copy    = NVKMD_SWITCH_CLS_COPY;
-   info->cls_eng2d   = NVKMD_SWITCH_CLS_ENG2D;
-   info->cls_m2mf    = NVKMD_SWITCH_CLS_M2MF;
-   info->cls_gpfifo  = NVKMD_SWITCH_CLS_GPFIFO;
-
-   /* SoC: no dedicated VRAM, no PCI BAR. The runtime will fall back to
-    * sysmem-backed heaps, which is what we want on Switch.
+   /* The shared Horizon backend is the single source of truth for GM20B
+    * topology, engine classes and cache properties.  This query is static
+    * and intentionally does not acquire libnx services during enumeration.
     */
-   info->vram_size_B = 0;
-   info->bar_size_B = 0;
-
-   /* GM20B / SM53 has a single shared-memory configuration of 64 KiB. */
-   info->sm_smem_sizes_kB[0] = 64;
-   info->sm_smem_size_count = 1;
-
-   /* Non-coherent atom size: GM20B uses 128 B cache lines on the GPU side. */
-   info->nc_atom_size_B = 128;
+   nouveau_horizon_get_gm20b_info(&pdev->base.dev_info);
 
    pdev->base.kmd_info = (struct nvkmd_info) {
       .has_dma_buf = false,

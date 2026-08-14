@@ -10,6 +10,11 @@
 #include "nvkmd/nvkmd.h"
 #include "vk_alloc.h"
 
+#ifdef __SWITCH__
+#include "nvkmd/switch/nvkmd_switch.h"
+#include "vk_log.h"
+#endif
+
 #include "nv_push.h"
 #include "nv_push_cl90b5.h"
 
@@ -53,6 +58,39 @@ nvk_upload_queue_finish(struct nvk_device *dev,
    nvkmd_ctx_destroy(queue->ctx);
    simple_mtx_destroy(&queue->mutex);
 }
+
+#ifdef __SWITCH__
+bool
+nvk_upload_queue_try_finish(struct nvk_device *dev,
+                            struct nvk_upload_queue *queue)
+{
+   const VkResult result = nvk_upload_queue_sync(dev, queue);
+   if (result != VK_SUCCESS) {
+      vk_loge(VK_LOG_OBJS(&dev->vk.base),
+              "nvk-switch: upload stream completion wait failed during "
+              "teardown (VkResult %d); retaining its stream and context",
+              result);
+      return false;
+   }
+
+   /* Keep the stream BOs alive until channel_put() has independently proven
+    * final native completion.  The checked put consumes the channel reference
+    * even when Horizon must quarantine it, so failure is terminal and the
+    * containing device has to remain allocated.
+    */
+   if (!nvkmd_switch_ctx_try_destroy(queue->ctx, &dev->vk.base)) {
+      vk_loge(VK_LOG_OBJS(&dev->vk.base),
+              "nvk-switch: upload context release has unknown completion; "
+              "retaining its stream and the device ownership graph");
+      return false;
+   }
+   queue->ctx = NULL;
+
+   nvk_mem_stream_finish(dev, &queue->stream);
+   simple_mtx_destroy(&queue->mutex);
+   return true;
+}
+#endif
 
 static VkResult
 nvk_upload_queue_flush_locked(struct nvk_device *dev,

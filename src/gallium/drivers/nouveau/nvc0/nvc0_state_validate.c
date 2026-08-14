@@ -1,8 +1,8 @@
 #include "util/format/u_format.h"
+#include <errno.h>
 #include "util/u_framebuffer.h"
 #include "util/u_math.h"
 #include "util/u_viewport.h"
-
 #include "nvc0/nvc0_context.h"
 
 static inline void
@@ -923,16 +923,21 @@ nvc0_state_validate(struct nvc0_context *nvc0, uint32_t mask,
                     uint32_t *dirty, struct nouveau_bufctx *bufctx)
 {
    uint32_t state_mask;
-   int ret;
+   int ret = 0;
    unsigned i;
-
    simple_mtx_assert_locked(&nvc0->screen->state_lock);
 
 #ifdef __SWITCH__
    nouveau_pushbuf_bind_context(nvc0->base.pushbuf, &nvc0->base);
+   nvc0->switch_state_validate_error = false;
+   if (bufctx == nvc0->bufctx_3d &&
+       !nvc0_switch_zbc_update(nvc0->screen, nvc0->base.pushbuf,
+                               &nvc0->switch_zbc_generation))
+      return false;
 #endif
-   if (nvc0->screen->cur_ctx != nvc0)
+   if (nvc0->screen->cur_ctx != nvc0) {
       nvc0_switch_pipe_context(nvc0);
+   }
 
    state_mask = *dirty & mask;
 
@@ -940,8 +945,15 @@ nvc0_state_validate(struct nvc0_context *nvc0, uint32_t mask,
       for (i = 0; i < size; ++i) {
          struct nvc0_state_validate *validate = &validate_list[i];
 
-         if (state_mask & validate->states)
+         if (state_mask & validate->states) {
             validate->func(nvc0);
+#ifdef __SWITCH__
+            if (unlikely(nvc0->switch_state_validate_error)) {
+               ret = -EIO;
+               goto validation_done;
+            }
+#endif
+         }
       }
       *dirty &= ~state_mask;
 
@@ -955,7 +967,7 @@ nvc0_state_validate(struct nvc0_context *nvc0, uint32_t mask,
    const uint64_t batch_generation =
       nouveau_switch_pushbuf_batch_generation(nvc0->base.pushbuf);
    const bool can_skip =
-      fast_3d && !state_mask &&
+      fast_3d && NS_LIST_EMPTY(&bufctx->pending) &&
       nvc0->switch_validated_residency_generation ==
          nvc0->switch_residency_generation &&
       nvc0->switch_validated_batch_generation == batch_generation;
@@ -973,6 +985,17 @@ nvc0_state_validate(struct nvc0_context *nvc0, uint32_t mask,
    }
 #else
    ret = PUSH_VAL(nvc0->base.pushbuf);
+#endif
+#ifdef __SWITCH__
+   /* Shader validation can queue several P2MF text uploads.  Submit one
+    * visibility boundary after all of them and before the first draw/dispatch
+    * is emitted.  Ambiguous/failing boundaries abort validation safely.
+    */
+   if (!ret && !nvc0_program_flush_uploads(nvc0))
+      ret = -EIO;
+#endif
+#ifdef __SWITCH__
+validation_done:
 #endif
    return !ret;
 }

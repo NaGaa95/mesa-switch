@@ -29,6 +29,18 @@ struct nouveau_screen {
    struct nouveau_object *channel;
    struct nouveau_client *client;
    struct nouveau_pushbuf *pushbuf;
+#ifdef __SWITCH__
+   /* The primary GM20B channel is screen-owned.  Drivers install recursive-
+    * aware callbacks so generic fence/BO paths which may force a kickoff use
+    * the same outer serialization as draw/compute command recording.
+    */
+   void (*submission_lock)(struct nouveau_screen *screen);
+   void (*submission_unlock)(struct nouveau_screen *screen);
+   /* An infinite context-fence drain failed, so fence callbacks or externally
+    * retained handles may still own GPU-visible resources.  The driver must
+    * retain the complete screen/device graph at final teardown. */
+   bool fence_teardown_quarantined;
+#endif
 
    char chipset_name[8];
 
@@ -115,6 +127,20 @@ struct nouveau_pushbuf_priv {
 };
 
 #ifdef __SWITCH__
+static inline void
+nouveau_screen_submission_lock(struct nouveau_screen *screen)
+{
+   if (screen && screen->submission_lock)
+      screen->submission_lock(screen);
+}
+
+static inline void
+nouveau_screen_submission_unlock(struct nouveau_screen *screen)
+{
+   if (screen && screen->submission_unlock)
+      screen->submission_unlock(screen);
+}
+
 /* Keep the shared Switch pushbuf bound to its current context. */
 void nouveau_pushbuf_bind_context(struct nouveau_pushbuf *push,
                                   struct nouveau_context *context);

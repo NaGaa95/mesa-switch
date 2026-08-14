@@ -56,13 +56,33 @@ nvc0_program_validate(struct nvc0_context *nvc0, struct nvc0_program *prog)
       prog->translated = nvc0_program_translate(
          prog, nvc0->screen->base.device->chipset,
          nvc0->screen->base.disk_shader_cache, &nvc0->base.debug);
-      if (!prog->translated)
+      if (!prog->translated) {
+#ifdef __SWITCH__
+         nvc0->switch_state_validate_error = true;
+#endif
          return false;
+      }
    }
 
-   if (likely(prog->code_size))
-      return nvc0_program_upload(nvc0, prog);
+   if (likely(prog->code_size)) {
+      if (nvc0_program_upload(nvc0, prog))
+         return true;
+#ifdef __SWITCH__
+      nvc0->switch_state_validate_error = true;
+#endif
+      return false;
+   }
    return true; /* stream output info only */
+}
+
+static inline void
+nvc0_program_validation_failed(struct nvc0_context *nvc0)
+{
+#ifdef __SWITCH__
+   nvc0->switch_state_validate_error = true;
+#else
+   (void)nvc0;
+#endif
 }
 
 void
@@ -113,8 +133,10 @@ nvc0_fragprog_validate(struct nvc0_context *nvc0)
       /* Force the program to be reuploaded, which will trigger interp fixups
        * to get applied
        */
-      if (fp->mem)
-         nouveau_heap_free(&fp->mem);
+      if (fp->mem && !nvc0_program_release_code(nvc0, fp)) {
+         nvc0_program_validation_failed(nvc0);
+         return;
+      }
 
       fp->fp.force_persample_interp = rast->force_persample_interp;
    }
@@ -123,8 +145,10 @@ nvc0_fragprog_validate(struct nvc0_context *nvc0)
       /* Force the program to be reuploaded, which will trigger interp fixups
        * to get applied
        */
-      if (fp->mem)
-         nouveau_heap_free(&fp->mem);
+      if (fp->mem && !nvc0_program_release_code(nvc0, fp)) {
+         nvc0_program_validation_failed(nvc0);
+         return;
+      }
 
       fp->fp.msaa = rast->multisample;
    }
@@ -138,8 +162,10 @@ nvc0_fragprog_validate(struct nvc0_context *nvc0)
    bool hwflatshade = false;
    if (has_explicit_color && fp->fp.flatshade != rast->flatshade) {
       /* Force re-upload */
-      if (fp->mem)
-         nouveau_heap_free(&fp->mem);
+      if (fp->mem && !nvc0_program_release_code(nvc0, fp)) {
+         nvc0_program_validation_failed(nvc0);
+         return;
+      }
 
       fp->fp.flatshade = rast->flatshade;
 
@@ -199,7 +225,9 @@ nvc0_tctlprog_validate(struct nvc0_context *nvc0)
    struct nouveau_pushbuf *push = nvc0->base.pushbuf;
    struct nvc0_program *tp = nvc0->tctlprog;
 
-   if (tp && nvc0_program_validate(nvc0, tp)) {
+   if (tp) {
+      if (!nvc0_program_validate(nvc0, tp))
+         return;
       if (tp->tp.tess_mode != ~0) {
          BEGIN_NVC0(push, NVC0_3D(TESS_MODE), 1);
          PUSH_DATA (push, tp->tp.tess_mode);
@@ -211,9 +239,8 @@ nvc0_tctlprog_validate(struct nvc0_context *nvc0)
       PUSH_DATA (push, tp->num_gprs);
    } else {
       tp = nvc0->tcp_empty;
-      /* not a whole lot we can do to handle this failure */
       if (!nvc0_program_validate(nvc0, tp))
-         assert(!"unable to validate empty tcp");
+         return;
       BEGIN_NVC0(push, NVC0_3D(SP_SELECT(2)), 1);
       PUSH_DATA (push, 0x20);
       nvc0_program_sp_start_id(nvc0, 2, tp);
@@ -227,7 +254,9 @@ nvc0_tevlprog_validate(struct nvc0_context *nvc0)
    struct nouveau_pushbuf *push = nvc0->base.pushbuf;
    struct nvc0_program *tp = nvc0->tevlprog;
 
-   if (tp && nvc0_program_validate(nvc0, tp)) {
+   if (tp) {
+      if (!nvc0_program_validate(nvc0, tp))
+         return;
       if (tp->tp.tess_mode != ~0) {
          BEGIN_NVC0(push, NVC0_3D(TESS_MODE), 1);
          PUSH_DATA (push, tp->tp.tess_mode);
@@ -251,12 +280,19 @@ nvc0_gmtyprog_validate(struct nvc0_context *nvc0)
    struct nvc0_program *gp = nvc0->gmtyprog;
 
    /* we allow GPs with no code for specifying stream output state only */
-   if (gp && nvc0_program_validate(nvc0, gp) && gp->code_size) {
-      BEGIN_NVC0(push, NVC0_3D(MACRO_GP_SELECT), 1);
-      PUSH_DATA (push, 0x41);
-      nvc0_program_sp_start_id(nvc0, 4, gp);
-      BEGIN_NVC0(push, NVC0_3D(SP_GPR_ALLOC(4)), 1);
-      PUSH_DATA (push, gp->num_gprs);
+   if (gp) {
+      if (!nvc0_program_validate(nvc0, gp))
+         return;
+      if (gp->code_size) {
+         BEGIN_NVC0(push, NVC0_3D(MACRO_GP_SELECT), 1);
+         PUSH_DATA (push, 0x41);
+         nvc0_program_sp_start_id(nvc0, 4, gp);
+         BEGIN_NVC0(push, NVC0_3D(SP_GPR_ALLOC(4)), 1);
+         PUSH_DATA (push, gp->num_gprs);
+      } else {
+         BEGIN_NVC0(push, NVC0_3D(MACRO_GP_SELECT), 1);
+         PUSH_DATA (push, 0x40);
+      }
    } else {
       BEGIN_NVC0(push, NVC0_3D(MACRO_GP_SELECT), 1);
       PUSH_DATA (push, 0x40);
@@ -374,7 +410,7 @@ nvc0_tfb_validate(struct nvc0_context *nvc0)
       PUSH_DATA (push, buf->address + targ->pipe.buffer_offset);
       PUSH_DATA (push, targ->pipe.buffer_size);
       if (!targ->clean) {
-         nvc0_hw_query_pushbuf_submit(push, nvc0_query(targ->pq), 0x4);
+         nvc0_hw_query_pushbuf_submit(nvc0, nvc0_query(targ->pq), 0x4);
       } else {
          PUSH_DATA(push, 0); /* TFB_BUFFER_OFFSET */
          targ->clean = false;

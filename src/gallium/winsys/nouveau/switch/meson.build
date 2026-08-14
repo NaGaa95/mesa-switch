@@ -18,13 +18,14 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-dep_switch_libdrm_nouveau = cc.find_library('drm_nouveau', required : true)
-
 libnouveauwinsys = static_library(
   'nouveauwinsys',
   files(
-    'nouveau_switch_abi.h',
+    'nouveau_switch_libdrm.h',
     'nouveau_switch_public.h',
+    'nouveau_switch_libdrm.c',
+    'nouveau_switch_bomap.c',
+    'nouveau_switch_bufctx.c',
     'nouveau_switch_pushbuf.c',
     'nouveau_switch_winsys.c',
   ),
@@ -33,7 +34,8 @@ libnouveauwinsys = static_library(
     inc_nouveau_drm,
   ],
   c_args : get_variable('c_vis_args', []),
-  dependencies : [idep_nvidia_headers, dep_switch_libdrm_nouveau],
+  dependencies : [idep_nvidia_headers, idep_nouveau_horizon],
+  link_with : [libnouveau_horizon],
 )
 
 idep_libnouveauwinsys = declare_dependency(
@@ -42,5 +44,5 @@ idep_libnouveauwinsys = declare_dependency(
     inc_nouveau_drm,
   ],
   link_with : [libnouveauwinsys],
-  dependencies : [dep_switch_libdrm_nouveau],
+  dependencies : [idep_nouveau_horizon],
 )

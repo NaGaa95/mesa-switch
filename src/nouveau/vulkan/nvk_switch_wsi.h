@@ -30,8 +30,10 @@ extern "C" {
  * VkDeviceMemory is backed by a libnx NvMap.
  */
 struct nvk_switch_scanout_layout {
-   /* libnx NvMap handle owning the pixels. Borrowed — do not close. */
-   NvMap *nvmap;
+   /* Numeric NvMap ID owning the pixels.  The memory object retains the
+    * underlying map for at least as long as this image remains bound.
+    */
+   uint32_t nvmap_id;
 
    /* Offset of the image inside the NvMap and total byte size of the
     * image (nil plane size, already block-aligned).

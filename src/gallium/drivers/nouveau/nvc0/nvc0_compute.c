@@ -386,7 +386,7 @@ nvc0_launch_grid(struct pipe_context *pipe, const struct pipe_grid_info *info)
    struct nvc0_program *cp = nvc0->compprog;
    int ret;
 
-   simple_mtx_lock(&screen->state_lock);
+   nvc0_screen_state_lock(screen);
    ret = !nvc0_state_validate_cp(nvc0, ~0);
    if (ret) {
       NOUVEAU_ERR("Failed to launch grid !\n");
@@ -461,10 +461,13 @@ nvc0_launch_grid(struct pipe_context *pipe, const struct pipe_grid_info *info)
    nvc0->images_dirty[5] |= nvc0->images_valid[5];
 
    nvc0_update_compute_invocations_counter(nvc0, info);
+#ifdef __SWITCH__
+   nvc0_program_track_use(nvc0, cp);
+#endif
 
 out:
    PUSH_KICK(push);
-   simple_mtx_unlock(&screen->state_lock);
+   nvc0_screen_state_unlock(screen);
 }
 
 static void

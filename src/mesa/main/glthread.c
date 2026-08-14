@@ -40,9 +40,118 @@
 #include "util/u_atomic.h"
 #include "util/u_thread.h"
 #include "util/u_cpu_detect.h"
+#include "util/u_debug.h"
 #include "util/thread_sched.h"
 
 #include "state_tracker/st_context.h"
+
+#define GLTHREAD_PERF_REPORT_INTERVAL_NS (5ull * ONE_SECOND_IN_NS)
+
+static void
+glthread_perf_atomic_max(uint64_t *value, uint64_t candidate)
+{
+   uint64_t current = p_atomic_read(value);
+   while (candidate > current) {
+      const uint64_t previous = p_atomic_cmpxchg(value, current, candidate);
+      if (previous == current)
+         return;
+      current = previous;
+   }
+}
+
+static void
+glthread_perf_log(struct gl_context *ctx, const char *reason, bool force,
+                  uint64_t now_ns)
+{
+   struct glthread_state *glthread = &ctx->GLThread;
+   if (!glthread->perf_enabled)
+      return;
+
+   if (now_ns == 0)
+      now_ns = os_time_get_nano();
+   if (!force && now_ns - glthread->perf_last_report_ns <
+                    GLTHREAD_PERF_REPORT_INTERVAL_NS)
+      return;
+   glthread->perf_last_report_ns = now_ns;
+
+   const uint64_t submit_batches =
+      p_atomic_read(&glthread->perf.submit_batches);
+   const uint64_t submit_words =
+      p_atomic_read(&glthread->perf.submit_words);
+   const uint64_t enqueue_ns = p_atomic_read(&glthread->perf.enqueue_ns);
+   const uint64_t enqueue_max_ns =
+      p_atomic_read(&glthread->perf.enqueue_max_ns);
+   const uint64_t worker_batches =
+      p_atomic_read(&glthread->perf.worker_batches);
+   const uint64_t worker_commands =
+      p_atomic_read(&glthread->perf.worker_commands);
+   const uint64_t worker_words =
+      p_atomic_read(&glthread->perf.worker_words);
+   const uint64_t worker_ns = p_atomic_read(&glthread->perf.worker_ns);
+   const uint64_t worker_max_ns =
+      p_atomic_read(&glthread->perf.worker_max_ns);
+   const uint64_t latency_ns =
+      p_atomic_read(&glthread->perf.queue_latency_ns);
+   const uint64_t latency_max_ns =
+      p_atomic_read(&glthread->perf.queue_latency_max_ns);
+   const uint64_t direct_batches =
+      p_atomic_read(&glthread->perf.direct_batches);
+   const uint64_t direct_commands =
+      p_atomic_read(&glthread->perf.direct_commands);
+   const uint64_t direct_words =
+      p_atomic_read(&glthread->perf.direct_words);
+   const uint64_t direct_ns = p_atomic_read(&glthread->perf.direct_ns);
+   const uint64_t direct_max_ns =
+      p_atomic_read(&glthread->perf.direct_max_ns);
+   const uint64_t finish_calls =
+      p_atomic_read(&glthread->perf.finish_calls);
+   const uint64_t wait_calls = p_atomic_read(&glthread->perf.wait_calls);
+   const uint64_t wait_ns = p_atomic_read(&glthread->perf.wait_ns);
+   const uint64_t wait_max_ns =
+      p_atomic_read(&glthread->perf.wait_max_ns);
+
+   _debug_printf(
+      "Mesa GLThread: perf %s elapsed=%llums submit=%llu words=%llu "
+      "enqueue=%llums avg/max=%llu/%lluus latency=%llums "
+      "avg/max=%llu/%lluus\n",
+      reason,
+      (unsigned long long)((now_ns - glthread->perf_start_ns) / 1000000),
+      (unsigned long long)submit_batches,
+      (unsigned long long)submit_words,
+      (unsigned long long)(enqueue_ns / 1000000),
+      (unsigned long long)(submit_batches ?
+                              enqueue_ns / submit_batches / 1000 : 0),
+      (unsigned long long)(enqueue_max_ns / 1000),
+      (unsigned long long)(latency_ns / 1000000),
+      (unsigned long long)(worker_batches ?
+                              latency_ns / worker_batches / 1000 : 0),
+      (unsigned long long)(latency_max_ns / 1000));
+   _debug_printf(
+      "Mesa GLThread: perf %s worker=%llu cmds=%llu words=%llu cpu=%llums "
+      "avg/max=%llu/%lluus direct=%llu cmds=%llu words=%llu cpu=%llums "
+      "max=%lluus finish=%llu waits=%llu/%llums max=%lluus "
+      "queue_totals=%u/%u/%u/%u\n",
+      reason, (unsigned long long)worker_batches,
+      (unsigned long long)worker_commands,
+      (unsigned long long)worker_words,
+      (unsigned long long)(worker_ns / 1000000),
+      (unsigned long long)(worker_batches ?
+                              worker_ns / worker_batches / 1000 : 0),
+      (unsigned long long)(worker_max_ns / 1000),
+      (unsigned long long)direct_batches,
+      (unsigned long long)direct_commands,
+      (unsigned long long)direct_words,
+      (unsigned long long)(direct_ns / 1000000),
+      (unsigned long long)(direct_max_ns / 1000),
+      (unsigned long long)finish_calls,
+      (unsigned long long)wait_calls,
+      (unsigned long long)(wait_ns / 1000000),
+      (unsigned long long)(wait_max_ns / 1000),
+      p_atomic_read(&glthread->stats.num_offloaded_items),
+      p_atomic_read(&glthread->stats.num_direct_items),
+      p_atomic_read(&glthread->stats.num_syncs),
+      p_atomic_read(&glthread->stats.num_batches));
+}
 
 static void
 glthread_update_global_locking(struct gl_context *ctx)
@@ -111,6 +220,13 @@ glthread_unmarshal_batch(void *job, void *gdata, int thread_index)
    unsigned used = batch->used;
    uint64_t *buffer = batch->buffer;
    struct gl_shared_state *shared = ctx->Shared;
+   const bool perf_enabled = ctx->GLThread.perf_enabled;
+   const bool perf_worker = perf_enabled &&
+      u_thread_is_self(ctx->GLThread.queue.threads[0]);
+   const uint64_t perf_start_ns =
+      perf_enabled ? os_time_get_nano() : 0;
+   const uint64_t perf_submit_ns = batch->perf_submit_ns;
+   uint64_t perf_commands = 0;
 
    /* Determine once every 64 batches whether shared mutexes should be locked.
     * We have to do this less frequently because os_time_get_nano() is very
@@ -139,6 +255,8 @@ glthread_unmarshal_batch(void *job, void *gdata, int thread_index)
          (const struct marshal_cmd_base *)&buffer[pos];
 
       pos += _mesa_unmarshal_dispatch[cmd->cmd_id](ctx, cmd);
+      if (perf_enabled)
+         perf_commands++;
    }
 
    if (lock_mutexes) {
@@ -150,6 +268,33 @@ glthread_unmarshal_batch(void *job, void *gdata, int thread_index)
 
    assert(pos == used);
    batch->used = 0;
+   batch->perf_submit_ns = 0;
+
+   if (perf_enabled) {
+      const uint64_t elapsed_ns = os_time_get_nano() - perf_start_ns;
+      if (perf_worker) {
+         p_atomic_inc(&ctx->GLThread.perf.worker_batches);
+         p_atomic_add(&ctx->GLThread.perf.worker_commands, perf_commands);
+         p_atomic_add(&ctx->GLThread.perf.worker_words, used);
+         p_atomic_add(&ctx->GLThread.perf.worker_ns, elapsed_ns);
+         glthread_perf_atomic_max(&ctx->GLThread.perf.worker_max_ns,
+                                  elapsed_ns);
+         if (perf_submit_ns && perf_start_ns >= perf_submit_ns) {
+            const uint64_t latency_ns = perf_start_ns - perf_submit_ns;
+            p_atomic_add(&ctx->GLThread.perf.queue_latency_ns,
+                         latency_ns);
+            glthread_perf_atomic_max(
+               &ctx->GLThread.perf.queue_latency_max_ns, latency_ns);
+         }
+      } else {
+         p_atomic_inc(&ctx->GLThread.perf.direct_batches);
+         p_atomic_add(&ctx->GLThread.perf.direct_commands, perf_commands);
+         p_atomic_add(&ctx->GLThread.perf.direct_words, used);
+         p_atomic_add(&ctx->GLThread.perf.direct_ns, elapsed_ns);
+         glthread_perf_atomic_max(&ctx->GLThread.perf.direct_max_ns,
+                                  elapsed_ns);
+      }
+   }
 
    unsigned batch_index = batch - ctx->GLThread.batches;
    _mesa_glthread_signal_call(&ctx->GLThread.LastProgramChangeBatch, batch_index);
@@ -212,14 +357,21 @@ _mesa_glthread_init(struct gl_context *ctx)
 {
    struct pipe_screen *screen = ctx->screen;
    struct glthread_state *glthread = &ctx->GLThread;
+   const bool perf_requested =
+      debug_get_bool_option("MESA_GLTHREAD_PERF", false);
    assert(!glthread->enabled);
 
    if (!screen->caps.map_unsynchronized_thread_safe ||
-       !screen->caps.allow_mapped_buffers_during_execution)
+       !screen->caps.allow_mapped_buffers_during_execution) {
+      if (perf_requested)
+         _debug_printf("Mesa GLThread: perf unavailable (screen caps)\n");
       return;
+   }
 
    if (!util_queue_init(&glthread->queue, "gl", MARSHAL_MAX_BATCHES - 2,
                         1, 0, NULL)) {
+      if (perf_requested)
+         _debug_printf("Mesa GLThread: perf unavailable (queue init)\n");
       return;
    }
 
@@ -231,6 +383,8 @@ _mesa_glthread_init(struct gl_context *ctx)
    if (!ctx->MarshalExec) {
       _mesa_DeinitHashTable(&glthread->VAOs, NULL, NULL);
       util_queue_destroy(&glthread->queue);
+      if (perf_requested)
+         _debug_printf("Mesa GLThread: perf unavailable (dispatch alloc)\n");
       return;
    }
 
@@ -247,6 +401,13 @@ _mesa_glthread_init(struct gl_context *ctx)
 
    _mesa_glthread_init_call_fence(&glthread->LastProgramChangeBatch);
    _mesa_glthread_init_call_fence(&glthread->LastDListChangeBatchIndex);
+
+   glthread->perf_enabled = perf_requested;
+   if (glthread->perf_enabled) {
+      glthread->perf_start_ns = os_time_get_nano();
+      glthread->perf_last_report_ns = glthread->perf_start_ns;
+      _debug_printf("Mesa GLThread: perf telemetry enabled\n");
+   }
 
    _mesa_glthread_enable(ctx);
 
@@ -276,6 +437,8 @@ _mesa_glthread_destroy(struct gl_context *ctx)
    struct glthread_state *glthread = &ctx->GLThread;
 
    _mesa_glthread_disable(ctx);
+
+   glthread_perf_log(ctx, "final", true, 0);
 
    if (util_queue_is_initialized(&glthread->queue)) {
       util_queue_destroy(&glthread->queue);
@@ -372,9 +535,23 @@ _mesa_glthread_flush_batch(struct gl_context *ctx)
    glthread_finalize_batch(glthread, &glthread->stats.num_offloaded_items);
 
    struct glthread_batch *next = glthread->next_batch;
+   const unsigned perf_words = next->used;
+   const uint64_t perf_start_ns =
+      glthread->perf_enabled ? os_time_get_nano() : 0;
+   if (glthread->perf_enabled)
+      next->perf_submit_ns = perf_start_ns;
 
    util_queue_add_job(&glthread->queue, next, &next->fence,
                       glthread_unmarshal_batch, NULL, 0);
+   if (glthread->perf_enabled) {
+      const uint64_t now_ns = os_time_get_nano();
+      const uint64_t enqueue_ns = now_ns - perf_start_ns;
+      p_atomic_inc(&glthread->perf.submit_batches);
+      p_atomic_add(&glthread->perf.submit_words, perf_words);
+      p_atomic_add(&glthread->perf.enqueue_ns, enqueue_ns);
+      glthread_perf_atomic_max(&glthread->perf.enqueue_max_ns, enqueue_ns);
+      glthread_perf_log(ctx, "periodic", false, now_ns);
+   }
    glthread->last = glthread->next;
    glthread->next = (glthread->next + 1) % MARSHAL_MAX_BATCHES;
    glthread->next_batch = &glthread->batches[glthread->next];
@@ -401,12 +578,24 @@ _mesa_glthread_finish(struct gl_context *ctx)
    if (u_thread_is_self(glthread->queue.threads[0]))
       return;
 
+   if (glthread->perf_enabled)
+      p_atomic_inc(&glthread->perf.finish_calls);
+
    struct glthread_batch *last = &glthread->batches[glthread->last];
    struct glthread_batch *next = glthread->next_batch;
    bool synced = false;
 
    if (!util_queue_fence_is_signalled(&last->fence)) {
+      const uint64_t perf_start_ns =
+         glthread->perf_enabled ? os_time_get_nano() : 0;
       util_queue_fence_wait(&last->fence);
+      if (glthread->perf_enabled) {
+         const uint64_t elapsed_ns = os_time_get_nano() - perf_start_ns;
+         p_atomic_inc(&glthread->perf.wait_calls);
+         p_atomic_add(&glthread->perf.wait_ns, elapsed_ns);
+         glthread_perf_atomic_max(&glthread->perf.wait_max_ns,
+                                  elapsed_ns);
+      }
       synced = true;
    }
 

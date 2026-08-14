@@ -27,8 +27,176 @@
 #include "nvc0/nvc0_query_hw.h"
 #include "nvc0/nvc0_query_hw_metric.h"
 #include "nvc0/nvc0_query_hw_sm.h"
+#include "util/os_time.h"
 
 #define NVC0_HW_QUERY_ALLOC_SPACE 256
+
+#ifdef __SWITCH__
+#define NVC0_SWITCH_QUERY_SLOT_SIZE 128
+
+struct nvc0_switch_query_retirement {
+   struct nouveau_mm_allocation *mm;
+   struct nvc0_screen *screen;
+   uint16_t slots;
+};
+
+static void
+nvc0_switch_query_arena_free_work(void *data)
+{
+   struct nvc0_switch_query_retirement *retirement = data;
+   struct nvc0_switch_query_arena_stats *stats =
+      &retirement->screen->switch_query_arena;
+
+   nouveau_mm_free(retirement->mm);
+
+   simple_mtx_lock(&stats->lock);
+   assert(stats->live_slots >= retirement->slots);
+   stats->live_slots -= retirement->slots;
+   if (retirement->screen->switch_diagnostics_enabled)
+      stats->retirements++;
+   simple_mtx_unlock(&stats->lock);
+   FREE(retirement);
+}
+
+static void
+nvc0_switch_query_arena_release(struct nvc0_context *nvc0,
+                                struct nvc0_hw_query *hq)
+{
+   struct nvc0_switch_query_arena_stats *stats =
+      &nvc0->screen->switch_query_arena;
+   struct nvc0_switch_query_retirement *retirement =
+      CALLOC_STRUCT(nvc0_switch_query_retirement);
+   struct nouveau_fence *retire_fence = hq->fence;
+
+   if (!retirement) {
+      /* Keeping the allocation live is preferable to reusing storage while
+       * an unretired GPU query can still write it.
+       */
+      if (nvc0->screen->switch_diagnostics_enabled) {
+         simple_mtx_lock(&stats->lock);
+         stats->defer_failures++;
+         simple_mtx_unlock(&stats->lock);
+      }
+      _debug_printf("nouveau/switch: query arena retirement allocation "
+                    "failed; leaking %u slots safely\n",
+                    hq->switch_arena_slots);
+      hq->mm = NULL;
+      hq->switch_arena_slots = 0;
+      return;
+   }
+
+   retirement->mm = hq->mm;
+   retirement->screen = nvc0->screen;
+   retirement->slots = hq->switch_arena_slots;
+   hq->mm = NULL;
+   hq->switch_arena_slots = 0;
+
+   /* READY means either no GPU write was issued or the query sequence/fence
+    * has already completed.  Every non-ready standard Switch query records
+    * the exact current fence after its begin/end writes below.  The current
+    * context fence is only a conservative fallback for partially-created
+    * query objects.
+    */
+   if (hq->state == NVC0_HW_QUERY_STATE_READY &&
+       (!retire_fence || nouveau_fence_signalled(retire_fence))) {
+      nvc0_switch_query_arena_free_work(retirement);
+      return;
+   }
+   if (!retire_fence)
+      retire_fence = nvc0->base.fence;
+
+   if (nvc0->screen->switch_diagnostics_enabled) {
+      simple_mtx_lock(&stats->lock);
+      stats->deferred_retirements++;
+      simple_mtx_unlock(&stats->lock);
+   }
+   if (retire_fence &&
+       nouveau_fence_work(retire_fence,
+                          nvc0_switch_query_arena_free_work, retirement))
+      return;
+
+   /* nouveau_fence_work failing means it could not retain the callback.
+    * Deliberately leave the mman bit allocated rather than risking reuse.
+    */
+   if (nvc0->screen->switch_diagnostics_enabled) {
+      simple_mtx_lock(&stats->lock);
+      stats->defer_failures++;
+      simple_mtx_unlock(&stats->lock);
+   }
+   _debug_printf("nouveau/switch: query arena could not defer retirement; "
+                 "leaking %u slots safely\n", retirement->slots);
+   FREE(retirement);
+}
+
+static void
+nvc0_switch_query_track_write(struct nvc0_context *nvc0,
+                              struct nvc0_hw_query *hq)
+{
+   /* The fence is the logical completion immediately following all query
+    * commands emitted so far.  Physical kickoff later associates it with the
+    * exact native completion used by both waits and arena retirement.
+    */
+   nouveau_fence_ref(nvc0->base.fence, &hq->fence, nvc0->base.screen);
+}
+
+void
+nvc0_hw_query_track_use(struct nvc0_context *nvc0, struct nvc0_query *q)
+{
+   struct nvc0_hw_query *hq = q ? nvc0_hw_query(q) : NULL;
+
+   /* Compound metric containers own no result storage; their SM children
+    * record their own exact uses. */
+   if (hq && hq->bo)
+      nvc0_switch_query_track_write(nvc0, hq);
+}
+
+static void
+nvc0_switch_query_dedicated_release(struct nvc0_context *nvc0,
+                                    struct nvc0_hw_query *hq)
+{
+   struct nouveau_bo *bo = hq->bo;
+   struct nouveau_fence *retire_fence = hq->fence;
+
+   /* Transfer the query's reference either to exact-fence work or to a safe
+    * quarantine.  Dedicated fallback BOs have no mman token to keep their
+    * storage alive, unlike arena slices, so dropping this reference while a
+    * result write is pending would unmap memory still owned by the GPU. */
+   hq->bo = NULL;
+   if (hq->state == NVC0_HW_QUERY_STATE_READY &&
+       (!retire_fence || nouveau_fence_signalled(retire_fence))) {
+      nouveau_fence_unref_bo(bo);
+      return;
+   }
+
+   /* Partially-created/legacy custom queries may not yet carry an exact
+    * record fence.  The current context fence is conservative: it is at or
+    * after every command emitted by this context under the query wrapper. */
+   if (!retire_fence)
+      retire_fence = nvc0->base.fence;
+   if (retire_fence &&
+       nouveau_fence_work(retire_fence, nouveau_fence_unref_bo, bo))
+      return;
+
+   _debug_printf("nouveau/switch: dedicated query BO retirement failed; "
+                 "quarantining storage safely\n");
+}
+
+static void
+nvc0_switch_query_record_wait(struct nvc0_screen *screen, uint64_t elapsed_ns)
+{
+   if (!screen->switch_diagnostics_enabled)
+      return;
+
+   struct nvc0_switch_query_arena_stats *stats =
+      &screen->switch_query_arena;
+
+   simple_mtx_lock(&stats->lock);
+   stats->wait_count++;
+   stats->wait_ns += elapsed_ns;
+   stats->wait_max_ns = MAX2(stats->wait_max_ns, elapsed_ns);
+   simple_mtx_unlock(&stats->lock);
+}
+#endif
 
 bool
 nvc0_hw_query_allocate(struct nvc0_context *nvc0, struct nvc0_query *q,
@@ -39,6 +207,23 @@ nvc0_hw_query_allocate(struct nvc0_context *nvc0, struct nvc0_query *q,
    int ret;
 
    if (hq->bo) {
+#ifdef __SWITCH__
+      if (hq->mm)
+         nvc0_switch_query_arena_release(nvc0, hq);
+      else if (hq->switch_query_dedicated)
+         nvc0_switch_query_dedicated_release(nvc0, hq);
+      /* Deferred arena retirement owns an mman allocation which keeps its
+       * parent BO referenced until the exact query fence signals.  Drop the
+       * query object's BO reference after queuing that retirement.  The
+       * dedicated path transfers its reference directly to fence work above.
+       */
+      if (hq->bo)
+         nouveau_bo_ref(NULL, &hq->bo);
+      hq->data = NULL;
+      hq->base_offset = 0;
+      hq->offset = 0;
+      hq->switch_query_dedicated = false;
+#else
       nouveau_bo_ref(NULL, &hq->bo);
       if (hq->mm) {
          if (hq->state == NVC0_HW_QUERY_STATE_READY)
@@ -47,15 +232,86 @@ nvc0_hw_query_allocate(struct nvc0_context *nvc0, struct nvc0_query *q,
             nouveau_fence_work(nvc0->base.fence,
                                nouveau_mm_free_work, hq->mm);
       }
+#endif
    }
    if (size) {
+#ifdef __SWITCH__
+      /* Query storage is persistently accessed by both the CPU and GPU: the
+       * CPU initializes sequence words, the GPU writes results, and fast
+       * availability checks read them without a blocking BO_WAIT.  The arena
+       * is CPU/GPU uncached and uses whole 128-byte-or-larger slots so neither
+       * cache maintenance nor false sharing can hide the sequence update.
+       */
+      const unsigned arena_size =
+         util_next_power_of_two(MAX2(size, NVC0_SWITCH_QUERY_SLOT_SIZE));
+      struct nvc0_switch_query_arena_stats *stats =
+         &screen->switch_query_arena;
+
+      hq->base_offset = 0;
+      hq->switch_query_dedicated = false;
+
+      /* Custom SM/metric queries have their own completion protocol and
+       * whole-BO waits.  Keep those uncommon records dedicated until that
+       * protocol also carries an exact per-record fence.  Normal GL queries,
+       * including occlusion/timestamp/SO/pipeline-statistics, use the arena.
+       */
+      if (!hq->funcs && screen->switch_query_mm) {
+         hq->mm = nouveau_mm_allocate(screen->switch_query_mm, arena_size,
+                                      &hq->bo, &hq->base_offset);
+      }
+
+      if (hq->bo) {
+         hq->switch_arena_slots =
+            arena_size / NVC0_SWITCH_QUERY_SLOT_SIZE;
+         simple_mtx_lock(&stats->lock);
+         stats->live_slots += hq->switch_arena_slots;
+         if (screen->switch_diagnostics_enabled) {
+            stats->allocations++;
+            stats->peak_slots = MAX2(stats->peak_slots, stats->live_slots);
+         }
+         simple_mtx_unlock(&stats->lock);
+      } else {
+         hq->mm = NULL;
+         hq->switch_arena_slots = 0;
+         hq->switch_query_dedicated = true;
+         if (screen->switch_diagnostics_enabled) {
+            simple_mtx_lock(&stats->lock);
+            stats->fallback_allocations++;
+            simple_mtx_unlock(&stats->lock);
+         }
+         ret = nouveau_bo_new(screen->base.device,
+                              NOUVEAU_BO_GART | NOUVEAU_BO_MAP |
+                                 NOUVEAU_BO_COHERENT,
+                              0x1000, arena_size, NULL, &hq->bo);
+         if (ret) {
+            if (screen->switch_diagnostics_enabled) {
+               simple_mtx_lock(&stats->lock);
+               stats->allocation_failures++;
+               simple_mtx_unlock(&stats->lock);
+            }
+            return false;
+         }
+      }
+#else
       hq->mm = nouveau_mm_allocate(screen->base.mm_GART, size, &hq->bo,
                                    &hq->base_offset);
       if (!hq->bo)
          return false;
+#endif
       hq->offset = hq->base_offset;
 
+#ifdef __SWITCH__
+      /* A shared slab is mapped once.  Remapping it for each suballocation
+       * would BO_WAIT on the most recent writer anywhere in that slab and
+       * recreate the query serialization this arena is intended to remove.
+       */
+      if (!hq->bo->map)
+         ret = BO_MAP(&screen->base, hq->bo, NOUVEAU_BO_RDWR, NULL);
+      else
+         ret = 0;
+#else
       ret = BO_MAP(&screen->base, hq->bo, 0, nvc0->base.client);
+#endif
       if (ret) {
          nvc0_hw_query_allocate(nvc0, q, 0);
          return false;
@@ -158,6 +414,9 @@ nvc0_hw_begin_query(struct nvc0_context *nvc0, struct nvc0_query *q)
       /* XXX: can we do this with the GPU, and sync with respect to a previous
        *  query ?
        */
+#ifdef __SWITCH__
+      nouveau_switch_bo_mark_cpu_dirty(hq->bo);
+#endif
       hq->data[0] = hq->sequence; /* initialize sequence */
       hq->data[1] = 1; /* initial render condition = true */
       hq->data[4] = hq->sequence + 1; /* for comparison COND_MODE */
@@ -220,6 +479,12 @@ nvc0_hw_begin_query(struct nvc0_context *nvc0, struct nvc0_query *q)
       break;
    }
    hq->state = NVC0_HW_QUERY_STATE_ACTIVE;
+#ifdef __SWITCH__
+   /* Preserve an exact retirement point even if an active query is destroyed
+    * before end_query.  End_query replaces this with its later completion.
+    */
+   nvc0_switch_query_track_write(nvc0, hq);
+#endif
    return ret;
 }
 
@@ -300,8 +565,17 @@ nvc0_hw_end_query(struct nvc0_context *nvc0, struct nvc0_query *q)
    default:
       break;
    }
+   /* On Switch every standard query allocation can be an arena slice, so all
+    * GPU-written queries need a precise retirement fence, not only the
+    * 64-bit queries that use a fence for availability on other platforms.
+    */
+#ifdef __SWITCH__
+   if (hq->state != NVC0_HW_QUERY_STATE_READY)
+      nvc0_switch_query_track_write(nvc0, hq);
+#else
    if (hq->is64bit)
       nouveau_fence_ref(nvc0->base.fence, &hq->fence, nvc0->base.screen);
+#endif
 }
 
 static bool
@@ -330,8 +604,32 @@ nvc0_hw_get_query_result(struct nvc0_context *nvc0, struct nvc0_query *q,
          }
          return false;
       }
-      if (BO_WAIT(&nvc0->screen->base, hq->bo, NOUVEAU_BO_RD, nvc0->base.client))
+#ifdef __SWITCH__
+      const uint64_t wait_start_ns =
+         nvc0->screen->switch_diagnostics_enabled ?
+            os_time_get_nano() : 0;
+      bool wait_ok;
+
+      /* Waiting on a shared arena BO would wait for its newest unrelated
+       * query writer.  The per-query logical fence is associated with the
+       * exact physical/native completion and waits only as far as this query.
+       */
+      if (hq->fence)
+         wait_ok = nouveau_fence_wait(hq->fence, NULL);
+      else
+         wait_ok = BO_WAIT(&nvc0->screen->base, hq->bo, NOUVEAU_BO_RD,
+                           nvc0->base.client) == 0;
+      if (nvc0->screen->switch_diagnostics_enabled) {
+         nvc0_switch_query_record_wait(
+            nvc0->screen, os_time_get_nano() - wait_start_ns);
+      }
+      if (!wait_ok)
          return false;
+#else
+      if (BO_WAIT(&nvc0->screen->base, hq->bo, NOUVEAU_BO_RD,
+                  nvc0->base.client))
+         return false;
+#endif
       NOUVEAU_DRV_STAT(&nvc0->screen->base, query_sync_count, 1);
    }
    hq->state = NVC0_HW_QUERY_STATE_READY;
@@ -518,6 +816,11 @@ nvc0_hw_get_query_result_resource(struct nvc0_context *nvc0,
                   offset + (result_type >= PIPE_QUERY_TYPE_I64 ? 8 : 4));
 
    nvc0_resource_validate(nvc0, buf, NOUVEAU_BO_WR);
+#ifdef __SWITCH__
+   /* The macro reads the query slice on the GPU.  Its completion, rather
+    * than the older query-write fence, now owns the earliest safe reuse. */
+   nvc0_hw_query_track_use(nvc0, q);
+#endif
 }
 
 static const struct nvc0_query_funcs hw_query_funcs = {
@@ -630,14 +933,18 @@ nvc0_hw_get_driver_query_info(struct nvc0_screen *screen, unsigned id,
 }
 
 void
-nvc0_hw_query_pushbuf_submit(struct nouveau_pushbuf *push,
+nvc0_hw_query_pushbuf_submit(struct nvc0_context *nvc0,
                              struct nvc0_query *q, unsigned result_offset)
 {
+   struct nouveau_pushbuf *push = nvc0->base.pushbuf;
    struct nvc0_hw_query *hq = nvc0_hw_query(q);
 
    PUSH_REF1(push, hq->bo, NOUVEAU_BO_RD | NOUVEAU_BO_GART);
    nouveau_pushbuf_data(push, hq->bo, hq->offset + result_offset, 4 |
                         NVC0_IB_ENTRY_1_NO_PREFETCH);
+#ifdef __SWITCH__
+   nvc0_hw_query_track_use(nvc0, q);
+#endif
 }
 
 void
@@ -671,4 +978,7 @@ nvc0_hw_query_fifo_wait(struct nvc0_context *nvc0, struct nvc0_query *q)
    }
    PUSH_DATA (push, (1 << 12) |
               NV84_SUBCHAN_SEMAPHORE_TRIGGER_ACQUIRE_GEQUAL);
+#ifdef __SWITCH__
+   nvc0_hw_query_track_use(nvc0, q);
+#endif
 }

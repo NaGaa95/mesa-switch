@@ -240,6 +240,7 @@ struct nvc0_context {
 #ifdef __SWITCH__
    bool switch_fast_draw;
    bool switch_gm20b_mme;
+   bool switch_state_validate_error;
    bool switch_index_valid;
    uint8_t switch_index_format;
    struct nouveau_bo *switch_index_bo;
@@ -253,6 +254,7 @@ struct nvc0_context {
    uint64_t switch_bindless_generation;
    uint64_t switch_validated_bindless_generation;
    uint64_t switch_validated_text_generation;
+   uint64_t switch_zbc_generation;
 #endif
 
    struct pipe_surface *fb_cbufs[PIPE_MAX_COLOR_BUFS];
@@ -352,6 +354,13 @@ nvc0_resource_validate(struct nvc0_context *nvc0, struct nv04_resource *res, uin
 
 /* nvc0_context.c */
 struct pipe_context *nvc0_create(struct pipe_screen *, void *, unsigned flags);
+
+/* Serialize access to the screen-owned Switch channel.  The implementation is
+ * recursive only for the current thread/screen so generic fence waits called
+ * from an already-locked draw path preserve state_lock -> fence.lock order.
+ */
+void nvc0_screen_state_lock(struct nvc0_screen *);
+void nvc0_screen_state_unlock(struct nvc0_screen *);
 void nvc0_bufctx_fence(struct nvc0_context *, struct nouveau_bufctx *,
                        bool on_flush);
 MUST_CHECK bool nvc0_default_kick_notify(struct nouveau_context *);
@@ -365,8 +374,15 @@ bool nvc0_program_translate(struct nvc0_program *, uint16_t chipset,
                             struct disk_cache *,
                             struct util_debug_callback *);
 bool nvc0_program_upload(struct nvc0_context *, struct nvc0_program *);
+bool nvc0_program_release_code(struct nvc0_context *, struct nvc0_program *);
+bool nvc0_program_flush_uploads(struct nvc0_context *);
+void nvc0_program_track_use(struct nvc0_context *, struct nvc0_program *);
+#ifdef __SWITCH__
+void nvc0_program_reclaim_retired(struct nvc0_screen *, unsigned);
+void nvc0_program_fini_retirements(struct nvc0_screen *);
+#endif
 void nvc0_program_destroy(struct nvc0_context *, struct nvc0_program *);
-void nvc0_program_library_upload(struct nvc0_context *);
+bool nvc0_program_library_upload(struct nvc0_context *);
 void nvc0_program_init_tcp_empty(struct nvc0_context *);
 
 /* nvc0_shader_state.c */
@@ -457,7 +473,6 @@ void nvc0_draw_vbo(struct pipe_context *, const struct pipe_draw_info *, unsigne
                    const struct pipe_draw_indirect_info *indirect,
                    const struct pipe_draw_start_count_bias *draws,
                    unsigned num_draws);
-
 void *
 nvc0_vertex_state_create(struct pipe_context *pipe,
                          unsigned num_elements,

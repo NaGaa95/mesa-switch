@@ -12,29 +12,12 @@ RUN apt-get update && \
 # Pre-install all Python packages
 RUN pip3 install --break-system-packages meson mako
 
-# Build and install the in-tree libnx over the base image copy.  This keeps
-# fresh containers (including downstream app builds that reuse this image) on
-# the same libnx ABI/implementation as the Mesa Switch port.
-COPY libnx /tmp/libnx
-RUN cd /tmp/libnx && \
-    DEVKITPRO=/opt/devkitpro make clean && \
-    DEVKITPRO=/opt/devkitpro make -j$(nproc) && \
-    DEVKITPRO=/opt/devkitpro make install && \
-    grep -q "nvioctlChannel_KickoffPbRetry" /opt/devkitpro/libnx/include/switch/nvidia/ioctl.h && \
-    /opt/devkitpro/devkitA64/bin/aarch64-none-elf-nm /opt/devkitpro/libnx/lib/libnx.a | \
-        grep -q "nvioctlChannel_KickoffPbRetry" && \
-    rm -rf /tmp/libnx
+# The Horizon backend uses the public libnx NVIDIA channel/ioctl API shipped by
+# the devkitPro base image. No ignored local libnx checkout or private ABI patch
+# is needed to reproduce the build.
 
-# Build and install libdrm_nouveau
-COPY libdrm-nouveau /tmp/libdrm-nouveau
-RUN cd /tmp/libdrm-nouveau && \
-    make clean && make && \
-    cp lib/libdrm_nouveau.a /opt/devkitpro/portlibs/switch/lib/ && \
-    cp include/nouveau.h /opt/devkitpro/portlibs/switch/include/ && \
-    cp include/nv_device_info.h /opt/devkitpro/portlibs/switch/include/ && \
-    mkdir -p /opt/devkitpro/portlibs/switch/lib/pkgconfig && \
-    cp lib/pkgconfig/libdrm_nouveau.pc /opt/devkitpro/portlibs/switch/lib/pkgconfig/ && \
-    rm -rf /tmp/libdrm-nouveau
+# Mesa's in-tree Horizon backend and Nouveau compatibility facade replace the
+# old external libdrm_nouveau portlib.
 
 # Build and install SPIRV-Tools (mesa 25.3 requires >= 2024.1)
 RUN cd /tmp && \

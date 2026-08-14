@@ -2613,6 +2613,14 @@ nvc0_hw_sm_end_query(struct nvc0_context *nvc0, struct nvc0_hw_query *hq)
          PUSH_DATA (push, (cfg->ctr[i].func << 4) | cfg->ctr[i].mode);
       }
    }
+
+#ifdef __SWITCH__
+   /* SM/metric records deliberately use dedicated storage rather than the
+    * standard query arena.  Preserve the exact logical completion after the
+    * counter-read dispatch and final reactivation packets, so destroying a
+    * query cannot release its BO while the GPU still writes the result. */
+   nouveau_fence_ref(nvc0->base.fence, &hq->fence, nvc0->base.screen);
+#endif
 }
 
 static inline bool

@@ -6,6 +6,10 @@
 
 #define NVC0_CAP_MAX_PROGRAM_TEMPS 128
 struct nir_shader;
+#ifdef __SWITCH__
+struct nouveau_fence;
+struct nvc0_screen;
+#endif
 
 
 struct nvc0_transform_feedback_state {
@@ -71,6 +75,13 @@ struct nvc0_program {
    struct nvc0_transform_feedback_state *tfb;
 
    struct nouveau_heap *mem;
+#ifdef __SWITCH__
+   /* Exact logical fence for the last submitted consumer of this text range.
+    * The fence is referenced until the allocation is retired or used again.
+    */
+   struct nouveau_fence *switch_last_use_fence;
+   struct nvc0_screen *switch_screen;
+#endif
 };
 
 void

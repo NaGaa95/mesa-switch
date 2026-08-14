@@ -46,34 +46,17 @@ if [ "$MESON_BIN" != "/usr/local/bin/meson" ]; then
 fi
 '
 
-# ── Step 1.6: Refresh libdrm-nouveau headers in devkitPro portlib ──────
-# The Docker image bakes in libdrm-nouveau headers, but we may have updated
-# them locally (e.g., nv_device_info.h synced with mesa 25.3). Re-copy so
-# bindgen sees the latest fields.
+# ── Step 1.6: Refresh in-tree Nouveau headers in devkitPro portlib ─────
+# Keep consumers and bindgen on the same public compatibility definitions as
+# this Mesa checkout. The Switch backend no longer consumes an external
+# libdrm-nouveau package.
 run '
-cp /project/libdrm-nouveau/include/*.h /opt/devkitpro/portlibs/switch/include/ 2>/dev/null || true
+cp /project/src/gallium/winsys/nouveau/drm/nouveau.h \
+    /opt/devkitpro/portlibs/switch/include/
 # Keep the in-tree Mesa header authoritative for bindgen users that include
 # nv_device_info.h through nouveau_device.h during the cross build.
-cp /project/src/nouveau/headers/nv_device_info.h /opt/devkitpro/portlibs/switch/include/ 2>/dev/null || true
-'
-
-# ── Step 1.65: Build and install the in-tree libnx ─────────────────────
-# Mesa links against libnx through the devkitPro prefix in switch_cross_file.txt.
-# Rebuild our checked-out libnx and install it over the container's stock copy
-# before Meson configures, so headers and libnx.a both contain local changes.
-echo "=== Building and installing local libnx ==="
-run '
-set -e
-export DEVKITPRO=/opt/devkitpro
-make -C /project/libnx clean
-make -C /project/libnx -j"$(nproc)"
-make -C /project/libnx install
-
-grep -q "nvioctlChannel_KickoffPbRetry" \
-    /opt/devkitpro/libnx/include/switch/nvidia/ioctl.h
-/opt/devkitpro/devkitA64/bin/aarch64-none-elf-nm \
-    /opt/devkitpro/libnx/lib/libnx.a | \
-    grep -q "nvioctlChannel_KickoffPbRetry"
+cp /project/src/nouveau/headers/nv_device_info.h \
+    /opt/devkitpro/portlibs/switch/include/
 '
 
 # ── Step 1.7: Make clang resource dir discoverable by mesa_clc ─────────

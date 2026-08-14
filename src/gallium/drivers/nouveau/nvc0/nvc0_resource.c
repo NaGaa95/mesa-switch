@@ -1,9 +1,83 @@
 #include "drm-uapi/drm_fourcc.h"
 
 #include "pipe/p_context.h"
+#include "nvc0/nvc0_context.h"
 #include "nvc0/nvc0_resource.h"
 #include "nouveau_context.h"
 #include "nouveau_screen.h"
+
+#ifdef __SWITCH__
+static void
+nvc0_switch_transfer_begin(struct pipe_context *pipe)
+{
+   struct nvc0_context *nvc0 = nvc0_context(pipe);
+
+   nvc0_screen_state_lock(nvc0->screen);
+   nouveau_pushbuf_bind_context(nvc0->base.pushbuf, &nvc0->base);
+}
+
+static void
+nvc0_switch_transfer_end(struct pipe_context *pipe)
+{
+   nvc0_screen_state_unlock(nvc0_context(pipe)->screen);
+}
+
+static void *
+nvc0_switch_buffer_transfer_map(struct pipe_context *pipe,
+                                struct pipe_resource *resource,
+                                unsigned level, unsigned usage,
+                                const struct pipe_box *box,
+                                struct pipe_transfer **transfer)
+{
+   nvc0_switch_transfer_begin(pipe);
+   void *map = nouveau_buffer_transfer_map(pipe, resource, level, usage, box,
+                                           transfer);
+   nvc0_switch_transfer_end(pipe);
+   return map;
+}
+
+static void *
+nvc0_switch_miptree_transfer_map(struct pipe_context *pipe,
+                                 struct pipe_resource *resource,
+                                 unsigned level, unsigned usage,
+                                 const struct pipe_box *box,
+                                 struct pipe_transfer **transfer)
+{
+   nvc0_switch_transfer_begin(pipe);
+   void *map = nvc0_miptree_transfer_map(pipe, resource, level, usage, box,
+                                         transfer);
+   nvc0_switch_transfer_end(pipe);
+   return map;
+}
+
+static void
+nvc0_switch_transfer_flush_region(struct pipe_context *pipe,
+                                  struct pipe_transfer *transfer,
+                                  const struct pipe_box *box)
+{
+   nvc0_switch_transfer_begin(pipe);
+   nouveau_buffer_transfer_flush_region(pipe, transfer, box);
+   nvc0_switch_transfer_end(pipe);
+}
+
+static void
+nvc0_switch_buffer_transfer_unmap(struct pipe_context *pipe,
+                                  struct pipe_transfer *transfer)
+{
+   nvc0_switch_transfer_begin(pipe);
+   nouveau_buffer_transfer_unmap(pipe, transfer);
+   nvc0_switch_transfer_end(pipe);
+}
+
+static void
+nvc0_switch_miptree_transfer_unmap(struct pipe_context *pipe,
+                                   struct pipe_transfer *transfer)
+{
+   nvc0_switch_transfer_begin(pipe);
+   nvc0_miptree_transfer_unmap(pipe, transfer);
+   nvc0_switch_transfer_end(pipe);
+}
+#endif
 
 
 static struct pipe_resource *
@@ -152,11 +226,23 @@ nvc0_resource_from_user_memory(struct pipe_screen *pipe,
 void
 nvc0_init_resource_functions(struct pipe_context *pcontext)
 {
+#ifdef __SWITCH__
+   /* Buffer and texture transfers can append M2MF/P2MF methods and their BO
+    * waits are allowed to force a kickoff.  The Horizon screen owns one
+    * pushbuf, so keep each callback (but not the returned CPU mapping's
+    * lifetime) as one recursively locked, context-bound transaction. */
+   pcontext->buffer_map = nvc0_switch_buffer_transfer_map;
+   pcontext->texture_map = nvc0_switch_miptree_transfer_map;
+   pcontext->transfer_flush_region = nvc0_switch_transfer_flush_region;
+   pcontext->buffer_unmap = nvc0_switch_buffer_transfer_unmap;
+   pcontext->texture_unmap = nvc0_switch_miptree_transfer_unmap;
+#else
    pcontext->buffer_map = nouveau_buffer_transfer_map;
    pcontext->texture_map = nvc0_miptree_transfer_map;
    pcontext->transfer_flush_region = nouveau_buffer_transfer_flush_region;
    pcontext->buffer_unmap = nouveau_buffer_transfer_unmap;
    pcontext->texture_unmap = nvc0_miptree_transfer_unmap;
+#endif
    pcontext->buffer_subdata = u_default_buffer_subdata;
    pcontext->texture_subdata = u_default_texture_subdata;
    pcontext->invalidate_resource = nv50_invalidate_resource;

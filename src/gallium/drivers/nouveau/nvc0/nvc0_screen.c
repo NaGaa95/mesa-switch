@@ -26,9 +26,16 @@
 #include <xf86drm.h>
 #else
 #include <switch.h>
+#include "nouveau/horizon/nouveau_horizon.h"
 #endif
 #include "drm-uapi/nouveau_drm.h"
 #include <nvif/class.h>
+#ifdef __SWITCH__
+#include "nouveau/headers/drf.h"
+/* clb197.h and nvif/class.h publish the same MAXWELL_B class identifier. */
+#undef MAXWELL_B
+#include "nouveau/headers/nvidia/classes/clb197.h"
+#endif
 #include "util/format/u_format.h"
 #include "util/format/u_format_s3tc.h"
 #include "util/u_screen.h"
@@ -56,6 +63,62 @@ enum nvc0_engine_class {
    NVC0_ENGINE_CLASS_COPY,
    NVC0_ENGINE_CLASS_3D,
 };
+
+#ifdef __SWITCH__
+static bool
+nvc0_switch_diagnostics_enabled(void)
+{
+   return debug_get_bool_option("NOUVEAU_SWITCH_LOG", false) ||
+          debug_get_bool_option("NOUVEAU_SWITCH_STATS", false);
+}
+
+bool
+nvc0_switch_zbc_update(struct nvc0_screen *screen,
+                       struct nouveau_pushbuf *push,
+                       uint64_t *generation)
+{
+   static_assert(DRF_MASK(
+                    NVB197_SET_COLOR_ZERO_BANDWIDTH_CLEAR_SLOT_DISABLE_MASK) ==
+                    (UINT32_C(1) << NOUVEAU_HORIZON_ZBC_SLOT_COUNT) - 1u,
+                 "Horizon and GM20B ZBC slot widths must match");
+   static_assert(NVB197_SET_Z_ZERO_BANDWIDTH_CLEAR ==
+                    NVB197_SET_COLOR_ZERO_BANDWIDTH_CLEAR + 4,
+                 "GM20B color/depth ZBC methods must be consecutive");
+
+   if (screen == NULL || push == NULL || generation == NULL ||
+       screen->eng3d == NULL ||
+       screen->eng3d->oclass != GM107_3D_CLASS)
+      return true;
+
+   struct nouveau_horizon_device *hdev =
+      nouveau_switch_device_get_horizon(screen->base.device);
+   if (hdev == NULL)
+      return true;
+
+   if (*generation == nouveau_horizon_device_get_zbc_generation(hdev))
+      return true;
+
+   struct nouveau_horizon_zbc_state state;
+   nouveau_horizon_device_get_zbc_state(hdev, &state);
+   if (*generation == state.generation)
+      return true;
+
+   if (!PUSH_SPACE(push, 3))
+      return false;
+
+   /* The public libnx query exposes one union active mask.  The GM20B class
+    * consumes its inverse through both methods; do not infer independent
+    * color/depth tables.
+    */
+   BEGIN_NVC0(push,
+              SUBC_3D(NVB197_SET_COLOR_ZERO_BANDWIDTH_CLEAR), 2);
+   PUSH_DATA(push, state.slot_disable_mask);
+   PUSH_DATA(push, state.slot_disable_mask);
+   *generation = state.generation;
+   nouveau_horizon_device_record_zbc_program(hdev);
+   return true;
+}
+#endif
 
 static int
 nvc0_object_mclass(struct nouveau_object *parent,
@@ -374,7 +437,14 @@ nvc0_init_screen_caps(struct nvc0_screen *screen)
    caps->draw_parameters = true;
    caps->shader_pack_half_float = true;
    caps->multi_draw_indirect = true;
+#ifdef __SWITCH__
+   /* Horizon has no DRM PRIME fd import/export ABI.  The Switch nouveau
+    * facade therefore cannot back GL_EXT_memory_object yet.
+    */
+   caps->memobj = false;
+#else
    caps->memobj = true;
+#endif
    caps->multi_draw_indirect_params = true;
    caps->fs_face_is_integer_sysval = true;
    caps->query_buffer_object = true;
@@ -423,8 +493,24 @@ nvc0_init_screen_caps(struct nvc0_screen *screen)
    caps->resource_from_user_memory_compute_only =
    caps->system_svm = screen->base.has_svm;
 
+#ifdef __SWITCH__
+   /* VTN is wired into the Switch EGL archive, but keep the public extension
+    * disabled until the complete GM20B SPIR-V path passes device testing.
+    */
+   const bool enable_gl_spirv =
+      debug_get_bool_option("NOUVEAU_SWITCH_GL_SPIRV", false);
+   caps->gl_spirv = enable_gl_spirv;
+   caps->gl_spirv_variable_pointers = enable_gl_spirv;
+   if (screen->switch_diagnostics_enabled) {
+      debug_printf("nouveau/switch: GL_ARB_gl_spirv %s "
+                   "(NOUVEAU_SWITCH_GL_SPIRV=%u, experimental)\n",
+                   enable_gl_spirv ? "enabled" : "gated off",
+                   enable_gl_spirv);
+   }
+#else
    caps->gl_spirv = true;
    caps->gl_spirv_variable_pointers = true;
+#endif
 
    /* nir related caps */
    caps->nir_images_as_deref = false;
@@ -504,6 +590,142 @@ nvc0_screen_get_sample_pixel_grid(struct pipe_screen *pscreen,
    }
 }
 
+#ifdef __SWITCH__
+static void
+nvc0_switch_submission_lock(struct nouveau_screen *base)
+{
+   nvc0_screen_state_lock((struct nvc0_screen *)base);
+}
+
+static void
+nvc0_switch_submission_unlock(struct nouveau_screen *base)
+{
+   nvc0_screen_state_unlock((struct nvc0_screen *)base);
+}
+
+static void
+nvc0_switch_text_bo_reclaim(struct nvc0_screen *screen, unsigned max_scan)
+{
+   struct nvc0_switch_text_stats *stats = &screen->switch_text_stats;
+   struct nvc0_switch_text_bo_retirement *retired, *next;
+   unsigned scanned = 0;
+
+   simple_mtx_lock(&screen->switch_text_bo_lock);
+   LIST_FOR_EACH_ENTRY_SAFE(retired, next,
+                            &screen->switch_text_bo_retirements, head) {
+      if (retired->poll_failed)
+         continue;
+      if (max_scan && scanned++ >= max_scan)
+         break;
+      if (nouveau_switch_client_push_get(screen->base.client,
+                                         retired->bo) != NULL)
+         continue;
+
+      const int ret = nouveau_switch_pushbuf_wait_fence(
+         screen->base.pushbuf, &retired->fence, 0);
+      if (ret == -ETIMEDOUT) {
+         if (screen->switch_diagnostics_enabled)
+            stats->bo_poll_timeouts++;
+         continue;
+      }
+      if (ret) {
+         /* A failed native completion can no longer prove safe reuse.  Keep
+          * the BO reference quarantined for teardown instead of passing it
+          * to a potentially blocking destructor from this polling path.
+          */
+         if (screen->switch_diagnostics_enabled)
+            stats->bo_poll_failures++;
+         retired->poll_failed = true;
+         continue;
+      }
+
+      list_del(&retired->head);
+
+      /* The exact physical completion dominates every old-text access.  BO
+       * destruction therefore needs neither a cache-clean fence upgrade nor
+       * a CPU wait; erase the now-stale hazard record before the final ref.
+       */
+      nouveau_switch_bo_clear_submission(retired->bo);
+      nouveau_bo_ref(NULL, &retired->bo);
+      if (screen->switch_diagnostics_enabled)
+         stats->bo_reclaimed++;
+      assert(stats->bo_pending_retirements > 0);
+      stats->bo_pending_retirements--;
+      p_atomic_dec(&screen->switch_text_bo_pending);
+      FREE(retired);
+   }
+   simple_mtx_unlock(&screen->switch_text_bo_lock);
+}
+
+static void
+nvc0_switch_text_bo_fini(struct nvc0_screen *screen)
+{
+   struct nvc0_switch_text_stats *stats = &screen->switch_text_stats;
+   struct nvc0_switch_text_bo_retirement *retired, *next;
+
+   /* Pick up already-complete entries first without ever sleeping. */
+   nvc0_switch_text_bo_reclaim(screen, 0);
+
+   simple_mtx_lock(&screen->switch_text_bo_lock);
+   LIST_FOR_EACH_ENTRY_SAFE(retired, next,
+                            &screen->switch_text_bo_retirements, head) {
+      list_del(&retired->head);
+
+      /* Context teardown normally drains the channel before screen teardown,
+       * but use the stored exact completion as the authority.  This wait is
+       * intentionally outside state_lock.  If completion cannot be proven,
+       * leak the retained BO reference as a teardown-only quarantine rather
+       * than letting bo_destroy wait, free, or reuse live GPU storage.
+       */
+      const int ret = nouveau_switch_pushbuf_wait_fence_required(
+         screen->base.pushbuf, &retired->fence, UINT64_MAX,
+         "shader text BO teardown");
+      const bool adapter_owned =
+         nouveau_switch_client_push_get(screen->base.client,
+                                        retired->bo) != NULL;
+      if (!ret && !adapter_owned) {
+         nouveau_switch_bo_clear_submission(retired->bo);
+         nouveau_bo_ref(NULL, &retired->bo);
+         if (screen->switch_diagnostics_enabled)
+            stats->bo_reclaimed++;
+      } else {
+         if (screen->switch_diagnostics_enabled)
+            stats->bo_quarantined++;
+         _debug_printf(
+            "nouveau/switch: quarantining replaced shader text BO "
+            "size=%llu fence=%u:%u after teardown retirement failed: "
+            "wait=%d adapter_owned=%u\n",
+            (unsigned long long)retired->size, retired->fence.id,
+            retired->fence.value, ret, adapter_owned);
+         retired->bo = NULL; /* deliberately retain its last reference */
+      }
+
+      assert(stats->bo_pending_retirements > 0);
+      stats->bo_pending_retirements--;
+      p_atomic_dec(&screen->switch_text_bo_pending);
+      FREE(retired);
+   }
+   simple_mtx_unlock(&screen->switch_text_bo_lock);
+   assert(p_atomic_read(&screen->switch_text_bo_pending) == 0);
+
+   if (screen->switch_diagnostics_enabled) {
+      _debug_printf(
+         "nouveau/switch: shader text BO final deferred=%llu reclaimed=%llu "
+         "poll_timeouts=%llu poll_failures=%llu quarantined=%llu peak=%u "
+         "pending=%u bytes=%llu\n",
+         (unsigned long long)stats->bo_deferred,
+         (unsigned long long)stats->bo_reclaimed,
+         (unsigned long long)stats->bo_poll_timeouts,
+         (unsigned long long)stats->bo_poll_failures,
+         (unsigned long long)stats->bo_quarantined,
+         stats->bo_peak_retirements, stats->bo_pending_retirements,
+         (unsigned long long)stats->bo_retired_bytes);
+   }
+
+   simple_mtx_destroy(&screen->switch_text_bo_lock);
+}
+#endif
+
 static void
 nvc0_screen_destroy(struct pipe_screen *pscreen)
 {
@@ -512,6 +734,19 @@ nvc0_screen_destroy(struct pipe_screen *pscreen)
    if (!screen->base.initialized)
       return;
 
+#ifdef __SWITCH__
+   /* Fence callbacks can own dedicated query BOs, shader/text allocations and
+    * other GPU-visible objects which are not all represented by query-arena
+    * live_slots.  If a context's exact infinite drain failed, no teardown
+    * order can prove those objects idle.  Preserve the full device ownership
+    * graph rather than unmapping storage which the GPU may still access. */
+   if (screen->base.fence_teardown_quarantined) {
+      _debug_printf("nouveau/switch: retaining screen/device after failed "
+                    "context fence drain\n");
+      return;
+   }
+#endif
+
    if (screen->blitter)
       nvc0_blitter_destroy(screen);
    if (screen->pm.prog) {
@@ -519,6 +754,11 @@ nvc0_screen_destroy(struct pipe_screen *pscreen)
       nvc0_program_destroy(NULL, screen->pm.prog);
       FREE(screen->pm.prog);
    }
+
+#ifdef __SWITCH__
+   nvc0_program_fini_retirements(screen);
+   nvc0_switch_text_bo_fini(screen);
+#endif
 
    nouveau_bo_ref(NULL, &screen->text);
    nouveau_bo_ref(NULL, &screen->uniform_bo);
@@ -539,7 +779,57 @@ nvc0_screen_destroy(struct pipe_screen *pscreen)
    nouveau_object_del(&screen->compute);
    nouveau_object_del(&screen->nvsw);
 
+#ifdef __SWITCH__
+   struct nvc0_switch_query_arena_stats *stats =
+      &screen->switch_query_arena;
+   simple_mtx_lock(&stats->lock);
+   if (screen->switch_diagnostics_enabled) {
+      _debug_printf(
+         "nouveau/switch: query arena final allocations=%llu "
+         "retirements=%llu deferred=%llu defer_failures=%llu "
+         "live_slots=%u peak_slots=%u fallbacks=%llu alloc_failures=%llu "
+         "waits=%llu wait_ms=%.3f wait_max_ms=%.3f\n",
+         (unsigned long long)stats->allocations,
+         (unsigned long long)stats->retirements,
+         (unsigned long long)stats->deferred_retirements,
+         (unsigned long long)stats->defer_failures, stats->live_slots,
+         stats->peak_slots,
+         (unsigned long long)stats->fallback_allocations,
+         (unsigned long long)stats->allocation_failures,
+         (unsigned long long)stats->wait_count,
+         stats->wait_ns / 1000000.0, stats->wait_max_ns / 1000000.0);
+   }
+   simple_mtx_unlock(&stats->lock);
+
+   /* Context teardown drains its current fence before reaching screen
+    * destruction, so all fence_work slot retirements must have run.  Never
+    * tear down a live allocator if that invariant is violated: deferred work
+    * still owns its screen/stats pointer and safe quarantine beats UAF/reuse.
+    */
+   if (stats->live_slots == 0 && screen->switch_query_mm) {
+      nouveau_mm_destroy(screen->switch_query_mm);
+      screen->switch_query_mm = NULL;
+      simple_mtx_destroy(&stats->lock);
+   } else if (stats->live_slots != 0) {
+      _debug_printf("nouveau/switch: query arena still has %u live slots "
+                    "after context drain; quarantining screen/allocator\n",
+                    stats->live_slots);
+      /* Do not destroy the mutex or allocator: a late completion callback
+       * may still own both.  Keep the enclosing screen/device alive as well,
+       * because the callback deliberately stores their stable stats address.
+       * This is an abnormal teardown-only leak and is safer than UAF/reuse.
+       */
+      return;
+   } else {
+      simple_mtx_destroy(&stats->lock);
+   }
+#endif
+
    nouveau_screen_fini(&screen->base);
+#ifdef __SWITCH__
+   screen->base.submission_lock = NULL;
+   screen->base.submission_unlock = NULL;
+#endif
    simple_mtx_destroy(&screen->state_lock);
 
    FREE(screen);
@@ -685,6 +975,14 @@ static u32
 nvc0_screen_fence_update(struct pipe_screen *pscreen)
 {
    struct nvc0_screen *screen = nvc0_screen(pscreen);
+#ifdef __SWITCH__
+   /* Fence progress is already sampled frequently by kicks, status queries,
+    * and waits.  Piggyback a bounded, zero-timeout old-text poll here so BO
+    * retirement never adds a CPU wait to a rendering critical section.
+    */
+   if (p_atomic_read(&screen->switch_text_bo_pending) > 0)
+      nvc0_switch_text_bo_reclaim(screen, 2);
+#endif
    return screen->fence.map[0];
 }
 
@@ -769,6 +1067,10 @@ nvc0_screen_resize_text_area(struct nvc0_screen *screen, struct nouveau_pushbuf 
                              uint64_t size)
 {
    struct nouveau_bo *bo;
+   struct nouveau_heap *new_heap = NULL;
+#ifdef __SWITCH__
+   struct nvc0_switch_text_bo_retirement *retired = NULL;
+#endif
    int ret;
 
    ret = nouveau_bo_new(screen->base.device, NV_VRAM_DOMAIN(&screen->base),
@@ -776,6 +1078,84 @@ nvc0_screen_resize_text_area(struct nvc0_screen *screen, struct nouveau_pushbuf 
    if (ret)
       return ret;
 
+   /* Build the replacement allocator before disturbing the live text
+    * generation.  Publishing a BO without a heap would turn a recoverable
+    * host OOM into a later NULL dereference during shader validation.
+    */
+   ret = nouveau_heap_init(&new_heap, 0, size - 0x800);
+   if (ret) {
+      nouveau_bo_ref(NULL, &bo);
+      return -ENOMEM;
+   }
+
+#ifdef __SWITCH__
+   if (screen->text) {
+      NvFence fence = { .id = UINT32_MAX };
+
+      simple_mtx_assert_locked(&screen->state_lock);
+
+      /* A successful full-barrier kick invalidates pushbuf residency and its
+       * final validation may immediately seed a reference-only record for
+       * the still-current text BO.  Remove that persistent binding, then
+       * drain the reference before transferring screen ownership.  Otherwise
+       * a later batch could attach a newer GPU-only fence and make its final
+       * kref release enter bo_destroy under the fence lock.
+       */
+      if (push->bufctx)
+         nouveau_bufctx_reset(push->bufctx, NVC0_BIND_3D_TEXT);
+      if (screen->cur_ctx && screen->cur_ctx->bufctx_3d) {
+         nouveau_bufctx_reset(screen->cur_ctx->bufctx_3d,
+                              NVC0_BIND_3D_TEXT);
+         screen->cur_ctx->switch_text_bo = NULL;
+         screen->cur_ctx->switch_residency_generation++;
+      }
+      if (nouveau_switch_client_push_get(screen->base.client,
+                                         screen->text) != NULL) {
+         ret = PUSH_KICK_RET(push);
+         if (ret) {
+            nouveau_heap_destroy(&new_heap);
+            nouveau_bo_ref(NULL, &bo);
+            return ret;
+         }
+      }
+      if (nouveau_switch_client_push_get(screen->base.client,
+                                         screen->text) != NULL) {
+         _debug_printf("nouveau/switch: shader text resize could not "
+                       "drain old BO residency; keeping old BO\n");
+         nouveau_heap_destroy(&new_heap);
+         nouveau_bo_ref(NULL, &bo);
+         return -EBUSY;
+      }
+
+      /* Runtime growth is entered only after a successful GPU-only full
+       * barrier.  Refuse the resize if that exact physical completion is not
+       * available: guessing at an older/newer fence would make BO reuse
+       * unsound.  The initial allocation has no old text BO and skips this.
+       */
+      simple_mtx_lock(&screen->base.fence.lock);
+      const bool have_fence =
+         nouveau_switch_pushbuf_get_last_fence(push, &fence, NULL);
+      simple_mtx_unlock(&screen->base.fence.lock);
+      if (!have_fence || (int32_t)fence.id < 0) {
+         _debug_printf("nouveau/switch: shader text resize has no exact "
+                       "physical completion; keeping old BO\n");
+         nouveau_heap_destroy(&new_heap);
+         nouveau_bo_ref(NULL, &bo);
+         return -EIO;
+      }
+
+      retired = CALLOC_STRUCT(nvc0_switch_text_bo_retirement);
+      if (!retired) {
+         nouveau_heap_destroy(&new_heap);
+         nouveau_bo_ref(NULL, &bo);
+         return -ENOMEM;
+      }
+
+      retired->bo = screen->text; /* transfer the screen's existing ref */
+      retired->fence = fence;
+      retired->size = screen->text->size;
+   }
+#else
    /* Make sure that the pushbuf has acquired a reference to the old text
     * segment, as it may have commands that will reference it.
     */
@@ -783,19 +1163,36 @@ nvc0_screen_resize_text_area(struct nvc0_screen *screen, struct nouveau_pushbuf 
       PUSH_REF1(screen->base.pushbuf, screen->text,
                 NV_VRAM_DOMAIN(&screen->base) | NOUVEAU_BO_RD);
    nouveau_bo_ref(NULL, &screen->text);
+#endif
    screen->text = bo;
 #ifdef __SWITCH__
    screen->switch_text_generation++;
+   if (retired) {
+      struct nvc0_switch_text_stats *stats = &screen->switch_text_stats;
+
+      simple_mtx_lock(&screen->switch_text_bo_lock);
+      list_addtail(&retired->head, &screen->switch_text_bo_retirements);
+      if (screen->switch_diagnostics_enabled) {
+         stats->bo_deferred++;
+         stats->bo_retired_bytes += retired->size;
+      }
+      stats->bo_pending_retirements++;
+      p_atomic_inc(&screen->switch_text_bo_pending);
+      if (screen->switch_diagnostics_enabled) {
+         stats->bo_peak_retirements =
+            MAX2(stats->bo_peak_retirements,
+                 stats->bo_pending_retirements);
+      }
+      simple_mtx_unlock(&screen->switch_text_bo_lock);
+   }
 #endif
 
    nouveau_heap_free(&screen->lib_code);
+#ifdef __SWITCH__
+   screen->switch_shader_library_failed = false;
+#endif
    nouveau_heap_destroy(&screen->text_heap);
-
-   /*
-    * Shader storage needs a 2K (from NVIDIA) overallocations at the end
-    * to avoid prefetch bugs.
-    */
-   nouveau_heap_init(&screen->text_heap, 0, size - 0x800);
+   screen->text_heap = new_heap;
 
    /* update the code segment setup */
    if (screen->eng3d->oclass < GV100_3D_CLASS) {
@@ -888,14 +1285,42 @@ nvc0_screen_create(struct nouveau_device *dev)
    pscreen->destroy = nvc0_screen_destroy;
 
    simple_mtx_init(&screen->state_lock, mtx_plain);
+#ifdef __SWITCH__
+   screen->switch_diagnostics_enabled =
+      nvc0_switch_diagnostics_enabled();
+   screen->base.submission_lock = nvc0_switch_submission_lock;
+   screen->base.submission_unlock = nvc0_switch_submission_unlock;
+   list_inithead(&screen->switch_text_retirements);
+   list_inithead(&screen->switch_text_bo_retirements);
+   simple_mtx_init(&screen->switch_text_bo_lock, mtx_plain);
+#endif
 
    ret = nouveau_screen_init(&screen->base, dev);
    if (ret)
       FAIL_SCREEN_INIT("Base screen init failed: %d\n", ret);
+#ifdef __SWITCH__
+   simple_mtx_init(&screen->switch_query_arena.lock, mtx_plain);
+#endif
 
    chan = screen->base.channel;
    push = screen->base.pushbuf;
    push->rsvd_kick = 5;
+
+#ifdef __SWITCH__
+   union nouveau_bo_config query_mm_config;
+   memset(&query_mm_config, 0, sizeof(query_mm_config));
+   screen->switch_query_mm = nouveau_mm_create(
+      dev, NOUVEAU_BO_GART | NOUVEAU_BO_MAP | NOUVEAU_BO_COHERENT,
+      &query_mm_config);
+   if (screen->switch_diagnostics_enabled) {
+      if (!screen->switch_query_mm)
+         _debug_printf("nouveau/switch: query arena unavailable; "
+                       "using dedicated query BO fallback\n");
+      else
+         _debug_printf("nouveau/switch: query arena enabled "
+                       "(cpu/gpu-uncached, 128-byte slots)\n");
+   }
+#endif
 
    /* TODO: could this be higher on Kepler+? how does reclocking vs no
     * reclocking affect performance?
@@ -933,13 +1358,27 @@ nvc0_screen_create(struct nouveau_device *dev)
    screen->base.base.is_video_format_supported = nouveau_vp3_screen_video_supported;
 
    flags = NOUVEAU_BO_GART | NOUVEAU_BO_MAP;
+#ifdef __SWITCH__
+   /* The GPU writes this persistently mapped polling word while the CPU reads
+    * it without a BO_WAIT.  Keep the mapping uncached independent of the
+    * facade's advertised DRM compatibility version.
+    */
+   flags |= NOUVEAU_BO_COHERENT;
+#else
    if (screen->base.drm->version >= 0x01000202)
       flags |= NOUVEAU_BO_COHERENT;
+#endif
 
    ret = nouveau_bo_new(dev, flags, 0, 4096, NULL, &screen->fence.bo);
    if (ret)
       FAIL_SCREEN_INIT("Error allocating fence BO: %d\n", ret);
-   BO_MAP(&screen->base, screen->fence.bo, 0, NULL);
+#ifdef __SWITCH__
+   ret = BO_MAP(&screen->base, screen->fence.bo, NOUVEAU_BO_RDWR, NULL);
+#else
+   ret = BO_MAP(&screen->base, screen->fence.bo, 0, NULL);
+#endif
+   if (ret)
+      FAIL_SCREEN_INIT("Error mapping fence BO: %d\n", ret);
    screen->fence.map = screen->fence.bo->map;
    screen->base.fence.emit = nvc0_screen_fence_emit;
    screen->base.fence.update = nvc0_screen_fence_update;
@@ -1051,6 +1490,12 @@ nvc0_screen_create(struct nouveau_device *dev)
    screen->base.class_3d = screen->eng3d->oclass;
    BEGIN_NVC0(push, SUBC_3D(NV01_SUBCHAN_OBJECT), 1);
    PUSH_DATA (push, screen->eng3d->oclass);
+
+#ifdef __SWITCH__
+   if (!nvc0_switch_zbc_update(screen, push,
+                               &screen->switch_zbc_generation))
+      FAIL_SCREEN_INIT("Failed to program GM20B ZBC masks: %d\n", -ENOSPC);
+#endif
 
    BEGIN_NVC0(push, NVC0_3D(COND_MODE), 1);
    PUSH_DATA (push, NVC0_3D_COND_MODE_ALWAYS);
@@ -1386,8 +1831,10 @@ nvc0_screen_create(struct nouveau_device *dev)
    if (ret)
       goto fail;
 #endif
-   PUSH_KICK (push);
 #ifdef __SWITCH__
+   ret = nouveau_switch_pushbuf_kick_cpu(push, push->channel);
+   if (ret)
+      goto fail;
    unsigned native_threshold = 0;
    const int native_syncpt =
       nouveau_bo_get_syncpoint(screen->fence.bo, &native_threshold);
@@ -1402,6 +1849,8 @@ nvc0_screen_create(struct nouveau_device *dev)
    } else {
       goto fail;
    }
+#else
+   PUSH_KICK (push);
 #endif
 
    screen->tic.entries = CALLOC(

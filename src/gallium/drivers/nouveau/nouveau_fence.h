@@ -6,6 +6,10 @@
 #include "util/list.h"
 #include "util/simple_mtx.h"
 
+#ifdef __SWITCH__
+#include <switch.h>
+#endif
+
 #define NOUVEAU_FENCE_STATE_AVAILABLE 0
 #define NOUVEAU_FENCE_STATE_EMITTING  1
 #define NOUVEAU_FENCE_STATE_EMITTED   2
@@ -27,6 +31,11 @@ struct nouveau_fence {
    struct nouveau_context *context;
 #ifndef __SWITCH__
    struct nouveau_bo *bo;
+#else
+   NvFence native_fence;
+   bool native_fence_valid;
+   bool native_fence_cpu_visible;
+   uint64_t batch_cookie;
 #endif
    int state;
    int ref;
@@ -43,6 +52,17 @@ struct nouveau_fence_list {
    simple_mtx_t lock;
    void (*emit)(struct pipe_context *, uint32_t *sequence, struct nouveau_bo *wait);
    uint32_t (*update)(struct pipe_screen *);
+#ifdef __SWITCH__
+   uint64_t next_batch_cookie;
+   bool perf_enabled;
+   uint32_t perf_log_interval;
+   uint64_t native_assign_calls;
+   uint64_t native_assign_scanned;
+   uint64_t native_assign_assigned;
+   uint64_t native_assign_cpu_ns;
+   uint64_t native_assign_max_cpu_ns;
+   uint64_t native_assign_max_scanned;
+#endif
 };
 
 static inline void
@@ -72,6 +92,8 @@ void nouveau_fence_update(struct nouveau_screen *, bool flushed);
 /** returns false on error */
 MUST_CHECK bool nouveau_fence_next_if_current(struct nouveau_context *, struct nouveau_fence *);
 bool nouveau_fence_wait(struct nouveau_fence *, struct util_debug_callback *);
+bool nouveau_fence_wait_timeout(struct nouveau_fence *,
+                                struct util_debug_callback *, uint64_t);
 bool nouveau_fence_signalled(struct nouveau_fence *);
 void nouveau_fence_ref(struct nouveau_fence *, struct nouveau_fence **,
                        struct nouveau_screen *);

@@ -128,6 +128,8 @@ struct _egl_driver {
    EGLBoolean (*SwapInterval)(_EGLDisplay *disp, _EGLSurface *surf,
                               EGLint interval);
    EGLBoolean (*SwapBuffers)(_EGLDisplay *disp, _EGLSurface *draw);
+   EGLBoolean (*ResizeSurfaceMESA)(_EGLDisplay *disp, _EGLSurface *surface,
+                                   EGLint width, EGLint height);
    EGLBoolean (*CopyBuffers)(_EGLDisplay *disp, _EGLSurface *surface,
                              void *native_pixmap_target);
 

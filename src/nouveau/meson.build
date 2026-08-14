@@ -4,6 +4,9 @@
 subdir('headers')
 subdir('drm')
 subdir('winsys')
+if with_platform_switch
+  subdir('horizon')
+endif
 if with_nouveau_vk
   subdir('rust')
   subdir('nil')

@@ -234,10 +234,10 @@ nvk_cmd_buffer_flush_push_flags(struct nvk_cmd_buffer *cmd,
             struct nvk_cmd_push *last =
                util_dynarray_top_ptr(&cmd->pushes, struct nvk_cmd_push);
             /* A SYNC/no-prefetch bit belongs to the beginning of a GPFIFO
-             * entry.  It is safe and correct to extend an existing
-             * SYNC entry with following contiguous commands: the combined
-             * entry still cannot be fetched early.  A new SYNC segment must
-             * remain a boundary and therefore may not be folded backward.
+             * entry.  Extending an existing SYNC entry with following
+             * contiguous commands is safe because the combined entry still
+             * cannot be fetched early.  A new SYNC segment must remain a
+             * boundary and therefore may not be folded backward.
              */
             if (!push.no_prefetch &&
                 last->map != NULL &&

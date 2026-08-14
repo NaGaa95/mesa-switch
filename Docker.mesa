@@ -8,13 +8,6 @@ RUN apt-get update && \
 # Pre-install all Python packages
 RUN pip3 install --break-system-packages meson mako
 
-# Build and install libdrm_nouveau
-COPY libdrm-nouveau /tmp/libdrm-nouveau
-RUN cd /tmp/libdrm-nouveau && \
-    make clean && make && \
-    cp lib/libdrm_nouveau.a /opt/devkitpro/portlibs/switch/lib/ && \
-    cp include/nouveau.h /opt/devkitpro/portlibs/switch/include/ && \
-    cp include/nv_device_info.h /opt/devkitpro/portlibs/switch/include/ && \
-    mkdir -p /opt/devkitpro/portlibs/switch/lib/pkgconfig && \
-    cp lib/pkgconfig/libdrm_nouveau.pc /opt/devkitpro/portlibs/switch/lib/pkgconfig/ && \
-    rm -rf /tmp/libdrm-nouveau
+# The Switch Nouveau implementation is built entirely from Mesa's in-tree
+# Horizon backend and compatibility facade; no external libdrm_nouveau portlib
+# is required in this image.

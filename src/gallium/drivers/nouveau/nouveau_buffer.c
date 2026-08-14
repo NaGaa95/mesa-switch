@@ -45,6 +45,31 @@ nouveau_buffer_malloc(struct nv04_resource *buf)
    return !!buf->data;
 }
 
+static inline uint32_t
+nouveau_transfer_access(unsigned usage)
+{
+   uint32_t access = 0;
+
+   if (usage & PIPE_MAP_READ)
+      access |= NOUVEAU_BO_RD;
+   if (usage & PIPE_MAP_WRITE)
+      access |= NOUVEAU_BO_WR;
+   if (usage & PIPE_MAP_DONTBLOCK)
+      access |= NOUVEAU_BO_NOBLOCK;
+
+   return access;
+}
+
+static inline uint32_t
+nouveau_switch_map_access(uint32_t access)
+{
+#ifdef __SWITCH__
+   return access;
+#else
+   return 0;
+#endif
+}
+
 static inline bool
 nouveau_buffer_allocate(struct nouveau_screen *screen,
                         struct nv04_resource *buf, unsigned domain)
@@ -59,10 +84,27 @@ nouveau_buffer_allocate(struct nouveau_screen *screen,
       NOUVEAU_DRV_STAT(screen, buf_obj_current_bytes_vid, buf->base.width0);
    } else
    if (domain == NOUVEAU_BO_GART) {
+#ifdef __SWITCH__
+      /* Horizon CPU and GPU caches are not hardware coherent.  Give buffers
+       * which Gallium advertises as coherently mapped a dedicated uncached
+       * NvMap instead of suballocating them from the cached GART heap.
+       */
+      if (buf->base.flags & PIPE_RESOURCE_FLAG_MAP_COHERENT) {
+         const int ret = nouveau_bo_new(
+            screen->device,
+            NOUVEAU_BO_GART | NOUVEAU_BO_MAP | NOUVEAU_BO_COHERENT,
+            0x1000, size, NULL, &buf->bo);
+         if (ret)
+            return false;
+         buf->offset = 0;
+      } else
+#endif
+      {
       buf->mm = nouveau_mm_allocate(screen->mm_GART, size,
                                     &buf->bo, &buf->offset);
       if (!buf->bo)
          return false;
+      }
       NOUVEAU_DRV_STAT(screen, buf_obj_current_bytes_sys, buf->base.width0);
    } else {
       assert(domain == 0);
@@ -151,7 +193,8 @@ nouveau_buffer_destroy(struct pipe_screen *pscreen,
  */
 static uint8_t *
 nouveau_transfer_staging(struct nouveau_context *nv,
-                         struct nouveau_transfer *tx, bool permit_pb)
+                         struct nouveau_transfer *tx, bool permit_pb,
+                         uint32_t access)
 {
    const unsigned adj = tx->base.box.x & NOUVEAU_MIN_BUFFER_MAP_ALIGN_MASK;
    const unsigned size = align(tx->base.box.width, 4) + adj;
@@ -168,7 +211,8 @@ nouveau_transfer_staging(struct nouveau_context *nv,
          nouveau_mm_allocate(nv->screen->mm_GART, size, &tx->bo, &tx->offset);
       if (tx->bo) {
          tx->offset += adj;
-         if (!BO_MAP(nv->screen, tx->bo, 0, NULL))
+         if (!BO_MAP(nv->screen, tx->bo,
+                     nouveau_switch_map_access(access), NULL))
             tx->map = (uint8_t *)tx->bo->map + tx->offset;
       }
    }
@@ -219,11 +263,17 @@ nouveau_transfer_write(struct nouveau_context *nv, struct nouveau_transfer *tx,
    if (buf->domain == NOUVEAU_BO_GART)
       NOUVEAU_DRV_STAT(nv->screen, buf_write_bytes_staging_sys, size);
 
-   if (tx->bo)
+   if (tx->bo) {
+#ifdef __SWITCH__
+      /* The staging BO may have received a GPU preserve copy after it was
+       * initially mapped.  That submission consumes the old dirty state and
+       * the following CPU write must be published again before this copy.
+       */
+      nouveau_switch_bo_mark_cpu_dirty(tx->bo);
+#endif
       nv->copy_data(nv, buf->bo, buf->offset + base, buf->domain,
                     tx->bo, tx->offset + offset, NOUVEAU_BO_GART, size);
-   else
-   if (nv->push_cb && can_cb)
+   } else if (nv->push_cb && can_cb)
       nv->push_cb(nv, buf,
                   base, size / 4, (const uint32_t *)data);
    else
@@ -328,7 +378,7 @@ nouveau_buffer_cache(struct nouveau_context *nv, struct nv04_resource *buf)
       return true;
    nv->stats.buf_cache_count++;
 
-   if (!nouveau_transfer_staging(nv, &tx, false))
+   if (!nouveau_transfer_staging(nv, &tx, false, NOUVEAU_BO_RD))
       return false;
 
    ret = nouveau_transfer_read(nv, &tx);
@@ -407,7 +457,12 @@ nouveau_buffer_transfer_map(struct pipe_context *pipe,
 
 #ifdef __SWITCH__
    if (usage & PIPE_MAP_THREAD_SAFE) {
-      /* GLthread only maps fresh GART stream buffers through this path. */
+      /* GLthread keeps this map alive and writes through the returned pointer
+       * without a transfer flush or unmap before every GPU use.  Cached memory
+       * cannot provide that contract because there is no later publication
+       * point at which to re-arm cache cleaning.  Promote the fresh stream
+       * buffer to a dedicated CPU-uncached allocation before exposing it.
+       */
       const unsigned required = PIPE_MAP_WRITE | PIPE_MAP_UNSYNCHRONIZED;
       const unsigned unsupported =
          PIPE_MAP_READ | PIPE_MAP_DISCARD_RANGE |
@@ -420,7 +475,23 @@ nouveau_buffer_transfer_map(struct pipe_context *pipe,
          return NULL;
       }
 
-      ret = BO_MAP(nv->screen, buf->bo, 0, nv->client);
+      if (!(buf->bo->flags & NOUVEAU_BO_COHERENT)) {
+         if (buf->valid_buffer_range.start < buf->valid_buffer_range.end) {
+            *ptransfer = NULL;
+            FREE(tx);
+            return NULL;
+         }
+
+         buf->base.flags |= PIPE_RESOURCE_FLAG_MAP_PERSISTENT |
+                            PIPE_RESOURCE_FLAG_MAP_COHERENT;
+         if (!nouveau_buffer_reallocate(nv->screen, buf, NOUVEAU_BO_GART)) {
+            *ptransfer = NULL;
+            FREE(tx);
+            return NULL;
+         }
+      }
+
+      ret = BO_MAP(nv->screen, buf->bo, NOUVEAU_BO_WR, nv->client);
       if (ret) {
          *ptransfer = NULL;
          FREE(tx);
@@ -453,7 +524,8 @@ nouveau_buffer_transfer_map(struct pipe_context *pipe,
           * back into VRAM on unmap. */
          if (usage & PIPE_MAP_DISCARD_WHOLE_RESOURCE)
             buf->status &= NOUVEAU_BUFFER_STATUS_REALLOC_MASK;
-         nouveau_transfer_staging(nv, tx, true);
+         nouveau_transfer_staging(nv, tx, true,
+                                  nouveau_transfer_access(usage));
       } else {
          if (buf->status & NOUVEAU_BUFFER_STATUS_GPU_WRITING) {
             /* The GPU is currently writing to this buffer. Copy its current
@@ -464,13 +536,15 @@ nouveau_buffer_transfer_map(struct pipe_context *pipe,
                align_free(buf->data);
                buf->data = NULL;
             }
-            nouveau_transfer_staging(nv, tx, false);
+            nouveau_transfer_staging(nv, tx, false,
+                                     nouveau_transfer_access(usage));
             nouveau_transfer_read(nv, tx);
          } else {
             /* The buffer is currently idle. Create a staging area for writes,
              * and make sure that the cached data is up-to-date. */
             if (usage & PIPE_MAP_WRITE)
-               nouveau_transfer_staging(nv, tx, true);
+               nouveau_transfer_staging(nv, tx, true,
+                                        nouveau_transfer_access(usage));
             if (!buf->data)
                nouveau_buffer_cache(nv, buf);
          }
@@ -497,7 +571,9 @@ nouveau_buffer_transfer_map(struct pipe_context *pipe,
     * reasonable buffer for that case.
     */
    ret = BO_MAP(nv->screen, buf->bo,
-                buf->mm ? 0 : nouveau_screen_transfer_flags(usage),
+                buf->mm ? nouveau_switch_map_access(
+                             nouveau_screen_transfer_flags(usage)) :
+                          nouveau_screen_transfer_flags(usage),
                 nv->client);
    if (ret) {
       FREE(tx);
@@ -523,7 +599,8 @@ nouveau_buffer_transfer_map(struct pipe_context *pipe,
       if (usage & PIPE_MAP_DISCARD_RANGE) {
          /* The whole range is being discarded, so it doesn't matter what was
           * there before. No need to copy anything over. */
-         nouveau_transfer_staging(nv, tx, true);
+         nouveau_transfer_staging(nv, tx, true,
+                                  nouveau_transfer_access(usage));
          map = tx->map;
       } else
       if (nouveau_buffer_busy(buf, PIPE_MAP_READ)) {
@@ -534,7 +611,8 @@ nouveau_buffer_transfer_map(struct pipe_context *pipe,
       } else {
          /* It is expected that the returned buffer be a representation of the
           * data in question, so we must copy it over from the buffer. */
-         nouveau_transfer_staging(nv, tx, true);
+         nouveau_transfer_staging(nv, tx, true,
+                                  nouveau_transfer_access(usage));
          if (tx->map)
             memcpy(tx->map, map, box->width);
          map = tx->map;
@@ -557,6 +635,13 @@ nouveau_buffer_transfer_flush_region(struct pipe_context *pipe,
 
    if (tx->map)
       nouveau_transfer_write(nouveau_context(pipe), tx, box->x, box->width);
+#ifdef __SWITCH__
+   else if (buf->bo)
+      /* A direct cached persistent map can be written after BO_MAP initially
+       * marked it dirty.  Re-arm cache cleaning for each explicit flush.
+       */
+      nouveau_switch_bo_mark_cpu_dirty(buf->bo);
+#endif
 
    util_range_add(&buf->base, &buf->valid_buffer_range,
                   tx->base.box.x + box->x,
@@ -585,6 +670,10 @@ nouveau_buffer_transfer_unmap(struct pipe_context *pipe,
       if (!(tx->base.usage & PIPE_MAP_FLUSH_EXPLICIT)) {
          if (tx->map)
             nouveau_transfer_write(nv, tx, 0, tx->base.box.width);
+#ifdef __SWITCH__
+         else if (buf->bo)
+            nouveau_switch_bo_mark_cpu_dirty(buf->bo);
+#endif
 
          util_range_add(&buf->base, &buf->valid_buffer_range,
                         tx->base.box.x, tx->base.box.x + tx->base.box.width);
@@ -661,7 +750,7 @@ nouveau_resource_map_offset(struct nouveau_context *nv,
       unsigned rw;
       rw = (flags & NOUVEAU_BO_WR) ? PIPE_MAP_WRITE : PIPE_MAP_READ;
       nouveau_buffer_sync(nv, res, rw);
-      if (BO_MAP(nv->screen, res->bo, 0, NULL))
+      if (BO_MAP(nv->screen, res->bo, nouveau_switch_map_access(flags), NULL))
          return NULL;
    } else {
       if (BO_MAP(nv->screen, res->bo, flags, nv->client))
@@ -845,7 +934,8 @@ nouveau_buffer_migrate(struct nouveau_context *nv,
    if (new_domain == NOUVEAU_BO_GART && old_domain == 0) {
       if (!nouveau_buffer_allocate(screen, buf, new_domain))
          return false;
-      ret = BO_MAP(nv->screen, buf->bo, 0, nv->client);
+      ret = BO_MAP(nv->screen, buf->bo,
+                   nouveau_switch_map_access(NOUVEAU_BO_WR), nv->client);
       if (ret)
          return ret;
       memcpy((uint8_t *)buf->bo->map + buf->offset, buf->data, size);
@@ -884,7 +974,7 @@ nouveau_buffer_migrate(struct nouveau_context *nv,
       tx.base.box.width = buf->base.width0;
       tx.bo = NULL;
       tx.map = NULL;
-      if (!nouveau_transfer_staging(nv, &tx, false))
+      if (!nouveau_transfer_staging(nv, &tx, false, NOUVEAU_BO_WR))
          return false;
       nouveau_transfer_write(nv, &tx, 0, tx.base.box.width);
       nouveau_buffer_transfer_del(nv, &tx);
@@ -915,7 +1005,8 @@ nouveau_user_buffer_upload(struct nouveau_context *nv,
    if (!nouveau_buffer_reallocate(screen, buf, NOUVEAU_BO_GART))
       return false;
 
-   ret = BO_MAP(nv->screen, buf->bo, 0, nv->client);
+   ret = BO_MAP(nv->screen, buf->bo,
+                nouveau_switch_map_access(NOUVEAU_BO_WR), nv->client);
    if (ret)
       return false;
    memcpy((uint8_t *)buf->bo->map + buf->offset + base, buf->data + base, size);
@@ -960,8 +1051,22 @@ static inline int
 nouveau_scratch_bo_alloc(struct nouveau_context *nv, struct nouveau_bo **pbo,
                          unsigned size)
 {
-   return nouveau_bo_new(nv->screen->device, NOUVEAU_BO_GART | NOUVEAU_BO_MAP,
-                         4096, size, NULL, pbo);
+   uint32_t flags = NOUVEAU_BO_GART | NOUVEAU_BO_MAP;
+
+#ifdef __SWITCH__
+   /* Scratch BOs are CPU-written streaming storage for translated user
+    * vertices and indices.  The allocator reuses a 2 MiB ring in small
+    * pieces, so a BO-wide cached dirty bit cleaned the same 2 MiB allocation
+    * on almost every affected draw.  Besides the severe CPU cost, an early
+    * validation split could consume the dirty bit before translation had
+    * finished.  Uncached coherent storage matches the Switch command/query
+    * upload model: CPU writes are immediately GPU-visible and no cache-range
+    * publication is required.
+    */
+   flags |= NOUVEAU_BO_COHERENT;
+#endif
+
+   return nouveau_bo_new(nv->screen->device, flags, 4096, size, NULL, pbo);
 }
 
 static void
@@ -1011,7 +1116,8 @@ nouveau_scratch_runout(struct nouveau_context *nv, unsigned size)
 
    ret = nouveau_scratch_bo_alloc(nv, &nv->scratch.runout->bo[n], size);
    if (!ret) {
-      ret = BO_MAP(nv->screen, nv->scratch.runout->bo[n], 0, NULL);
+      ret = BO_MAP(nv->screen, nv->scratch.runout->bo[n],
+                   nouveau_switch_map_access(NOUVEAU_BO_WR), NULL);
       if (ret)
          nouveau_bo_ref(NULL, &nv->scratch.runout->bo[--nv->scratch.runout->nr]);
    }
@@ -1086,6 +1192,14 @@ nouveau_scratch_data(struct nouveau_context *nv,
 
    memcpy(nv->scratch.map + bgn, (const uint8_t *)data + base, size);
 
+#ifdef __SWITCH__
+   /* A scratch BO can receive several rounds of CPU writes between channel
+    * submissions.  Each write must re-arm cache cleaning after a previous
+    * submission consumed and cleared the BO's dirty state.
+    */
+   nouveau_switch_bo_mark_cpu_dirty(nv->scratch.current);
+#endif
+
    *bo = nv->scratch.current;
    return (*bo)->offset + (bgn - base);
 }
@@ -1104,6 +1218,10 @@ nouveau_scratch_get(struct nouveau_context *nv,
       bgn = 0;
    }
    nv->scratch.offset = align(end, 4);
+
+#ifdef __SWITCH__
+   nouveau_switch_bo_mark_cpu_dirty(nv->scratch.current);
+#endif
 
    *pbo = nv->scratch.current;
    *gpu_addr = nv->scratch.current->offset + bgn;

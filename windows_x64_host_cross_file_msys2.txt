@@ -4,6 +4,7 @@ cpp = 'C:/msys64/clang64/bin/clang++.exe'
 ar = 'C:/msys64/clang64/bin/llvm-ar.exe'
 strip = 'C:/msys64/clang64/bin/llvm-strip.exe'
 nm = 'C:/msys64/clang64/bin/llvm-nm.exe'
+llvm-config = 'C:/msys64/clang64/bin/llvm-config.exe'
 pkg-config = 'C:/msys64/clang64/bin/pkg-config.exe'
 cmake = 'C:/msys64/clang64/bin/cmake.exe'
 

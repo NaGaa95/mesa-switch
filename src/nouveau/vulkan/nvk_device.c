@@ -22,6 +22,8 @@
 #include "vk_common_entrypoints.h"
 #include "vk_pipeline_cache.h"
 #include "vk_debug_utils.h"
+#include "vk_log.h"
+#include "util/u_debug.h"
 #include "util/u_printf.h"
 #include "vulkan/wsi/wsi_common.h"
 
@@ -276,6 +278,41 @@ init_dispatch_tables(struct nvk_device *dev)
    add_entrypoints(&b, &vk_common_device_entrypoints, NVK_DISPATCH_TABLE_COUNT);
 }
 
+#ifdef __SWITCH__
+static void
+nvk_device_init_cpu_write_mem_policy(struct nvk_device *dev)
+{
+   /* CPU-written command and transient stream allocations are write-only
+    * from the host and benefit from avoiding explicit cache publication on
+    * Horizon.  Keep GPU caching enabled; either policy can be disabled for
+    * compatibility through its environment option.
+    */
+   dev->cmd_mem_cpu_uncached =
+      debug_get_bool_option("NVK_SWITCH_CMD_MEM_CPU_UNCACHED", true);
+   dev->mem_stream_cpu_uncached =
+      debug_get_bool_option("NVK_SWITCH_MEM_STREAM_CPU_UNCACHED", true);
+}
+
+static bool
+nvk_device_try_destroy_queues(struct nvk_device *dev,
+                              const char *operation)
+{
+   vk_foreach_queue_safe(iter, &dev->vk) {
+      struct nvk_queue *queue = container_of(iter, struct nvk_queue, vk);
+      if (!nvk_queue_try_destroy(dev, queue)) {
+         vk_loge(VK_LOG_OBJS(&dev->vk.base),
+                 "nvk-switch: %s cannot prove queue completion; retaining "
+                 "the logical device, nvkmd device, heaps, descriptor "
+                 "tables, upload queue, and all remaining queues",
+                 operation);
+         return false;
+      }
+   }
+
+   return true;
+}
+#endif
+
 VKAPI_ATTR VkResult VKAPI_CALL
 nvk_CreateDevice(VkPhysicalDevice physicalDevice,
                  const VkDeviceCreateInfo *pCreateInfo,
@@ -285,6 +322,9 @@ nvk_CreateDevice(VkPhysicalDevice physicalDevice,
    VK_FROM_HANDLE(nvk_physical_device, pdev, physicalDevice);
    VkResult result = VK_ERROR_OUT_OF_HOST_MEMORY;
    struct nvk_device *dev;
+#ifdef __SWITCH__
+   bool upload_finished = false;
+#endif
 
    dev = vk_zalloc2(&pdev->vk.instance->alloc, pAllocator,
                     sizeof(*dev), 8, VK_SYSTEM_ALLOCATION_SCOPE_DEVICE);
@@ -308,6 +348,10 @@ nvk_CreateDevice(VkPhysicalDevice physicalDevice,
       result = nvkmd_pdev_create_dev(pdev->nvkmd, &pdev->vk.base, &dev->nvkmd);
       if (result != VK_SUCCESS)
          goto fail_init;
+
+#ifdef __SWITCH__
+      nvk_device_init_cpu_write_mem_policy(dev);
+#endif
 
 #ifndef __SWITCH__
       vk_device_set_drm_fd(&dev->vk, nvkmd_dev_get_drm_fd(dev->nvkmd));
@@ -461,12 +505,41 @@ nvk_CreateDevice(VkPhysicalDevice physicalDevice,
    return VK_SUCCESS;
 
 fail_mem_cache:
+#ifdef __SWITCH__
+   /* Establish queue completion before releasing even cache/meta-owned GPU
+    * objects.  On failure the failed vkCreateDevice() intentionally leaves
+    * the unpublished device allocation as a quarantine anchor.
+    */
+   if (!nvk_device_try_destroy_queues(dev, "device-create unwind"))
+      return result;
    vk_pipeline_cache_destroy(dev->vk.mem_cache, NULL);
+   goto fail_queue_resources;
+#else
+   vk_pipeline_cache_destroy(dev->vk.mem_cache, NULL);
+#endif
 fail_queues:
+#ifdef __SWITCH__
+   if (!nvk_device_try_destroy_queues(dev, "device-create unwind"))
+      return result;
+#else
    vk_foreach_queue_safe(iter, &dev->vk) {
       struct nvk_queue *queue = container_of(iter, struct nvk_queue, vk);
       nvk_queue_destroy(dev, queue);
    }
+#endif
+fail_queue_resources:
+#ifdef __SWITCH__
+   /* Queue creation can enqueue uploads to queue-owned state.  Retire and
+    * release that independent channel before any target heap or descriptor
+    * allocation is destroyed. */
+   if (!nvk_upload_queue_try_finish(dev, &dev->upload)) {
+      vk_loge(VK_LOG_OBJS(&dev->vk.base),
+              "nvk-switch: device-create unwind cannot release the upload "
+              "channel; retaining the complete unpublished device graph");
+      return result;
+   }
+   upload_finished = true;
+#endif
    if (dev->vab_memory)
       nvkmd_mem_unref(dev->vab_memory);
 fail_slm:
@@ -486,7 +559,17 @@ fail_images:
 fail_zero_page:
    nvkmd_mem_unref(dev->zero_page);
 fail_upload:
+#ifdef __SWITCH__
+   if (!upload_finished &&
+       !nvk_upload_queue_try_finish(dev, &dev->upload)) {
+      vk_loge(VK_LOG_OBJS(&dev->vk.base),
+              "nvk-switch: device-create unwind cannot release the upload "
+              "channel; retaining the remaining device ownership graph");
+      return result;
+   }
+#else
    nvk_upload_queue_finish(dev, &dev->upload);
+#endif
 fail_nvkmd:
    nvkmd_dev_destroy(dev->nvkmd);
 fail_init:
@@ -506,6 +589,27 @@ nvk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
 
    const struct nvk_physical_device *pdev = nvk_device_physical(dev);
 
+#ifdef __SWITCH__
+   /* Queue teardown is the completion proof for every command submitted on
+    * each native channel.  It must precede all device-wide GPU allocation
+    * destruction so a failed proof can quarantine the complete ownership
+    * graph without leaving dangling GPU addresses.
+    */
+   if (dev->nvkmd &&
+       !nvk_device_try_destroy_queues(dev, "device destruction"))
+      return;
+
+   if (dev->nvkmd &&
+       !nvk_upload_queue_try_finish(dev, &dev->upload)) {
+      vk_loge(VK_LOG_OBJS(&dev->vk.base),
+              "nvk-switch: upload teardown failed during device "
+              "destruction; retaining the complete logical device "
+              "ownership graph");
+      return;
+   }
+
+#endif
+
    if (dev->nvkmd && NAK_CAN_PRINTF)
       nvk_destroy_printf(dev);
 
@@ -517,17 +621,21 @@ nvk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
 
    vk_pipeline_cache_destroy(dev->vk.mem_cache, NULL);
 
+#ifndef __SWITCH__
    vk_foreach_queue_safe(iter, &dev->vk) {
       struct nvk_queue *queue = container_of(iter, struct nvk_queue, vk);
       nvk_queue_destroy(dev, queue);
    }
+#endif
 
    if (dev->vab_memory)
       nvkmd_mem_unref(dev->vab_memory);
 
    if (dev->nvkmd) {
       /* Idle the upload queue before we tear down heaps */
+#ifndef __SWITCH__
       nvk_upload_queue_sync(dev, &dev->upload);
+#endif
 
       nvk_slm_area_finish(&dev->slm);
       if (pdev->info.cls_eng3d < MAXWELL_B)
@@ -538,7 +646,9 @@ nvk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
       nvk_descriptor_table_finish(dev, &dev->samplers);
       nvk_descriptor_table_finish(dev, &dev->images);
       nvkmd_mem_unref(dev->zero_page);
+#ifndef __SWITCH__
       nvk_upload_queue_finish(dev, &dev->upload);
+#endif
       nvkmd_dev_destroy(dev->nvkmd);
    }
 

@@ -38,6 +38,71 @@ struct nvc0_context;
 
 struct nvc0_blitter;
 
+#ifdef __SWITCH__
+struct nouveau_mman;
+
+struct nvc0_switch_text_retirement {
+   struct list_head head;
+   struct nouveau_heap *mem;
+   struct nouveau_fence *fence;
+   uint32_t start;
+   uint32_t size;
+};
+
+/* A text-area resize follows a physical full-barrier submission.  Keep the
+ * replaced BO alive against that exact GPU completion instead of handing its
+ * final reference to BO destruction, where a GPU-only fence would otherwise
+ * be upgraded and waited by the CPU.
+ */
+struct nvc0_switch_text_bo_retirement {
+   struct list_head head;
+   struct nouveau_bo *bo;
+   NvFence fence;
+   uint64_t size;
+   bool poll_failed;
+};
+
+struct nvc0_switch_text_stats {
+   uint64_t uploads;
+   uint64_t upload_batches;
+   uint64_t upload_barrier_failures;
+   uint64_t immediate_frees;
+   uint64_t deferred_frees;
+   uint64_t reclaimed_frees;
+   uint64_t pressure_reclaims;
+   uint64_t pressure_barriers;
+   uint64_t pressure_barrier_failures;
+   uint64_t quarantined_frees;
+   uint64_t retired_bytes;
+   uint32_t pending_retirements;
+   uint32_t peak_retirements;
+
+   uint64_t bo_deferred;
+   uint64_t bo_reclaimed;
+   uint64_t bo_poll_timeouts;
+   uint64_t bo_poll_failures;
+   uint64_t bo_quarantined;
+   uint64_t bo_retired_bytes;
+   uint32_t bo_pending_retirements;
+   uint32_t bo_peak_retirements;
+};
+
+struct nvc0_switch_query_arena_stats {
+   simple_mtx_t lock;
+   uint64_t allocations;
+   uint64_t retirements;
+   uint64_t deferred_retirements;
+   uint64_t defer_failures;
+   uint64_t fallback_allocations;
+   uint64_t allocation_failures;
+   uint64_t wait_count;
+   uint64_t wait_ns;
+   uint64_t wait_max_ns;
+   uint32_t live_slots;
+   uint32_t peak_slots;
+};
+#endif
+
 struct nvc0_graph_state {
    bool flushed;
    bool rasterizer_discard;
@@ -82,6 +147,15 @@ struct nvc0_screen {
    struct nouveau_bo *text;
 #ifdef __SWITCH__
    uint64_t switch_text_generation;
+   uint64_t switch_zbc_generation;
+   bool switch_diagnostics_enabled;
+   bool switch_shader_upload_pending;
+   bool switch_shader_library_failed;
+   struct list_head switch_text_retirements;
+   struct list_head switch_text_bo_retirements;
+   simple_mtx_t switch_text_bo_lock;
+   int switch_text_bo_pending;
+   struct nvc0_switch_text_stats switch_text_stats;
 #endif
    struct nouveau_bo *uniform_bo;
    struct nouveau_bo *tls;
@@ -120,6 +194,15 @@ struct nvc0_screen {
       uint32_t *map;
    } fence;
 
+#ifdef __SWITCH__
+   /* CPU/GPU-uncached, 128-byte-granular storage for hardware query records.
+    * This has a separate allocator from ordinary GART so query polling never
+    * shares cacheable slabs with streaming application data.
+    */
+   struct nouveau_mman *switch_query_mm;
+   struct nvc0_switch_query_arena_stats switch_query_arena;
+#endif
+
    struct {
       struct nvc0_program *prog; /* compute state object to read MP counters */
       struct nvc0_hw_sm_query *mp_counter[8]; /* counter to query allocation */
@@ -151,6 +234,12 @@ int nvc0_screen_get_driver_query_group_info(struct pipe_screen *, unsigned,
                                             struct pipe_driver_query_group_info *);
 
 bool nvc0_blitter_create(struct nvc0_screen *);
+
+#ifdef __SWITCH__
+bool nvc0_switch_zbc_update(struct nvc0_screen *screen,
+                            struct nouveau_pushbuf *push,
+                            uint64_t *generation);
+#endif
 void nvc0_blitter_destroy(struct nvc0_screen *);
 
 void nvc0_screen_make_buffers_resident(struct nvc0_screen *);

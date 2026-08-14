@@ -9,6 +9,7 @@
 #include "util/format/u_format.h"
 #include "util/format/u_format_s3tc.h"
 #include "util/u_string.h"
+#include "util/u_debug.h"
 #include "util/hex.h"
 
 #include "util/os_mman.h"
@@ -19,6 +20,9 @@
 #include <stdlib.h>
 
 #include "drm-uapi/nouveau_drm.h"
+#ifdef __SWITCH__
+#include "drm-uapi/drm_fourcc.h"
+#endif
 #ifndef __SWITCH__
 #include <xf86drm.h>
 #endif
@@ -100,9 +104,43 @@ nouveau_screen_fence_finish(struct pipe_screen *screen,
    if (!timeout)
       return nouveau_fence_signalled(nouveau_fence(pfence));
 
+#ifdef __SWITCH__
+   return nouveau_fence_wait_timeout(nouveau_fence(pfence), NULL, timeout);
+#else
    return nouveau_fence_wait(nouveau_fence(pfence), NULL);
+#endif
 }
 
+#ifdef __SWITCH__
+static bool
+nouveau_switch_decode_nwindow_modifier(uint64_t modifier,
+                                        uint8_t *pte_kind_out,
+                                        uint16_t *tile_mode_out)
+{
+   if (modifier == DRM_FORMAT_MOD_INVALID ||
+       modifier == DRM_FORMAT_MOD_LINEAR)
+      return false;
+
+   const uint64_t canonical =
+      drm_fourcc_canonicalize_nvidia_format_mod(modifier);
+   const uint8_t pte_kind = (canonical >> 12) & 0xff;
+   const uint8_t block_height_log2 = canonical & 0xf;
+   if (pte_kind == NvKind_Pitch || block_height_log2 > 5)
+      return false;
+
+   /* Current Horizon NWindow buffers use GM20B's Tegra sector layout,
+    * Fermi-Volta kind generation and no compression metadata.
+    */
+   const uint64_t expected = DRM_FORMAT_MOD_NVIDIA_BLOCK_LINEAR_2D(
+      0, 0, 0, pte_kind, block_height_log2);
+   if (canonical != expected)
+      return false;
+
+   *pte_kind_out = pte_kind;
+   *tile_mode_out = (uint16_t)block_height_log2 << 4;
+   return true;
+}
+#endif
 
 struct nouveau_bo *
 nouveau_screen_bo_from_handle(struct pipe_screen *pscreen,
@@ -126,16 +164,61 @@ nouveau_screen_bo_from_handle(struct pipe_screen *pscreen,
       return NULL;
    }
 
-   if (whandle->type == WINSYS_HANDLE_TYPE_SHARED)
+   if (whandle->type == WINSYS_HANDLE_TYPE_SHARED) {
+#ifdef __SWITCH__
+      uint8_t pte_kind;
+      uint16_t tile_mode;
+      if (!nouveau_switch_decode_nwindow_modifier(whandle->modifier,
+                                                   &pte_kind, &tile_mode)) {
+         debug_printf("%s: unsupported Switch modifier 0x%016" PRIx64 "\n",
+                      __func__, whandle->modifier);
+         return NULL;
+      }
+      ret = nouveau_switch_bo_name_ref_explicit(
+         dev, whandle->handle, whandle->size, NvKind_Pitch,
+         true, pte_kind, tile_mode, &bo);
+#else
       ret = nouveau_bo_name_ref(dev, whandle->handle, &bo);
-   else
+#endif
+   } else {
       ret = nouveau_bo_prime_handle_ref(dev, whandle->handle, &bo);
+   }
 
    if (ret) {
       debug_printf("%s: ref name 0x%08x failed with %d\n",
                    __func__, whandle->handle, ret);
       return NULL;
    }
+
+#ifdef __SWITCH__
+   /* A numeric NvMap name does not describe its layout.  The explicit import
+    * above registers or validates complete NWindow metadata; also require the
+    * resulting BO configuration to agree with the caller's modifier.
+    */
+   if (whandle->type == WINSYS_HANDLE_TYPE_SHARED) {
+      bool compatible = whandle->modifier != DRM_FORMAT_MOD_INVALID;
+      if (compatible && bo->config.nvc0.memtype == NvKind_Pitch) {
+         compatible = whandle->modifier == DRM_FORMAT_MOD_LINEAR;
+      } else if (compatible) {
+         const uint64_t declared =
+            drm_fourcc_canonicalize_nvidia_format_mod(whandle->modifier);
+         const uint64_t expected = DRM_FORMAT_MOD_NVIDIA_BLOCK_LINEAR_2D(
+            0, 0, 0, bo->config.nvc0.memtype,
+            (bo->config.nvc0.tile_mode >> 4) & 0xf);
+         compatible = declared == expected;
+      }
+      if (whandle->size != 0 && whandle->size != bo->size)
+         compatible = false;
+
+      if (!compatible) {
+         debug_printf("%s: NvMap 0x%08x metadata does not match modifier "
+                      "0x%016" PRIx64 "\n",
+                      __func__, whandle->handle, whandle->modifier);
+         nouveau_bo_ref(NULL, &bo);
+         return NULL;
+      }
+   }
+#endif
 
    *out_stride = whandle->stride;
    *out_offset = whandle->offset;
@@ -220,11 +303,35 @@ nouveau_query_memory_info(struct pipe_screen *pscreen,
    const struct nouveau_screen *screen = nouveau_screen(pscreen);
    struct nouveau_device *dev = screen->device;
 
+#ifdef __SWITCH__
+   /* GM20B has no dedicated VRAM on Switch: all GPU allocations consume the
+    * process UMA entitlement.  Report that pool once as device memory rather
+    * than double-counting it as both device and staging memory.  Refresh the
+    * free amount for every query because application allocations share it.
+    */
+   uint64_t current_available = 0;
+   uint64_t allocated = 0;
+   nouveau_switch_device_get_memory_info(
+      dev, NULL, &current_available, &allocated);
+
+   const uint64_t budget_remaining =
+      allocated < dev->gart_limit ? dev->gart_limit - allocated : 0;
+   const uint64_t headroom =
+      nouveau_switch_memory_headroom(dev->gart_size);
+   const uint64_t system_remaining =
+      current_available > headroom ? current_available - headroom : 0;
+   const uint64_t available = MIN2(budget_remaining, system_remaining);
+
+   memset(info, 0, sizeof(*info));
+   info->total_device_memory = dev->gart_size / 1024;
+   info->avail_device_memory = available / 1024;
+#else
    info->total_device_memory = dev->vram_size / 1024;
    info->total_staging_memory = dev->gart_size / 1024;
 
    info->avail_device_memory = dev->vram_limit / 1024;
    info->avail_staging_memory = dev->gart_limit / 1024;
+#endif
 }
 
 static bool
@@ -242,6 +349,130 @@ nouveau_pushbuf_cb(struct nouveau_pushbuf *push)
    NOUVEAU_DRV_STAT(p->screen, pushbuf_count, 1);
    return true;
 }
+
+#ifdef __SWITCH__
+static bool
+nouveau_pushbuf_fence_marker_cb(struct nouveau_pushbuf *push,
+                                uint64_t *cookie_out)
+{
+   struct nouveau_pushbuf_priv *p = push ? push->user_priv : NULL;
+   if (!p || !cookie_out || push != p->screen->pushbuf)
+      return false;
+
+   simple_mtx_assert_locked(&p->screen->fence.lock);
+
+   /* kick_notify has emitted the logical fence command but the winsys has not
+    * necessarily converted its command record yet.  Return an opaque boundary
+    * only; the winsys publishes it after that conversion succeeds.
+    */
+   struct nouveau_fence *fence = p->screen->fence.tail;
+   if (!fence || fence->state < NOUVEAU_FENCE_STATE_EMITTED ||
+       fence->state >= NOUVEAU_FENCE_STATE_SIGNALLED ||
+       fence->native_fence_valid)
+      return false;
+
+   *cookie_out = fence->batch_cookie;
+   return true;
+}
+
+static void
+nouveau_fence_native_perf_log_locked(struct nouveau_fence_list *fence,
+                                     const char *reason)
+{
+   if (!fence->perf_enabled || fence->native_assign_calls == 0)
+      return;
+
+   _debug_printf(
+      "nouveau/switch: fence association perf %s calls=%llu scanned=%llu "
+      "assigned=%llu avg/max_scan=%llu/%llu cpu=%llums avg/max=%llu/%lluus\n",
+      reason, (unsigned long long)fence->native_assign_calls,
+      (unsigned long long)fence->native_assign_scanned,
+      (unsigned long long)fence->native_assign_assigned,
+      (unsigned long long)(fence->native_assign_scanned /
+                           fence->native_assign_calls),
+      (unsigned long long)fence->native_assign_max_scanned,
+      (unsigned long long)(fence->native_assign_cpu_ns / 1000000),
+      (unsigned long long)(fence->native_assign_cpu_ns /
+                           fence->native_assign_calls / 1000),
+      (unsigned long long)(fence->native_assign_max_cpu_ns / 1000));
+}
+
+static uint32_t
+nouveau_pushbuf_native_cb(struct nouveau_pushbuf *push,
+                          const NvFence *native_fence,
+                          bool cpu_visible, uint64_t cookie)
+{
+   struct nouveau_pushbuf_priv *p = push ? push->user_priv : NULL;
+   if (!p || !native_fence || push != p->screen->pushbuf)
+      return 0;
+
+   simple_mtx_assert_locked(&p->screen->fence.lock);
+
+   struct nouveau_fence_list *fence_list = &p->screen->fence;
+   struct nouveau_fence *boundary = NULL;
+   for (struct nouveau_fence *fence = fence_list->head;
+        fence != NULL; fence = fence->next) {
+      if (fence->batch_cookie == cookie) {
+         boundary = fence;
+         break;
+      }
+   }
+
+   /* Missing a marker is a bookkeeping fault, never permission to associate
+    * a newer fence.  Fail closed and let a later explicit fence wait force its
+    * own physical submission/completion instead of risking early retirement.
+    */
+   if (!boundary) {
+      _debug_printf("nouveau/switch: physical fence %u:%u has no matching "
+                    "Gallium batch cookie %llu; assigning no logical fences\n",
+                    native_fence->id, native_fence->value,
+                    (unsigned long long)cookie);
+      return 0;
+   }
+
+   const uint64_t start_ns = fence_list->perf_enabled ?
+      os_time_get_nano() : 0;
+   uint32_t assigned = 0;
+   uint64_t scanned = 0;
+   for (struct nouveau_fence *fence = fence_list->head;
+        fence != NULL; fence = fence->next) {
+      const bool at_boundary = fence == boundary;
+      scanned++;
+      if (fence->state >= NOUVEAU_FENCE_STATE_EMITTED &&
+          fence->state < NOUVEAU_FENCE_STATE_SIGNALLED &&
+          !fence->native_fence_valid) {
+         fence->native_fence = *native_fence;
+         fence->native_fence_valid = true;
+         fence->native_fence_cpu_visible = cpu_visible;
+         fence->state = NOUVEAU_FENCE_STATE_FLUSHED;
+         assigned++;
+      }
+
+      if (at_boundary)
+         break;
+   }
+
+   if (fence_list->perf_enabled) {
+      const uint64_t elapsed_ns = os_time_get_nano() - start_ns;
+      fence_list->native_assign_calls++;
+      fence_list->native_assign_scanned += scanned;
+      fence_list->native_assign_assigned += assigned;
+      fence_list->native_assign_cpu_ns += elapsed_ns;
+      fence_list->native_assign_max_cpu_ns =
+         MAX2(fence_list->native_assign_max_cpu_ns, elapsed_ns);
+      fence_list->native_assign_max_scanned =
+         MAX2(fence_list->native_assign_max_scanned, scanned);
+      if (fence_list->native_assign_calls == 1 ||
+          (fence_list->perf_log_interval &&
+           fence_list->native_assign_calls %
+              fence_list->perf_log_interval == 0)) {
+         nouveau_fence_native_perf_log_locked(fence_list, "periodic");
+      }
+   }
+
+   return assigned;
+}
+#endif
 
 #ifdef __SWITCH__
 void
@@ -279,6 +510,16 @@ nouveau_pushbuf_create(struct nouveau_screen *screen, struct nouveau_context *co
    if (ret)
       return ret;
 
+#ifdef __SWITCH__
+   if (chan == screen->channel) {
+      ret = nouveau_switch_pushbuf_enable_mapped_completion(*push);
+      if (ret) {
+         nouveau_pushbuf_del(push);
+         return ret;
+      }
+   }
+#endif
+
    struct nouveau_pushbuf_priv *p = MALLOC_STRUCT(nouveau_pushbuf_priv);
    if (!p) {
       nouveau_pushbuf_del(push);
@@ -292,6 +533,13 @@ nouveau_pushbuf_create(struct nouveau_screen *screen, struct nouveau_context *co
    (*push)->kick_notify = nouveau_pushbuf_cb;
 #endif
    (*push)->user_priv = p;
+#ifdef __SWITCH__
+   if (context == NULL) {
+      nouveau_switch_pushbuf_set_fence_batch_notify(
+         *push, nouveau_pushbuf_fence_marker_cb,
+         nouveau_pushbuf_native_cb);
+   }
+#endif
    return 0;
 }
 
@@ -300,8 +548,20 @@ nouveau_pushbuf_destroy(struct nouveau_pushbuf **push)
 {
    if (!*push)
       return;
-   FREE((*push)->user_priv);
+
+#ifdef __SWITCH__
+   /* nouveau_pushbuf_del() may submit a final pending batch.  Detach driver
+    * callbacks before releasing their user data so teardown cannot call into
+    * a stale nouveau_pushbuf_priv.
+    */
+   nouveau_switch_pushbuf_set_kick_notify(*push, NULL);
+   nouveau_switch_pushbuf_set_native_kick_notify(*push, NULL);
+   nouveau_switch_pushbuf_set_fence_batch_notify(*push, NULL, NULL);
+#endif
+   void *user_priv = (*push)->user_priv;
+   (*push)->user_priv = NULL;
    nouveau_pushbuf_del(push);
+   FREE(user_priv);
 }
 
 static int
@@ -497,10 +757,39 @@ nouveau_screen_init(struct nouveau_screen *screen, struct nouveau_device *dev)
 
    memset(&mm_config, 0, sizeof(mm_config));
    nouveau_fence_list_init(&screen->fence);
+#ifdef __SWITCH__
+   screen->fence.perf_enabled = false;
+   const int64_t fence_perf_interval =
+      debug_get_num_option("NOUVEAU_SWITCH_LOG_INTERVAL", 300);
+   screen->fence.perf_log_interval =
+      fence_perf_interval > 0 && fence_perf_interval <= UINT32_MAX ?
+         (uint32_t)fence_perf_interval : 300;
+#endif
 
-   screen->mm_GART = nouveau_mm_create(dev,
-                                       NOUVEAU_BO_GART | NOUVEAU_BO_MAP,
-                                       &mm_config);
+   uint32_t gart_domain = NOUVEAU_BO_GART | NOUVEAU_BO_MAP;
+#ifdef __SWITCH__
+   const bool cpu_uncached_gart =
+      debug_get_bool_option("NOUVEAU_SWITCH_GART_CPU_UNCACHED", true);
+   if (cpu_uncached_gart) {
+      /* Match deko3D's default streaming-memory policy.  CPU-uncached GART
+       * avoids both stale partial-line writeback and cleaning an entire 4 MiB
+       * Nouveau slab for every small dynamic-buffer update.  Keep the GPU
+       * mapping cached; Horizon emits the GM20B L2 sysmem acquire before the
+       * first command entry of every native submission.
+       */
+      gart_domain |= NOUVEAU_BO_COHERENT |
+                     NOUVEAU_BO_SWITCH_GPU_CACHED;
+   }
+   if (debug_get_bool_option("NOUVEAU_SWITCH_LOG", false) ||
+       debug_get_bool_option("NOUVEAU_SWITCH_STATS", false) ||
+       screen->fence.perf_enabled) {
+      _debug_printf("nouveau/switch: GART slabs cache policy=%s/gpu-cached "
+                    "(NOUVEAU_SWITCH_GART_CPU_UNCACHED=%u)\n",
+                    cpu_uncached_gart ? "cpu-uncached" : "cpu-cached",
+                    cpu_uncached_gart);
+   }
+#endif
+   screen->mm_GART = nouveau_mm_create(dev, gart_domain, &mm_config);
    screen->mm_VRAM = nouveau_mm_create(dev, NOUVEAU_BO_VRAM, &mm_config);
 
    return 0;
@@ -524,6 +813,14 @@ nouveau_screen_fini(struct nouveau_screen *screen)
    nouveau_mm_destroy(screen->mm_VRAM);
 
    nouveau_pushbuf_destroy(&screen->pushbuf);
+
+#ifdef __SWITCH__
+   if (screen->fence.perf_enabled) {
+      simple_mtx_lock(&screen->fence.lock);
+      nouveau_fence_native_perf_log_locked(&screen->fence, "final");
+      simple_mtx_unlock(&screen->fence.lock);
+   }
+#endif
 
    nouveau_client_del(&screen->client);
    nouveau_object_del(&screen->channel);

@@ -21,12 +21,69 @@
 #define NOUVEAU_MIN_BUFFER_MAP_ALIGN_MASK (NOUVEAU_MIN_BUFFER_MAP_ALIGN - 1)
 
 #ifdef __SWITCH__
+#include "nouveau_switch_libdrm.h"
 #define NOUVEAU_BUFREF_LIST_TYPE struct nouveau_list
+
+/* Horizon GPU allocations share the process memory entitlement with the
+ * application.  Keep enough memory outside Nouveau's advertised allocation
+ * budget for application/libnx allocations and allocation-time bookkeeping.
+ */
+#define NOUVEAU_SWITCH_MIN_MEMORY_HEADROOM (64ull * 1024ull * 1024ull)
+
+static inline uint64_t
+nouveau_switch_memory_headroom(uint64_t total)
+{
+   return MIN2(total, MAX2(NOUVEAU_SWITCH_MIN_MEMORY_HEADROOM, total / 20));
+}
+
+static inline uint64_t
+nouveau_switch_memory_budget(uint64_t total, uint64_t available)
+{
+   available = MIN2(total, available);
+   const uint64_t headroom = nouveau_switch_memory_headroom(total);
+
+   return available > headroom ? available - headroom : 0;
+}
+
 int nouveau_switch_pushbuf_kick_deferred(struct nouveau_pushbuf *push,
                                          struct nouveau_object *chan);
+int nouveau_switch_pushbuf_kick_full_barrier(
+   struct nouveau_pushbuf *push, struct nouveau_object *chan);
+int nouveau_switch_pushbuf_enqueue_nvmultifence(
+   struct nouveau_pushbuf *push, const NvMultiFence *waits);
+bool nouveau_switch_pushbuf_get_last_fence(
+   struct nouveau_pushbuf *push, NvFence *out_fence,
+   bool *cpu_visible_out);
+int nouveau_switch_pushbuf_get_cpu_fence(
+   struct nouveau_pushbuf *push, NvFence *out_fence);
+int nouveau_switch_pushbuf_upgrade_physical_cpu_fence(
+   struct nouveau_pushbuf *push, const NvFence *physical_fence,
+   NvFence *out_fence);
+int nouveau_switch_pushbuf_kick_cpu(struct nouveau_pushbuf *push,
+                                    struct nouveau_object *chan);
+int nouveau_switch_pushbuf_wait_fence(struct nouveau_pushbuf *push,
+                                      const NvFence *fence,
+                                      uint64_t timeout_ns);
+int nouveau_switch_pushbuf_wait_fence_required(
+   struct nouveau_pushbuf *push, const NvFence *fence, uint64_t timeout_ns,
+   const char *reason);
+int nouveau_switch_pushbuf_get_error(struct nouveau_pushbuf *push);
+int nouveau_switch_pushbuf_enable_mapped_completion(
+   struct nouveau_pushbuf *push);
+bool nouveau_switch_pushbuf_channel_lost(struct nouveau_pushbuf *push);
+bool nouveau_switch_pushbuf_device_lost(struct nouveau_pushbuf *push);
 void nouveau_switch_pushbuf_set_kick_notify(
    struct nouveau_pushbuf *push,
    bool (*kick_notify)(struct nouveau_pushbuf *));
+void nouveau_switch_pushbuf_set_native_kick_notify(
+   struct nouveau_pushbuf *push,
+   uint32_t (*native_kick_notify)(struct nouveau_pushbuf *,
+                                  const NvFence *, bool cpu_visible));
+void nouveau_switch_pushbuf_set_fence_batch_notify(
+   struct nouveau_pushbuf *push,
+   bool (*marker_notify)(struct nouveau_pushbuf *, uint64_t *cookie_out),
+   uint32_t (*native_notify)(struct nouveau_pushbuf *, const NvFence *,
+                             bool cpu_visible, uint64_t cookie));
 uint64_t nouveau_switch_pushbuf_batch_generation(
    struct nouveau_pushbuf *push);
 #else
@@ -43,12 +100,8 @@ nouveau_device_get_info(const struct nouveau_device *dev,
                         struct nv_device_info *storage)
 {
 #ifdef __SWITCH__
-   /* The Switch device has no PCI identity. */
-   *storage = (struct nv_device_info) {
-      .type = NV_DEVICE_TYPE_SOC,
-      .chipset = dev->chipset,
-   };
-   return storage;
+   (void)storage;
+   return nouveau_switch_device_get_info(dev);
 #else
    (void)storage;
    return &dev->info;
@@ -136,19 +189,45 @@ PUSH_REF1(struct nouveau_pushbuf *push, struct nouveau_bo *bo, uint32_t flags)
    return PUSH_REFN(push, &ref, 1);
 }
 
-static inline void
-PUSH_KICK(struct nouveau_pushbuf *push)
+static inline int
+PUSH_KICK_RET(struct nouveau_pushbuf *push)
 {
    struct nouveau_pushbuf_priv *ppush = push->user_priv;
    simple_mtx_lock(&ppush->screen->fence.lock);
 #ifdef __SWITCH__
-   int ASSERTED ret = nouveau_pushbuf_kick(push, push->channel);
+   const int ret = nouveau_pushbuf_kick(push, push->channel);
 #else
-   int ASSERTED ret = nouveau_pushbuf_kick(push);
+   const int ret = nouveau_pushbuf_kick(push);
 #endif
-   assert(!ret);
    simple_mtx_unlock(&ppush->screen->fence.lock);
+   return ret;
 }
+
+static inline void
+PUSH_KICK(struct nouveau_pushbuf *push)
+{
+   const int ret = PUSH_KICK_RET(push);
+#ifndef __SWITCH__
+   assert(!ret);
+#endif
+   /* The Switch pushbuf latches and logs the first failure; reset-status
+    * queries propagate it to GL even in NDEBUG builds.
+    */
+   (void)ret;
+}
+
+#ifdef __SWITCH__
+static inline int
+PUSH_KICK_FULL_BARRIER(struct nouveau_pushbuf *push)
+{
+   struct nouveau_pushbuf_priv *ppush = push->user_priv;
+   simple_mtx_lock(&ppush->screen->fence.lock);
+   const int ret =
+      nouveau_switch_pushbuf_kick_full_barrier(push, push->channel);
+   simple_mtx_unlock(&ppush->screen->fence.lock);
+   return ret;
+}
+#endif
 
 /* Defer draw kicks only; other kick and wait paths still submit immediately. */
 static inline void
@@ -158,9 +237,9 @@ PUSH_KICK_DEFER(struct nouveau_pushbuf *push)
    struct nouveau_pushbuf_priv *ppush = push->user_priv;
 
    simple_mtx_lock(&ppush->screen->fence.lock);
-   int ASSERTED ret =
+   const int ret =
       nouveau_switch_pushbuf_kick_deferred(push, push->channel);
-   assert(!ret);
+   (void)ret;
    simple_mtx_unlock(&ppush->screen->fence.lock);
 #else
    PUSH_KICK(push);
@@ -211,9 +290,15 @@ static inline int
 BO_MAP(struct nouveau_screen *screen, struct nouveau_bo *bo, uint32_t access, struct nouveau_client *client)
 {
    int res;
+#ifdef __SWITCH__
+   nouveau_screen_submission_lock(screen);
+#endif
    simple_mtx_lock(&screen->fence.lock);
    res = nouveau_bo_map(bo, access, client);
    simple_mtx_unlock(&screen->fence.lock);
+#ifdef __SWITCH__
+   nouveau_screen_submission_unlock(screen);
+#endif
    return res;
 }
 
@@ -221,9 +306,15 @@ static inline int
 BO_WAIT(struct nouveau_screen *screen, struct nouveau_bo *bo, uint32_t access, struct nouveau_client *client)
 {
    int res;
+#ifdef __SWITCH__
+   nouveau_screen_submission_lock(screen);
+#endif
    simple_mtx_lock(&screen->fence.lock);
    res = nouveau_bo_wait(bo, access, client);
    simple_mtx_unlock(&screen->fence.lock);
+#ifdef __SWITCH__
+   nouveau_screen_submission_unlock(screen);
+#endif
    return res;
 }
 
@@ -259,12 +350,21 @@ nvc0_screen_create(struct nouveau_device *);
 static inline uint64_t
 nouveau_device_get_global_mem_size(struct nouveau_device *dev)
 {
+#ifdef __SWITCH__
+   /* On Switch, local and staging allocations use the same UMA process heap.
+    * The winsys limit already includes the process-memory safety headroom and
+    * provides a stable maximum allocation capability for the screen lifetime.
+    */
+   uint64_t size = dev->vram_size ? dev->vram_limit : dev->gart_limit;
+#else
    uint64_t size = dev->vram_size;
 
    if (!size) {
-      os_get_available_system_memory(&size);
+      if (!os_get_available_system_memory(&size))
+         size = dev->gart_limit;
       size = MIN2(dev->gart_size, size);
    }
+#endif
 
    /* cap to 32 bit on nv50 and older */
    if (dev->chipset < 0xc0)

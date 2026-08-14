@@ -542,6 +542,9 @@ nvk_GetPhysicalDeviceImageFormatProperties2(
 
    const VkExternalMemoryProperties *ext_mem_props = NULL;
    if (external_info != NULL && external_info->handleType != 0) {
+      if (!pdev->nvkmd->kmd_info.has_dma_buf)
+         return VK_ERROR_FORMAT_NOT_SUPPORTED;
+
       bool tiling_has_explicit_layout;
       switch (pImageFormatInfo->tiling) {
       case VK_IMAGE_TILING_LINEAR:

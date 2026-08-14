@@ -1,179 +1,97 @@
-Native OpenGL on Nintendo Switch
-=================================
+Native graphics on Nintendo Switch
+==================================
 
-This branch builds Mesa's native Gallium ``nouveau``/NVC0 driver for the
-Nintendo Switch GM20B GPU.  It provides EGL, desktop OpenGL, OpenGL ES 1,
-and OpenGL ES 2/3 entry points.  Vulkan and Zink are intentionally outside
-the scope of this branch.
+This branch supports the Nintendo Switch GM20B GPU through Mesa's Nouveau
+drivers.  It provides EGL, desktop OpenGL, OpenGL ES 1/2/3, and loaderless
+NVK Vulkan libraries for Horizon applications.
 
-The Switch winsys continues to use ``switch-libdrm_nouveau`` for Horizon/libnx
-device, memory, BO, and client-map integration.  Mesa replaces that package's
-old ``pushbuf.o`` with an ABI-compatible implementation which batches logical
-Nouveau submissions in libnx's GPFIFO userspace queue.  Mesa's Linux DRM ioctl
-winsys cannot be used on Horizon.  The compatibility code treats the Switch as
-a unified-memory SoC.
+Architecture
+------------
 
-Mesa 26.2 makes Nouveau's push-buffer notification callback fallible.  The
-Switch winsys carries that boolean callback privately and propagates failure
-from submission while remaining source- and layout-compatible with the
-currently packaged ``switch-libdrm_nouveau`` header.  No locally patched
-portlibs header is required.
+``src/nouveau/horizon`` owns the libnx GPU device, address space, memory,
+channel submission, synchronization, cache maintenance, and error handling.
+Gallium/NVC0 and NVK use adapters over that shared backend.  The port does not
+require the former external ``switch-libdrm_nouveau`` library or a patched
+libnx ABI.
 
-Native submission batching
---------------------------
+Horizon is a unified-memory platform.  CPU-visible allocations use explicit
+cache policy and synchronization, while GPU work is ordered with native
+syncpoint fences.  Unknown GPU completion fails closed: resources remain
+owned or quarantined instead of being reused without completion proof.
 
-NVC0 still closes a logical push buffer after every Gallium draw, preserving
-its fence notification, BO validation, resource lifetime, syncpoint command,
-cache acquire, and ``NO_PREFETCH`` ordering.  Draw-end kicks are deferred in
-libnx's GPFIFO queue and a real ``nvGpuChannelKickoff`` is forced by:
+Builds
+------
 
-* a Gallium context flush (including ``eglSwapBuffers``);
-* query, surface, compute, video, or other non-draw submission;
-* a fence wait, CPU BO map/wait, or cross-channel BO dependency;
-* command-buffer or GPFIFO pressure;
-* context teardown; or
-* the configured logical-submit limit.
+The supported MSYS2 build requires devkitA64, libnx, libelf, expat, zlib,
+zstd, Meson, Ninja, and a Rust toolchain containing the
+``aarch64-unknown-linux-gnu`` standard library.
 
-The default limit is 128 logical draw submissions, which keeps CPU/GPU overlap
-while reducing hundreds of native service calls per frame to a small number.
-Set these before EGL initialization for A/B tests:
+Build and stage only EGL/OpenGL/OpenGL ES with:
 
 .. code-block:: sh
 
-   NOUVEAU_SWITCH_BATCH=0
-   NOUVEAU_SWITCH_BATCH_SUBMITS=64
-
-The first setting restores one native kickoff per logical submission.  A
-``NOUVEAU_SWITCH_BATCH_SUBMITS`` value of ``0`` batches until a hard flush or
-GPFIFO pressure.
-
-Incremental native-batch residency
-----------------------------------
-
-Within one native batch, the Switch winsys keeps each attached Nouveau
-``bufctx`` live after its first validation.  Later draws add only newly bound
-or access-upgraded BOs instead of walking and re-referencing every stable
-texture, shader, framebuffer, and vertex resource.  A successful native
-kickoff advances a residency epoch and moves the complete current set back to
-pending exactly once for the next batch.
-
-GPFIFO and pending-reference pressure can end a native batch while the next
-logical command list is already being assembled.  Before that boundary Mesa
-seeds the in-progress record with the complete live BO set, so the first draw
-of the new batch remains self-contained.  Validation-only cleanup similarly
-invalidates the epoch rather than retaining references that no command owns.
-
-Each logical flush also prepares the command BO for the next record with a
-zero-sized ``nouveau_pushbuf_space`` call.  This retains the command BO without
-restoring the removed full ``bufctx`` walk.  The winsys verifies that the new
-record owns a current command-BO reference and latches a submission error
-immediately if the invariant is ever broken.
-
-The optimization is enabled by default.  Use this fallback before EGL
-initialization for an A/B or recovery run:
-
-.. code-block:: sh
-
-   NOUVEAU_SWITCH_INCREMENTAL_REFS=0
-
-Mesa GLthread
--------------
-
-The Switch EGL frontend enables Mesa GLthread by default.  GL entry points
-marshal commands on the application thread and one Mesa worker thread performs
-state tracking and NVC0 command generation.  ``eglSwapBuffers``, context
-rebinding/unbinding, and context destruction drain the queue before the
-frontend directly accesses the Gallium context or native window.
-
-NVC0 exposes GLthread's mapping capabilities only on Switch.  The supported
-cross-thread operation is deliberately narrow: a newly allocated GART stream
-buffer is mapped once with
-``WRITE | UNSYNCHRONIZED | THREAD_SAFE`` through a BO-map-locked path and can
-remain mapped while GM20B consumes older ranges.  Other Nouveau map paths keep
-their existing synchronization behavior.
-
-Set one of the following before EGL context creation to disable GLthread for
-an A/B or recovery test; the Switch-specific option has final precedence:
-
-.. code-block:: sh
-
-   mesa_glthread=0
-   MESA_GLTHREAD=0
-   MESA_SWITCH_GLTHREAD=0
-
-Prerequisites
--------------
-
-Install a current devkitPro Switch toolchain with devkitA64 and libnx, plus
-the Switch packages for ``libdrm_nouveau``, libelf, expat, zlib, and zstd.
-Meson and Ninja must be available in the shell used for the build.
-
-Build and stage the SDK
------------------------
-
-From an MSYS2/devkitPro shell:
-
-.. code-block:: sh
-
-   export DEVKITPRO=/opt/devkitpro
-   export DEVKITA64=/opt/devkitpro/devkitA64
    ./build-opengl.sh
 
-The SDK is staged at ``mesa-install/opt/devkitpro/portlibs/switch``.
-On MSYS2 the script automatically selects ``switch_cross_file_msys2.txt``;
-other hosts use ``switch_cross_file.txt``.  ``BUILD_DIR``, ``DESTDIR``,
-``CROSS_FILE``, ``NATIVE_FILE``, ``MESON``, and ``NINJA`` can be overridden.
-The build is static, release-mode, LLVM-free, and contains:
-
-* ``libEGL.a`` with the Switch EGL frontend, Mesa state tracker, NVC0 driver,
-  Nouveau winsys, and Mesa-private utility objects;
-* ``libGL.a`` with public desktop ``gl*`` entry points;
-* ``libGLESv1_CM.a``, ``libGLESv2.a``, and ``libglapi.a``;
-* GL, GLES, and EGL headers;
-* relocatable staged pkg-config files and ``OpenGLConfig.cmake``.
-
-For a Makefile consumer, put the staged SDK before the installed portlibs:
-
-.. code-block:: make
-
-   MESA_SDK := /path/to/mesa-install/opt/devkitpro/portlibs/switch
-   LIBDIRS  := $(MESA_SDK) $(PORTLIBS) $(LIBNX)
-   LIBS     := -Wl,--start-group \
-               -lGL -lEGL -lGLESv2 -lglapi -ldrm_nouveau \
-               -lexpat -lzstd -lz -lnx -lstdc++ -lm \
-               -Wl,--end-group
-
-``libGL`` is only needed for directly linked desktop OpenGL calls.  Programs
-that load desktop functions through ``eglGetProcAddress`` may omit it.
-
-For CMake, point ``OpenGL_DIR`` at the staged config directory and use the
-normal imported targets:
+Build and stage only NVK Vulkan with:
 
 .. code-block:: sh
 
-   cmake -DOpenGL_DIR="$MESA_SDK/lib/cmake/OpenGL" ...
+   ./build-switch.sh
 
-.. code-block:: cmake
+Build one release SDK containing both APIs with:
 
-   target_link_libraries(app PRIVATE OpenGL::EGL OpenGL::GL)
-   # or: OpenGL::EGL OpenGL::GLES2
+.. code-block:: sh
 
-Device validation
------------------
+   ./build-unified.sh
 
-Compare application builds under the same clocks, resolution, settings,
-workload, and camera conditions.  Record at least:
+The unified script installs static GL, GLES, EGL, and Vulkan libraries,
+Khronos headers, pkg-config metadata, and CMake package files below one Switch
+portlibs prefix.  It rejects a dirty checkout by default and creates a
+deterministic SDK ZIP in ``dist``.  Set ``ALLOW_DIRTY=1`` only for a local
+development build.
 
-* cold boot to the rendered workload and its first shader-heavy section;
-* a warm run after the single-file Mesa shader cache has populated;
-* frame time or FPS in one repeatable CPU-heavy and one GPU-heavy workload;
-* a 20--30 minute run through representative rendering conditions;
-* suspend/resume, exit/relaunch, and repeated resource-heavy transitions.
+The installed CMake packages export ``OpenGL::GL``, ``OpenGL::EGL``,
+``OpenGL::GLES1``, ``OpenGL::GLES2``, ``Vulkan::Headers``, and
+``Vulkan::Vulkan``.  The Vulkan archive is loaderless and is linked directly
+by the application.
 
-The Switch frontend defaults to ``MESA_DISK_CACHE_SINGLE_FILE=1`` to reduce
-SD-card metadata traffic.  Only enable ``MESA_NO_ERROR=1`` after correctness
-and stability have been established.
+Runtime policy
+--------------
 
-The host build proves compilation and static linkage; rendering, syncpoint
-behavior, suspend/resume, and performance still require execution on a
-physical Switch.
+NVK enables mapped physical completion for 3D queues.  Copy-only and bind
+contexts retain native-fence completion.  The native fallback can be selected
+before device creation with:
+
+.. code-block:: sh
+
+   NVK_SWITCH_MAPPED_COMPLETION=0
+
+NVK command pools and transient memory streams use CPU-uncached, GPU-cached
+memory by default.  Either class can be restored to CPU-cached memory for
+compatibility testing:
+
+.. code-block:: sh
+
+   NVK_SWITCH_CMD_MEM_CPU_UNCACHED=0
+   NVK_SWITCH_MEM_STREAM_CPU_UNCACHED=0
+
+Mesa GLthread can be controlled before EGL context creation with
+``MESA_SWITCH_GLTHREAD=0`` or ``1``.  Gallium's threaded context remains a
+separate driver decision.
+
+The optional ``GL_ARB_gl_spirv`` path remains hidden by default pending wider
+device coverage.  It may be enabled before context creation with
+``NOUVEAU_SWITCH_GL_SPIRV=1``.
+
+Platform limitations
+--------------------
+
+Horizon does not provide POSIX file descriptors or DMA-BUF memory sharing and
+cannot create fixed-address or reserved CPU mappings.  Switch NVK therefore
+does not expose ``VK_KHR_external_memory_fd``,
+``VK_EXT_external_memory_dma_buf``, or ``VK_EXT_map_memory_placed`` and reports
+the corresponding external buffer/image handle types as unsupported.
+
+The EGL frontend supports NWindow surfaces and pbuffers.  Native pixmap
+surfaces are not implemented.  Until Khronos conformance testing is complete,
+Switch EGL configurations are advertised as non-conformant.

@@ -161,10 +161,12 @@ elif with_platform_switch
     libglsl.extract_all_objects(recursive : false),
     libglcpp.extract_all_objects(recursive : false),
     libcompiler.extract_all_objects(recursive : false),
+    libvtn.extract_all_objects(recursive : false),
     _libnir.extract_all_objects(recursive : false),
     libgallium.extract_all_objects(recursive : false),
     libgalliumvl_stub.extract_all_objects(recursive : false),
     libnouveauwinsys.extract_all_objects(recursive : false),
+    libnouveau_horizon.extract_all_objects(recursive : false),
     libnouveau_codegen.extract_all_objects(recursive : false),
     libnouveau.extract_all_objects(recursive : false),
     _libmesa_util.extract_all_objects(recursive : false),
@@ -173,9 +175,9 @@ elif with_platform_switch
     blake3.extract_all_objects(recursive : false),
     _libxmlconfig.extract_all_objects(recursive : false)
   ]
-  deps_for_egl += [dep_zstd, dep_switch_libdrm_nouveau]
+  deps_for_egl += [dep_zstd]
   switch_egl_private_libs += [
-    '-ldrm_nouveau', '-lexpat', '-lstdc++', '-lnx'
+    '-lexpat', '-lstdc++', '-lnx'
   ]
 elif with_platform_windows
   c_args_for_egl += [

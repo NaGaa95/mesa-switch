@@ -44,7 +44,7 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #endif
-#ifdef NO_REGEX
+#if defined(NO_REGEX) || defined(__SWITCH__)
 typedef int regex_t;
 #define REG_EXTENDED 0
 #define REG_NOSUB 0

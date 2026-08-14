@@ -810,7 +810,7 @@ nve4_launch_grid(struct pipe_context *pipe, const struct pipe_grid_info *info)
                         resident->flags);
    }
 
-   simple_mtx_lock(&screen->state_lock);
+   nvc0_screen_state_lock(screen);
    ret = !nve4_state_validate_cp(nvc0, ~0);
    if (ret)
       goto out_unlock;
@@ -883,10 +883,13 @@ nve4_launch_grid(struct pipe_context *pipe, const struct pipe_grid_info *info)
    PUSH_DATA (push, 0);
 
    nvc0_update_compute_invocations_counter(nvc0, info);
+#ifdef __SWITCH__
+   nvc0_program_track_use(nvc0, nvc0->compprog);
+#endif
 
 out_unlock:
    PUSH_KICK(push);
-   simple_mtx_unlock(&screen->state_lock);
+   nvc0_screen_state_unlock(screen);
 
 out:
    if (ret)

@@ -34,6 +34,10 @@ struct nvc0_hw_query {
    uint8_t state;
    bool is64bit;
    uint8_t rotate;
+#ifdef __SWITCH__
+   bool switch_query_dedicated;
+   uint16_t switch_arena_slots;
+#endif
    struct nouveau_mm_allocation *mm;
    struct nouveau_fence *fence;
 };
@@ -52,9 +56,13 @@ nvc0_hw_get_driver_query_info(struct nvc0_screen *, unsigned,
 bool
 nvc0_hw_query_allocate(struct nvc0_context *, struct nvc0_query *, int);
 void
-nvc0_hw_query_pushbuf_submit(struct nouveau_pushbuf *, struct nvc0_query *,
+nvc0_hw_query_pushbuf_submit(struct nvc0_context *, struct nvc0_query *,
                              unsigned);
 void
 nvc0_hw_query_fifo_wait(struct nvc0_context *, struct nvc0_query *);
+#ifdef __SWITCH__
+void
+nvc0_hw_query_track_use(struct nvc0_context *, struct nvc0_query *);
+#endif
 
 #endif

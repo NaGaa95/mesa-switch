@@ -537,6 +537,14 @@ nvc0_miptree_create(struct pipe_screen *pscreen,
 
    if (mt->base.base.bind & (PIPE_BIND_CURSOR | PIPE_BIND_DISPLAY_TARGET))
       bo_flags |= NOUVEAU_BO_CONTIG;
+#ifdef __SWITCH__
+   /* The Horizon adapter pools private small texture BOs.  A shared resource
+    * must retain a dedicated NvMap because the legacy export handle carries
+    * no suballocation offset or pool ownership metadata.
+    */
+   if (mt->base.base.bind & PIPE_BIND_SHARED)
+      bo_flags |= NOUVEAU_BO_CONTIG;
+#endif
 
    ret = nouveau_bo_new(dev, bo_flags, 4096, mt->total_size, &bo_config,
                         &mt->base.bo);

@@ -31,7 +31,8 @@
 #endif
 
 static bool
-_nouveau_fence_wait(struct nouveau_fence *fence, struct util_debug_callback *debug);
+_nouveau_fence_wait(struct nouveau_fence *fence,
+                    struct util_debug_callback *debug, uint64_t timeout_ns);
 
 bool
 nouveau_fence_new(struct nouveau_context *nv, struct nouveau_fence **fence)
@@ -71,6 +72,26 @@ nouveau_fence_trigger_work(struct nouveau_fence *fence)
    }
 }
 
+#ifdef __SWITCH__
+static void
+nouveau_fence_quarantine_work(struct nouveau_fence *fence)
+{
+   simple_mtx_assert_locked(&fence->screen->fence.lock);
+
+   struct nouveau_fence_work *work, *tmp;
+
+   /* Ownership of work->data was transferred to the callback when work was
+    * queued.  If physical completion is unknown, deliberately retain that
+    * ownership graph: invoking an unref/free callback could recycle storage
+    * still touched by the GPU.  The callback nodes themselves carry no GPU
+    * ownership and may be discarded. */
+   LIST_FOR_EACH_ENTRY_SAFE(work, tmp, &fence->work, list) {
+      list_del(&work->list);
+      FREE(work);
+   }
+}
+#endif
+
 static void
 _nouveau_fence_emit(struct nouveau_fence *fence)
 {
@@ -96,6 +117,9 @@ _nouveau_fence_emit(struct nouveau_fence *fence)
    fence_list->tail = fence;
 
 #ifdef __SWITCH__
+   fence->batch_cookie = ++fence_list->next_batch_cookie;
+   if (fence->batch_cookie == 0)
+      fence->batch_cookie = ++fence_list->next_batch_cookie;
    fence_list->emit(&fence->context->pipe, &fence->sequence, NULL);
 #else
    fence_list->emit(&fence->context->pipe, &fence->sequence, fence->bo);
@@ -128,8 +152,18 @@ nouveau_fence_del(struct nouveau_fence *fence)
    }
 
    if (!list_is_empty(&fence->work)) {
-      debug_printf("WARNING: deleting fence with work still pending !\n");
-      nouveau_fence_trigger_work(fence);
+#ifdef __SWITCH__
+      if (fence->state != NOUVEAU_FENCE_STATE_SIGNALLED) {
+         _debug_printf("nouveau/switch: deleting unsignalled fence %u with "
+                       "%u pending callbacks; quarantining callback data\n",
+                       fence->sequence, fence->work_count);
+         nouveau_fence_quarantine_work(fence);
+      } else
+#endif
+      {
+         debug_printf("WARNING: deleting fence with work still pending !\n");
+         nouveau_fence_trigger_work(fence);
+      }
    }
 
 #ifndef __SWITCH__
@@ -141,6 +175,73 @@ nouveau_fence_del(struct nouveau_fence *fence)
 void
 nouveau_fence_cleanup(struct nouveau_context *nv)
 {
+#ifdef __SWITCH__
+   struct nouveau_fence_list *fence_list = &nv->screen->fence;
+   struct nouveau_fence *drain = NULL;
+   struct nouveau_fence *candidate = NULL;
+   bool completed = true;
+
+   /* _nouveau_fence_next() emits the old fence, drops nv->fence and then
+    * allocates its replacement.  Replacement OOM therefore legitimately
+    * leaves nv->fence NULL while the emitted, list-owned fence still retains
+    * nv as its context.  Cleanup must be driven by both ownership locations,
+    * not gated solely on the current-fence pointer.
+    */
+   nouveau_screen_submission_lock(nv->screen);
+   simple_mtx_lock(&fence_list->lock);
+
+   if (nv->fence) {
+      _nouveau_fence_ref(nv->fence, &drain);
+   } else {
+      /* Fence-list order is submission order.  Waiting the last entry owned
+       * by this context covers all of its earlier logical records while the
+       * context is still live and can be rebound for a forced kickoff. */
+      for (struct nouveau_fence *fence = fence_list->head;
+           fence; fence = fence->next) {
+         if (fence->context == nv)
+            candidate = fence;
+      }
+      if (candidate)
+         _nouveau_fence_ref(candidate, &drain);
+   }
+
+   if (drain)
+      completed = _nouveau_fence_wait(drain, NULL, UINT64_MAX);
+
+   /* A Gallium fence handle may legally outlive its pipe context.  Switch
+    * uses a screen-owned pushbuf, so emitted fences can still be polled or
+    * waited through that stable object after context destruction.  Detach
+    * every unsignalled list entry owned by this context before it is freed;
+    * otherwise a later fence_finish would dereference stale context state.
+    * The local reference also covers a fence which completed and left the
+    * screen list during the wait, or one whose emission failed early.
+    */
+   for (struct nouveau_fence *fence = fence_list->head;
+        fence; fence = fence->next) {
+      if (fence->context == nv)
+         fence->context = NULL;
+   }
+   if (drain && drain->context == nv)
+      drain->context = NULL;
+   /* A successful wait normally creates a fresh, un-emitted nv->fence via
+    * _nouveau_fence_next().  It is not on fence_list yet, so detach it
+    * explicitly before dropping the context's reference as well.  No
+    * externally retained fence can therefore preserve a stale nv pointer,
+    * even if teardown is raced by an otherwise-invalid client. */
+   if (nv->fence && nv->fence->context == nv)
+      nv->fence->context = NULL;
+   if (!completed) {
+      nv->screen->fence_teardown_quarantined = true;
+      _debug_printf("nouveau/switch: context fence drain failed; "
+                    "detaching outstanding fences and quarantining the "
+                    "screen ownership graph\n");
+   }
+
+   _nouveau_fence_ref(NULL, &drain);
+   _nouveau_fence_ref(NULL, &nv->fence);
+   simple_mtx_unlock(&fence_list->lock);
+   nouveau_screen_submission_unlock(nv->screen);
+#else
    if (nv->fence) {
       struct nouveau_fence_list *fence_list = &nv->screen->fence;
       struct nouveau_fence *current = NULL;
@@ -150,11 +251,12 @@ nouveau_fence_cleanup(struct nouveau_context *nv)
        */
       simple_mtx_lock(&fence_list->lock);
       _nouveau_fence_ref(nv->fence, &current);
-      _nouveau_fence_wait(current, NULL);
+      _nouveau_fence_wait(current, NULL, UINT64_MAX);
       _nouveau_fence_ref(NULL, &current);
       _nouveau_fence_ref(NULL, &nv->fence);
       simple_mtx_unlock(&fence_list->lock);
    }
+#endif
 }
 
 void
@@ -200,8 +302,6 @@ _nouveau_fence_update(struct nouveau_screen *screen, bool flushed)
    }
 }
 
-#define NOUVEAU_FENCE_MAX_SPINS (1 << 31)
-
 static bool
 _nouveau_fence_signalled(struct nouveau_fence *fence)
 {
@@ -224,30 +324,74 @@ nouveau_fence_kick(struct nouveau_fence *fence)
    struct nouveau_context *context = fence->context;
    struct nouveau_screen *screen = fence->screen;
    struct nouveau_fence_list *fence_list = &screen->fence;
-   bool current = !fence->sequence;
+   const bool current =
+      fence->state < NOUVEAU_FENCE_STATE_EMITTING && context &&
+      context->fence == fence;
+#ifdef __SWITCH__
+   struct nouveau_pushbuf *push = context ? context->pushbuf : screen->pushbuf;
+#endif
 
    simple_mtx_assert_locked(&fence_list->lock);
+
+#ifdef __SWITCH__
+   /* Public waits can kick a fence owned by a context other than the one that
+    * last recorded into the screen-owned pushbuf.  The caller holds the
+    * recursive submission lock before fence.lock, so rebind before either
+    * fence emission or a physical kickoff can invoke kick_notify. */
+   if (context)
+      nouveau_pushbuf_bind_context(push, context);
+#endif
 
    /* wtf, someone is waiting on a fence in flush_notify handler? */
    assert(fence->state != NOUVEAU_FENCE_STATE_EMITTING);
 
    if (fence->state < NOUVEAU_FENCE_STATE_EMITTED) {
-      if (PUSH_AVAIL(context->pushbuf) < 16)
-         nouveau_pushbuf_space(context->pushbuf, 16, 0, 0);
+#ifdef __SWITCH__
+      /* Only a live owning context can emit a logical fence command.  Cleanup
+       * detaches a fence whose emission failed, making later waits fail closed
+       * instead of touching freed context memory. */
+      if (!context || !push)
+         return false;
+#endif
+      if (PUSH_AVAIL(context->pushbuf) < 16 &&
+          nouveau_pushbuf_space(context->pushbuf, 16, 0, 0))
+         return false;
       _nouveau_fence_emit(fence);
    }
 
-   if (fence->state < NOUVEAU_FENCE_STATE_FLUSHED) {
 #ifdef __SWITCH__
-      if (nouveau_pushbuf_kick(context->pushbuf,
-                               context->pushbuf->channel))
-#else
-      if (nouveau_pushbuf_kick(context->pushbuf))
-#endif
+   /* A deferred Switch submission is marked FLUSHED once it enters the
+    * software batch.  If no physical-batch completion has been associated
+    * yet, force the native GPFIFO kickoff.  Successful physical kickoffs
+    * attach their exact completion to every Gallium fence in that batch.
+    */
+   if (fence->state < NOUVEAU_FENCE_STATE_SIGNALLED &&
+       !fence->native_fence_valid) {
+      /* A detached emitted fence has no live context to drive kick_notify.
+       * Its exact native completion must already have been published; if it
+       * was not, completion is unknown and the wait must fail closed. */
+      if (!context || !push)
+         return false;
+      if (nouveau_pushbuf_kick(push, push->channel))
+         return false;
+      /* The physical-submit callback owns exact association.  A global
+       * last-fence fallback can attach a prior/no-op/CPU-upgrade completion to
+       * this logical fence and defeat the callback's fail-closed contract. */
+      if (!fence->native_fence_valid)
          return false;
    }
+#else
+   if (fence->state < NOUVEAU_FENCE_STATE_FLUSHED) {
+      if (nouveau_pushbuf_kick(context->pushbuf))
+         return false;
+   }
+#endif
 
    if (current) {
+#ifdef __SWITCH__
+      if (!context)
+         return false;
+#endif
       if (!_nouveau_fence_next(fence->context))
          return false;
    }
@@ -258,7 +402,8 @@ nouveau_fence_kick(struct nouveau_fence *fence)
 }
 
 static bool
-_nouveau_fence_wait(struct nouveau_fence *fence, struct util_debug_callback *debug)
+_nouveau_fence_wait(struct nouveau_fence *fence,
+                    struct util_debug_callback *debug, uint64_t timeout_ns)
 {
    struct nouveau_screen *screen = fence->screen;
    struct nouveau_fence_list *fence_list = &screen->fence;
@@ -269,35 +414,93 @@ _nouveau_fence_wait(struct nouveau_fence *fence, struct util_debug_callback *deb
    if (debug && debug->debug_message)
       start = os_time_get_nano();
 
+   /* Fence handles may outlive their contexts.  In particular, do not enter
+    * nouveau_fence_kick merely to rediscover that an already completed fence
+    * is signalled: the owning context may have been destroyed meanwhile. */
+   if (fence->state == NOUVEAU_FENCE_STATE_SIGNALLED)
+      return true;
+
    if (!nouveau_fence_kick(fence))
       return false;
 
 #ifdef __SWITCH__
-   /* 22.3 pattern: spin-poll the shared screen->fence.map[] via
-    * _nouveau_fence_update(). No per-fence BO needed. */
-   {
-      uint32_t spins = 0;
-      do {
-         if (fence->state == NOUVEAU_FENCE_STATE_SIGNALLED) {
-            if (debug && debug->debug_message)
-               util_debug_message(debug, PERF_INFO,
-                                  "stalled %.3f ms waiting for fence",
-                                  (os_time_get_nano() - start) / 1000000.f);
-            return true;
-         }
-         if (!spins)
-            NOUVEAU_DRV_STAT(screen, any_non_kernel_fence_sync_count, 1);
-         spins++;
+   /* Keep nonblocking progress checks on the coherent shared sequence word.
+    * This avoids allocating a libnx fence event for query/status polling,
+    * while blocking waits use the exact native completion associated with
+    * this physical GPFIFO batch.  It preserves upstream's removal of the old
+    * unbounded shared-word spin loop.
+    */
+   for (uint32_t poll = 0; poll < 32; poll++) {
+      _nouveau_fence_update(screen, false);
+      if (fence->state == NOUVEAU_FENCE_STATE_SIGNALLED)
+         goto wait_complete;
+   }
 
-         _nouveau_fence_update(screen, false);
-      } while (spins < NOUVEAU_FENCE_MAX_SPINS);
+   NOUVEAU_DRV_STAT(screen, any_non_kernel_fence_sync_count, 1);
+   if (timeout_ns == 0)
+      return false;
 
-      debug_printf("Wait on fence %u (ack = %u, next = %u) timed out !\n",
-                   fence->sequence,
-                   fence_list->sequence_ack, fence_list->sequence);
+   if (!fence->native_fence_valid) {
+      _debug_printf("nouveau/switch: fence %u has no native completion "
+                    "(ack=%u next=%u)\n",
+                    fence->sequence, fence_list->sequence_ack,
+                    fence_list->sequence);
       return false;
    }
+
+   if (!fence->native_fence_cpu_visible) {
+      NvFence cpu_fence = { .id = UINT32_MAX };
+      const int upgrade_ret =
+         nouveau_switch_pushbuf_upgrade_physical_cpu_fence(
+            screen->pushbuf, &fence->native_fence, &cpu_fence);
+      if (upgrade_ret) {
+         _debug_printf("nouveau/switch: failed to upgrade fence %u for "
+                       "CPU wait: %d (native=%u:%u)\n",
+                       fence->sequence, upgrade_ret,
+                       fence->native_fence.id, fence->native_fence.value);
+         return false;
+      }
+      fence->native_fence = cpu_fence;
+      fence->native_fence_cpu_visible = true;
+      fence->state = NOUVEAU_FENCE_STATE_FLUSHED;
+   }
+
+   const int ret = nouveau_switch_pushbuf_wait_fence(
+      screen->pushbuf, &fence->native_fence, timeout_ns);
+   if (ret) {
+      _debug_printf("nouveau/switch: wait on fence %u failed: %d "
+                    "(ack=%u next=%u native=%u:%u)\n",
+                    fence->sequence, ret, fence_list->sequence_ack,
+                    fence_list->sequence, fence->native_fence.id,
+                    fence->native_fence.value);
+      return false;
+   }
+
+   /* Native completion orders the query write.  Allow a few scheduler yields
+    * for its CPU mapping to become visible, without an unbounded busy loop.
+    */
+   for (uint32_t poll = 0; poll < 64; poll++) {
+      _nouveau_fence_update(screen, false);
+      if (fence->state == NOUVEAU_FENCE_STATE_SIGNALLED)
+         goto wait_complete;
+      svcSleepThread(0);
+   }
+
+   _debug_printf("nouveau/switch: native fence completed but Gallium fence "
+                 "%u did not (ack=%u next=%u native=%u:%u)\n",
+                 fence->sequence, fence_list->sequence_ack,
+                 fence_list->sequence, fence->native_fence.id,
+                 fence->native_fence.value);
+   return false;
+
+wait_complete:
+   if (debug && debug->debug_message)
+      util_debug_message(debug, PERF_INFO,
+                         "stalled %.3f ms waiting for fence",
+                         (os_time_get_nano() - start) / 1000000.f);
+   return true;
 #else
+   (void)timeout_ns;
    if (fence->state < NOUVEAU_FENCE_STATE_SIGNALLED) {
       NOUVEAU_DRV_STAT(screen, any_non_kernel_fence_sync_count, 1);
       int ret = nouveau_bo_wait(fence->bo, NOUVEAU_BO_RDWR, screen->client);
@@ -328,6 +531,13 @@ _nouveau_fence_next(struct nouveau_context *nv)
    struct nouveau_fence_list *fence_list = &nv->screen->fence;
 
    simple_mtx_assert_locked(&fence_list->lock);
+
+   /* Replacement allocation failure deliberately leaves nv->fence NULL.
+    * Later forced kickoffs must propagate that dead-context state instead of
+    * dereferencing it; Switch cleanup will drain the last list-owned fence if
+    * possible and quarantine the ownership graph otherwise. */
+   if (!nv->fence)
+      return false;
 
    if (nv->fence->state < NOUVEAU_FENCE_STATE_EMITTING) {
       if (p_atomic_read(&nv->fence->ref) > 1)
@@ -370,11 +580,17 @@ nouveau_fence_work(struct nouveau_fence *fence,
    /* the fence might get deleted by fence_kick */
    screen = fence->screen;
 
+#ifdef __SWITCH__
+   nouveau_screen_submission_lock(screen);
+#endif
    simple_mtx_lock(&screen->fence.lock);
    list_add(&work->list, &fence->work);
    if (++fence->work_count > 64)
       nouveau_fence_kick(fence);
    simple_mtx_unlock(&screen->fence.lock);
+#ifdef __SWITCH__
+   nouveau_screen_submission_unlock(screen);
+#endif
    return true;
 }
 
@@ -407,10 +623,25 @@ nouveau_fence_ref(struct nouveau_fence *fence, struct nouveau_fence **ref,
 bool
 nouveau_fence_wait(struct nouveau_fence *fence, struct util_debug_callback *debug)
 {
-   struct nouveau_fence_list *fence_list = &fence->screen->fence;
+   return nouveau_fence_wait_timeout(fence, debug, UINT64_MAX);
+}
+
+bool
+nouveau_fence_wait_timeout(struct nouveau_fence *fence,
+                           struct util_debug_callback *debug,
+                           uint64_t timeout_ns)
+{
+   struct nouveau_screen *screen = fence->screen;
+   struct nouveau_fence_list *fence_list = &screen->fence;
+#ifdef __SWITCH__
+   nouveau_screen_submission_lock(screen);
+#endif
    simple_mtx_lock(&fence_list->lock);
-   bool res = _nouveau_fence_wait(fence, debug);
+   bool res = _nouveau_fence_wait(fence, debug, timeout_ns);
    simple_mtx_unlock(&fence_list->lock);
+#ifdef __SWITCH__
+   nouveau_screen_submission_unlock(screen);
+#endif
    return res;
 }
 
@@ -418,18 +649,31 @@ bool
 nouveau_fence_next_if_current(struct nouveau_context *nv, struct nouveau_fence *fence)
 {
    bool result = true;
+#ifdef __SWITCH__
+   nouveau_screen_submission_lock(fence->screen);
+#endif
    simple_mtx_lock(&fence->screen->fence.lock);
    if (nv->fence == fence)
       result = _nouveau_fence_next(nv);
    simple_mtx_unlock(&fence->screen->fence.lock);
+#ifdef __SWITCH__
+   nouveau_screen_submission_unlock(fence->screen);
+#endif
    return result;
 }
 
 bool
 nouveau_fence_signalled(struct nouveau_fence *fence)
 {
-   simple_mtx_lock(&fence->screen->fence.lock);
+   struct nouveau_screen *screen = fence->screen;
+#ifdef __SWITCH__
+   nouveau_screen_submission_lock(screen);
+#endif
+   simple_mtx_lock(&screen->fence.lock);
    bool ret = _nouveau_fence_signalled(fence);
-   simple_mtx_unlock(&fence->screen->fence.lock);
+   simple_mtx_unlock(&screen->fence.lock);
+#ifdef __SWITCH__
+   nouveau_screen_submission_unlock(screen);
+#endif
    return ret;
 }

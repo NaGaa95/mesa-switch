@@ -18,11 +18,65 @@
 #include "cla1c0.h"
 #include "nv_push_clc3c0.h"
 #include "nv_push_clc397.h"
+#include "vk_log.h"
+
+#ifdef __SWITCH__
+#include "nvkmd/switch/nvkmd_switch.h"
+#include "nv_push_clb197.h"
+#include "drf.h"
+#endif
 
 #include <string.h>
 
 static VkResult
 nvk_queue_push(struct nvk_queue *queue, const struct nv_push *push);
+
+#ifdef __SWITCH__
+static void
+nvk_push_zbc_state(struct nv_push *p,
+                   const struct nouveau_horizon_zbc_state *state)
+{
+   static_assert(DRF_MASK(
+                    NVB197_SET_COLOR_ZERO_BANDWIDTH_CLEAR_SLOT_DISABLE_MASK) ==
+                    (UINT32_C(1) << NOUVEAU_HORIZON_ZBC_SLOT_COUNT) - 1u,
+                 "Horizon and GM20B ZBC slot widths must match");
+   static_assert(NVB197_SET_Z_ZERO_BANDWIDTH_CLEAR ==
+                    NVB197_SET_COLOR_ZERO_BANDWIDTH_CLEAR + 4,
+                 "GM20B color/depth ZBC methods must be consecutive");
+
+   P_IMMD(p, NVB197, SET_COLOR_ZERO_BANDWIDTH_CLEAR,
+          state->slot_disable_mask);
+   P_IMMD(p, NVB197, SET_Z_ZERO_BANDWIDTH_CLEAR,
+          state->slot_disable_mask);
+}
+
+static bool
+nvk_queue_get_changed_zbc_state(
+   struct nvk_queue *queue,
+   struct nouveau_horizon_zbc_state *state_out)
+{
+   if (!(queue->engines & NVKMD_ENGINE_3D))
+      return false;
+
+   struct nvk_device *dev = nvk_queue_device(queue);
+   if (queue->zbc_generation ==
+       nvkmd_switch_dev_get_zbc_generation(dev->nvkmd))
+      return false;
+
+   nvkmd_switch_dev_get_zbc_state(dev->nvkmd, state_out);
+   return queue->zbc_generation != state_out->generation;
+}
+
+static void
+nvk_queue_commit_zbc_state(
+   struct nvk_queue *queue,
+   const struct nouveau_horizon_zbc_state *state)
+{
+   struct nvk_device *dev = nvk_queue_device(queue);
+   queue->zbc_generation = state->generation;
+   nvkmd_switch_dev_record_zbc_program(dev->nvkmd);
+}
+#endif
 
 static void
 nvk_queue_state_init(struct nvk_queue_state *qs)
@@ -47,6 +101,12 @@ nvk_queue_state_update(struct nvk_queue *queue,
    struct nvkmd_mem *mem;
    uint32_t alloc_count, bytes_per_warp, bytes_per_tpc;
    bool dirty = false;
+#ifdef __SWITCH__
+   struct nouveau_horizon_zbc_state zbc_state;
+   const bool zbc_dirty =
+      nvk_queue_get_changed_zbc_state(queue, &zbc_state);
+   dirty |= zbc_dirty;
+#endif
 
    alloc_count = nvk_descriptor_table_alloc_count(&dev->images);
    if (qs->images.alloc_count != alloc_count) {
@@ -78,11 +138,22 @@ nvk_queue_state_update(struct nvk_queue *queue,
    if (!dirty)
       return VK_SUCCESS;
 
-   uint32_t push_data[64];
+   /* Worst case is 12 dwords each for image and sampler pools, 17 for SLM,
+    * and 4 for the two Switch ZBC packets: 45 total.  Keep explicit growth
+    * headroom instead of consuming the old 64-dword budget implicitly.
+    */
+   uint32_t push_data[80];
+   static_assert(ARRAY_SIZE(push_data) >= 45,
+                 "queue-state push must fit the worst-case ZBC update");
    struct nv_push push;
-   nv_push_init(&push, push_data, 64,
+   nv_push_init(&push, push_data, ARRAY_SIZE(push_data),
                 nvk_queue_subchannels_from_engines(queue->engines));
    struct nv_push *p = &push;
+
+#ifdef __SWITCH__
+   if (zbc_dirty)
+      nvk_push_zbc_state(p, &zbc_state);
+#endif
 
    if (qs->images.alloc_count > 0) {
       const uint64_t tex_pool_addr =
@@ -167,7 +238,12 @@ nvk_queue_state_update(struct nvk_queue *queue,
       }
    }
 
-   return nvk_queue_push(queue, p);
+   const VkResult result = nvk_queue_push(queue, p);
+#ifdef __SWITCH__
+   if (result == VK_SUCCESS && zbc_dirty)
+      nvk_queue_commit_zbc_state(queue, &zbc_state);
+#endif
+   return result;
 }
 
 static VkResult
@@ -454,6 +530,10 @@ nvk_queue_init_context_state(struct nvk_queue *queue)
    struct nvk_device *dev = nvk_queue_device(queue);
    const struct nvk_physical_device *pdev = nvk_device_physical(dev);
    VkResult result;
+#ifdef __SWITCH__
+   struct nouveau_horizon_zbc_state zbc_state;
+   bool zbc_programmed = false;
+#endif
 
    uint32_t push_data[4096 + 1024];
    struct nv_push push;
@@ -477,6 +557,12 @@ nvk_queue_init_context_state(struct nvk_queue *queue)
       result = nvk_push_draw_state_init(queue, p);
       if (result != VK_SUCCESS)
          return result;
+
+#ifdef __SWITCH__
+      nvkmd_switch_dev_get_zbc_state(dev->nvkmd, &zbc_state);
+      nvk_push_zbc_state(p, &zbc_state);
+      zbc_programmed = true;
+#endif
    }
 
    if (queue->engines & NVKMD_ENGINE_COMPUTE) {
@@ -485,7 +571,12 @@ nvk_queue_init_context_state(struct nvk_queue *queue)
          return result;
    }
 
-   return nvk_queue_push(queue, &push);
+   result = nvk_queue_push(queue, &push);
+#ifdef __SWITCH__
+   if (result == VK_SUCCESS && zbc_programmed)
+      nvk_queue_commit_zbc_state(queue, &zbc_state);
+#endif
+   return result;
 }
 
 static VkQueueGlobalPriority
@@ -590,8 +681,17 @@ nvk_queue_create(struct nvk_device *dev,
    return VK_SUCCESS;
 
 fail_push_stream:
+#ifdef __SWITCH__
+   /* This path may have submitted the context-state push.  If completion is
+    * uncertain, nvk_queue_try_destroy() deliberately leaves the queue object
+    * and its embedded stream/list bookkeeping intact for device quarantine.
+    */
+   (void)nvk_queue_try_destroy(dev, queue);
+   return result;
+#else
    nvk_mem_stream_sync(dev, &queue->push_stream, queue->exec_ctx);
    nvk_mem_stream_finish(dev, &queue->push_stream);
+#endif
 fail_bind_ctx:
    if (queue->bind_ctx != NULL)
       nvkmd_ctx_destroy(queue->bind_ctx);
@@ -613,9 +713,106 @@ fail_alloc:
    return result;
 }
 
+#ifdef __SWITCH__
+static bool
+nvk_queue_quarantine_teardown(struct nvk_queue *queue,
+                              const char *operation, VkResult result)
+{
+   queue->teardown_quarantined = true;
+   vk_loge(VK_LOG_OBJS(&queue->vk.base),
+           "nvk-switch: %s failed during queue teardown (VkResult %d); "
+           "quarantining the queue, push stream, contexts, and GPU-visible "
+           "ownership graph",
+           operation, result);
+   return false;
+}
+
+bool
+nvk_queue_try_destroy(struct nvk_device *dev, struct nvk_queue *queue)
+{
+   if (queue->teardown_quarantined)
+      return false;
+
+   /* Every successfully initialized queue has a push stream.  Engine-less
+    * queue families have no execution context and never enqueue stream work;
+    * skip the context-backed completion operation in that degenerate case.
+    */
+   if (queue->exec_ctx == NULL) {
+      assert(!queue->push_stream.needs_flush);
+      nvk_mem_stream_finish(dev, &queue->push_stream);
+      nvk_queue_state_finish(dev, &queue->state);
+      if (queue->bind_ctx != NULL) {
+         nvkmd_ctx_destroy(queue->bind_ctx);
+         queue->bind_ctx = NULL;
+      }
+      vk_free(&dev->vk.alloc, queue->submit_execs);
+      vk_queue_finish(&queue->vk);
+      vk_free(&dev->vk.alloc, queue);
+      return true;
+   }
+
+   /* This timeline signal is ordered after every prior submission on the
+    * execution channel.  Nothing owned by the queue may be released until it
+    * is observed, because push_stream embeds both command BO ownership and
+    * the recycle-list links needed to keep those BOs alive.
+    */
+   VkResult result =
+      nvk_mem_stream_sync(dev, &queue->push_stream, queue->exec_ctx);
+   if (result != VK_SUCCESS) {
+      return nvk_queue_quarantine_teardown(queue,
+                                            "push-stream completion wait",
+                                            result);
+   }
+
+   /* draw_cb0 can still be the destination of the independent upload channel
+    * even after this queue is idle.  Preserve it (and the containing device)
+    * if upload completion is unknown.
+    */
+   if (queue->draw_cb0 != NULL) {
+      result = nvk_upload_queue_sync(dev, &dev->upload);
+      if (result != VK_SUCCESS) {
+         return nvk_queue_quarantine_teardown(queue,
+                                               "upload completion wait",
+                                               result);
+      }
+   }
+
+   /* Put the native channel while all adapter-owned command storage is still
+    * alive.  Horizon may quarantine a zero-reference channel when its final
+    * completion cannot be established; propagate that result to the logical
+    * device instead of freeing the queue around a leaked native channel.
+    */
+   if (queue->exec_ctx != NULL &&
+       !nvkmd_switch_ctx_try_destroy(queue->exec_ctx, &queue->vk.base)) {
+      return nvk_queue_quarantine_teardown(queue,
+                                            "native context release",
+                                            VK_ERROR_DEVICE_LOST);
+   }
+   queue->exec_ctx = NULL;
+
+   nvk_mem_stream_finish(dev, &queue->push_stream);
+   if (queue->draw_cb0 != NULL) {
+      nvkmd_mem_unref(queue->draw_cb0);
+      queue->draw_cb0 = NULL;
+   }
+   nvk_queue_state_finish(dev, &queue->state);
+   if (queue->bind_ctx != NULL) {
+      nvkmd_ctx_destroy(queue->bind_ctx);
+      queue->bind_ctx = NULL;
+   }
+   vk_free(&dev->vk.alloc, queue->submit_execs);
+   vk_queue_finish(&queue->vk);
+   vk_free(&dev->vk.alloc, queue);
+   return true;
+}
+#endif
+
 void
 nvk_queue_destroy(struct nvk_device *dev, struct nvk_queue *queue)
 {
+#ifdef __SWITCH__
+   (void)nvk_queue_try_destroy(dev, queue);
+#else
    nvk_mem_stream_sync(dev, &queue->push_stream, queue->exec_ctx);
    nvk_mem_stream_finish(dev, &queue->push_stream);
    if (queue->draw_cb0 != NULL) {
@@ -627,9 +824,7 @@ nvk_queue_destroy(struct nvk_device *dev, struct nvk_queue *queue)
       nvkmd_ctx_destroy(queue->bind_ctx);
    if (queue->exec_ctx != NULL)
       nvkmd_ctx_destroy(queue->exec_ctx);
-#ifdef __SWITCH__
-   vk_free(&dev->vk.alloc, queue->submit_execs);
-#endif
    vk_queue_finish(&queue->vk);
    vk_free(&dev->vk.alloc, queue);
+#endif
 }

@@ -216,6 +216,8 @@ nvk_GetPhysicalDeviceExternalBufferProperties(
    const VkPhysicalDeviceExternalBufferInfo *pExternalBufferInfo,
    VkExternalBufferProperties *pExternalBufferProperties)
 {
+   VK_FROM_HANDLE(nvk_physical_device, pdev, physicalDevice);
+
    /* The Vulkan 1.3.256 spec says:
     *
     *    VUID-VkPhysicalDeviceExternalBufferInfo-handleType-parameter
@@ -232,6 +234,9 @@ nvk_GetPhysicalDeviceExternalBufferProperties(
     * sketchy.  Also, just disallowing flags is the safe option.
     */
    if (pExternalBufferInfo->flags)
+      goto unsupported;
+
+   if (!pdev->nvkmd->kmd_info.has_dma_buf)
       goto unsupported;
 
    switch (pExternalBufferInfo->handleType) {

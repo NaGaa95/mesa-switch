@@ -828,7 +828,7 @@ nvc0_draw_stream_output(struct nvc0_context *nvc0,
       BEGIN_NVC0(push, NVC0_3D(DRAW_TFB_STRIDE), 1);
       PUSH_DATA (push, so->stride);
       BEGIN_NVC0(push, NVC0_3D(DRAW_TFB_BYTES), 1);
-      nvc0_hw_query_pushbuf_submit(push, nvc0_query(so->pq), 0x4);
+      nvc0_hw_query_pushbuf_submit(nvc0, nvc0_query(so->pq), 0x4);
       IMMED_NVC0(push, NVC0_3D(VERTEX_END_GL), 0);
 
       mode |= NVC0_3D_VERTEX_BEGIN_GL_INSTANCE_NEXT;
@@ -1088,6 +1088,7 @@ nvc0_draw_vbo(struct pipe_context *pipe, const struct pipe_draw_info *info,
    struct nvc0_screen *screen = nvc0->screen;
    unsigned vram_domain = NV_VRAM_DOMAIN(&screen->base);
    unsigned count_total = 0;
+   bool validated = false;
 
    /* The rest is copied straight from util_multi_draw
     *
@@ -1098,7 +1099,7 @@ nvc0_draw_vbo(struct pipe_context *pipe, const struct pipe_draw_info *info,
    unsigned drawid = drawid_offset;
 
    /* dont wanna start trippin */
-   simple_mtx_lock(&nvc0->screen->state_lock);
+   nvc0_screen_state_lock(nvc0->screen);
 
    /* NOTE: caller must ensure that (min_index + index_bias) is >= 0 */
    if (info->index_bounds_valid) {
@@ -1295,7 +1296,11 @@ nvc0_draw_vbo(struct pipe_context *pipe, const struct pipe_draw_info *info,
                    vram_domain | NOUVEAU_BO_RD, screen->text);
    }
 
-   nvc0_state_validate_3d(nvc0, ~0);
+   validated = nvc0_state_validate_3d(nvc0, ~0);
+   if (!validated) {
+      NOUVEAU_ERR("Failed to validate state for draw !\n");
+      goto out_unlock;
+   }
 
    for (unsigned i = 0; i < num_draws; i++) {
       if (indirect || (draws[i].count && info->instance_count))
@@ -1304,14 +1309,29 @@ nvc0_draw_vbo(struct pipe_context *pipe, const struct pipe_draw_info *info,
          drawid++;
    }
 
-   PUSH_KICK_DEFER(push);
-   simple_mtx_unlock(&nvc0->screen->state_lock);
+#ifdef __SWITCH__
+   /* These fences are sampled after every draw packet has been queued.  A
+    * deleted program therefore transfers the exact final consumer fence to
+    * the screen retirement list instead of forcing a physical barrier. */
+   nvc0_program_track_use(nvc0, nvc0->vertprog);
+   nvc0_program_track_use(nvc0, nvc0->tctlprog);
+   nvc0_program_track_use(nvc0, nvc0->tevlprog);
+   nvc0_program_track_use(nvc0, nvc0->gmtyprog);
+   nvc0_program_track_use(nvc0, nvc0->fragprog);
+#endif
 
+   PUSH_KICK_DEFER(push);
+
+out_unlock:
+   /* The Switch uses one screen-owned pushbuf.  Clear its validation context
+    * before releasing state_lock so another context cannot install a bufctx
+   * which this draw then accidentally removes.
+   */
+   nouveau_pushbuf_bufctx(push, NULL);
    nvc0->base.kick_notify = nvc0_default_kick_notify;
+   nvc0_screen_state_unlock(nvc0->screen);
 
    nvc0_release_user_vbufs(nvc0);
-
-   nouveau_pushbuf_bufctx(push, NULL);
 
 #ifdef __SWITCH__
    if (!nvc0->switch_fast_draw) {
@@ -1322,4 +1342,5 @@ nvc0_draw_vbo(struct pipe_context *pipe, const struct pipe_draw_info *info,
 #ifdef __SWITCH__
    }
 #endif
+
 }

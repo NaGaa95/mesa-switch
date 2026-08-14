@@ -79,7 +79,16 @@
 #elif DETECT_OS_WINDOWS
 #  include <windows.h>
 #elif DETECT_OS_SWITCH
+#  include <malloc.h>
 #  include <switch.h>
+
+/* libnx's default and application-provided heap initializers publish the
+ * newlib heap through these globals.  svcSetHeapSize reserves that entire
+ * range up front, so Horizon's process-used counter cannot describe how much
+ * memory malloc can still provide after startup.
+ */
+extern char *fake_heap_start;
+extern char *fake_heap_end;
 #elif DETECT_OS_FUCHSIA
 #include <unistd.h>
 #include <zircon/syscalls.h>
@@ -97,7 +106,7 @@ os_log_message(const char *message)
    static FILE *fout = NULL;
 
    if (!fout) {
-#if MESA_DEBUG
+#if MESA_DEBUG || DETECT_OS_SWITCH
       /* one-time init */
       const char *filename = os_get_option("GALLIUM_LOG_FILE");
       if (filename) {
@@ -132,9 +141,11 @@ os_log_message(const char *message)
       fputs(message, fout);
       fflush(fout);
    }
+#endif
 #elif DETECT_OS_SWITCH
    svcOutputDebugString(message, __builtin_strlen(message) + 1);
-#endif
+   fputs(message, fout);
+   fflush(fout);
 #else /* !DETECT_OS_WINDOWS */
    fflush(stdout);
    fputs(message, fout);
@@ -469,6 +480,38 @@ os_get_available_system_memory(uint64_t *size)
    ret = GlobalMemoryStatusEx(&status);
    *size = status.ullAvailPhys;
    return (ret == true);
+#elif DETECT_OS_SWITCH
+   const uintptr_t heap_start = (uintptr_t)fake_heap_start;
+   const uintptr_t heap_end = (uintptr_t)fake_heap_end;
+
+   if (heap_start && heap_end > heap_start) {
+      const uint64_t heap_size = heap_end - heap_start;
+      const struct mallinfo allocator = mallinfo();
+      const uint64_t arena = MIN2((uint64_t)allocator.arena, heap_size);
+      const uint64_t reusable =
+         MIN2((uint64_t)allocator.fordblks, arena);
+
+      /* Newlib can satisfy allocations from free blocks already in its arena
+       * and by extending the arena through the uncommitted fake-heap tail.
+       * Counting both also makes the value recover when BO storage is freed.
+       */
+      *size = heap_size - arena + reusable;
+      return true;
+   }
+
+   /* A non-newlib runtime may not publish a fake heap.  The kernel counters
+    * remain the best fallback in that case, although a normal libnx process
+    * should always take the allocator-aware path above.
+    */
+   uint64_t total, used;
+   if (R_FAILED(svcGetInfo(&total, InfoType_TotalMemorySize,
+                           CUR_PROCESS_HANDLE, 0)) ||
+       R_FAILED(svcGetInfo(&used, InfoType_UsedMemorySize,
+                           CUR_PROCESS_HANDLE, 0)))
+      return false;
+
+   *size = used < total ? total - used : 0;
+   return true;
 #elif DETECT_OS_APPLE
    vm_statistics64_data_t vm_stats;
    mach_msg_type_number_t count = HOST_VM_INFO64_COUNT;

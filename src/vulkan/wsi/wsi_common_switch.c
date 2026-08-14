@@ -471,7 +471,7 @@ wsi_switch_create_scanout_image(struct wsi_switch_swapchain *chain,
    grbuf.header.num_ints =
       (sizeof(NvGraphicBuffer) - sizeof(NativeHandle)) / 4;
    grbuf.unk0 = -1;
-   grbuf.nvmap_id = nvMapGetId(img->layout.nvmap);
+   grbuf.nvmap_id = img->layout.nvmap_id;
    grbuf.magic = 0xDAFFCAFF;
    grbuf.pid = 42;
    grbuf.usage =

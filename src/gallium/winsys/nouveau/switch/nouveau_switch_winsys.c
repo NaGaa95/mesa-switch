@@ -1,9 +1,12 @@
+#include <errno.h>
+#include <inttypes.h>
 #include <stdint.h>
 #include "pipe/p_context.h"
 #include "pipe/p_state.h"
 #include "pipe/p_screen.h"
 #include "util/format/u_format.h"
 #include "util/u_memory.h"
+#include "util/u_debug.h"
 #include "util/u_inlines.h"
 #include "util/u_hash_table.h"
 #include "util/u_thread.h"
@@ -15,6 +18,7 @@
 
 #include "nouveau/nouveau_winsys.h"
 #include "nouveau/nouveau_screen.h"
+#include "nouveau/nouveau_context.h"
 #include "nouveau/nouveau_buffer.h"
 #include <nvif/class.h>
 #include <nvif/cl0080.h>
@@ -51,12 +55,45 @@ nouveau_switch_screen_create(void)
 	if (ret)
 		goto err;
 
-	/* Report unified memory through the GART domain. */
-	uint64_t total_memory = 0;
-	if (os_get_total_physical_memory(&total_memory))
-		dev->gart_size = total_memory;
-	/* BOs use the process heap, so its entitlement is the static limit. */
-	dev->gart_limit = dev->gart_size;
+	/* BOs use Horizon's process memory entitlement.  Keep reporting the
+	 * storage through Nouveau's GART domain internally, but reserve process
+	 * headroom because Mesa and the application share this UMA heap.
+	 */
+	uint64_t total_memory = dev->gart_size;
+	uint64_t queried_total = 0;
+	uint64_t available_memory = 0;
+	const bool have_total = os_get_total_physical_memory(&queried_total);
+	const bool have_available =
+		os_get_available_system_memory(&available_memory) &&
+		available_memory > 0;
+
+	if (have_total)
+		total_memory = queried_total;
+	if (!have_total && have_available)
+		total_memory = available_memory;
+	if (!total_memory) {
+		debug_printf("nouveau/switch: failed to determine process memory entitlement\n");
+		goto err;
+	}
+	if (!have_available)
+		available_memory = total_memory;
+
+	dev->gart_size = total_memory;
+	dev->gart_limit =
+		nouveau_switch_memory_budget(total_memory, available_memory);
+
+	if (debug_get_bool_option("NOUVEAU_SWITCH_LOG", false) ||
+	    debug_get_bool_option("NOUVEAU_SWITCH_STATS", false)) {
+		debug_printf("nouveau/switch: UMA memory total=%" PRIu64
+		             " MiB available=%" PRIu64 " MiB budget=%" PRIu64
+		             " MiB headroom=%" PRIu64
+		             " MiB (queries total=%s available=%s)\n",
+		             total_memory >> 20, available_memory >> 20,
+		             dev->gart_limit >> 20,
+		             nouveau_switch_memory_headroom(total_memory) >> 20,
+		             have_total ? "ok" : "fallback",
+		             have_available ? "ok" : "fallback");
+	}
 
 	switch (dev->chipset & ~0xf) {
 #if 0
@@ -92,6 +129,11 @@ nouveau_switch_screen_create(void)
 	if (!screen || !screen->base.context_create)
 		goto err;
 
+	/* Match the DRM winsys lifecycle contract.  Driver screen destructors use
+	 * this flag to distinguish a fully constructed screen from an error unwind.
+	 */
+	screen->initialized = true;
+
 	mtx_unlock(&nouveau_screen_mutex);
 	return &screen->base;
 
@@ -111,6 +153,108 @@ nouveau_switch_resource_get_syncpoint(struct pipe_resource *resource, unsigned i
 {
 	struct nv04_resource* priv = nv04_resource(resource);
 	return nouveau_bo_get_syncpoint(priv->bo, out_threshold);
+}
+
+PUBLIC int
+nouveau_switch_context_wait_nvmultifence(struct pipe_context *context,
+                                         const NvMultiFence *fence)
+{
+	if (!context || !fence || fence->num_fences > 4)
+		return -EINVAL;
+	if (!fence->num_fences)
+		return 0;
+
+	struct nouveau_context *nv = nouveau_context(context);
+	struct nouveau_pushbuf_priv *ppush = nv->pushbuf->user_priv;
+
+	/* The Switch screen owns one native channel.  Serialize acquisition with
+	 * command generation and bind the shared pushbuf to the context that will
+	 * render the acquired image.
+	 */
+	nouveau_screen_submission_lock(ppush->screen);
+	simple_mtx_lock(&ppush->screen->fence.lock);
+	nouveau_pushbuf_bind_context(nv->pushbuf, nv);
+	const int ret =
+		nouveau_switch_pushbuf_enqueue_nvmultifence(nv->pushbuf, fence);
+	simple_mtx_unlock(&ppush->screen->fence.lock);
+	nouveau_screen_submission_unlock(ppush->screen);
+
+	if (ret)
+		_debug_printf("nouveau/switch: failed to enqueue acquire fence: %d\n",
+		              ret);
+	return ret;
+}
+
+PUBLIC int
+nouveau_switch_context_get_error(struct pipe_context *context)
+{
+	if (!context)
+		return -EINVAL;
+
+	struct nouveau_context *nv = nouveau_context(context);
+	if (!nv || !nv->pushbuf || !nv->screen)
+		return -EINVAL;
+
+	nouveau_screen_submission_lock(nv->screen);
+	simple_mtx_lock(&nv->screen->fence.lock);
+	const int error = nouveau_switch_pushbuf_get_error(nv->pushbuf);
+	simple_mtx_unlock(&nv->screen->fence.lock);
+	nouveau_screen_submission_unlock(nv->screen);
+	return error;
+}
+
+PUBLIC int
+nouveau_switch_context_get_cpu_fence(struct pipe_context *context,
+                                     NvFence *out_fence)
+{
+   if (!context || !out_fence)
+      return -EINVAL;
+
+   struct nouveau_context *nv = nouveau_context(context);
+   if (!nv || !nv->pushbuf || !nv->screen)
+      return -EINVAL;
+
+   nouveau_screen_submission_lock(nv->screen);
+   simple_mtx_lock(&nv->screen->fence.lock);
+   nouveau_pushbuf_bind_context(nv->pushbuf, nv);
+   const int ret = nouveau_switch_pushbuf_get_cpu_fence(
+      nv->pushbuf, out_fence);
+   simple_mtx_unlock(&nv->screen->fence.lock);
+   nouveau_screen_submission_unlock(nv->screen);
+   return ret;
+}
+
+PUBLIC int
+nouveau_switch_context_finish_required(struct pipe_context *context,
+                                       uint64_t timeout_ns,
+                                       const char *reason)
+{
+	if (!context)
+		return -EINVAL;
+
+	struct nouveau_context *nv = nouveau_context(context);
+	if (!nv || !nv->pushbuf || !nv->screen)
+		return -EINVAL;
+
+	NvFence fence = { .id = UINT32_MAX };
+	nouveau_screen_submission_lock(nv->screen);
+	simple_mtx_lock(&nv->screen->fence.lock);
+	nouveau_pushbuf_bind_context(nv->pushbuf, nv);
+	int ret = nouveau_switch_pushbuf_get_cpu_fence(nv->pushbuf, &fence);
+	if (ret == -ENODATA)
+		ret = nouveau_switch_pushbuf_get_error(nv->pushbuf);
+	else if (!ret)
+		ret = nouveau_switch_pushbuf_wait_fence_required(
+			nv->pushbuf, &fence, timeout_ns, reason);
+	simple_mtx_unlock(&nv->screen->fence.lock);
+	nouveau_screen_submission_unlock(nv->screen);
+
+	if (ret)
+		_debug_printf("nouveau/switch: required context finish failed at %s: "
+		              "%d (native=%u:%u)\n",
+		              reason ? reason : "unknown", ret, fence.id,
+		              fence.value);
+	return ret;
 }
 
 PUBLIC int

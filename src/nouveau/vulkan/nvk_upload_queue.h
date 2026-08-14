@@ -30,6 +30,13 @@ VkResult nvk_upload_queue_init(struct nvk_device *dev,
 void nvk_upload_queue_finish(struct nvk_device *dev,
                              struct nvk_upload_queue *queue);
 
+#ifdef HAVE_SWITCH_PLATFORM
+/* Checked Switch teardown keeps the embedded stream and context alive when
+ * native completion cannot be proved. */
+bool nvk_upload_queue_try_finish(struct nvk_device *dev,
+                                 struct nvk_upload_queue *queue);
+#endif
+
 VkResult nvk_upload_queue_flush(struct nvk_device *dev,
                                 struct nvk_upload_queue *queue,
                                 uint64_t *time_point_out);

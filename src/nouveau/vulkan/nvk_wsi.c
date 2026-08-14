@@ -121,7 +121,7 @@ nvk_switch_get_scanout_layout(VkImage _image, VkDeviceMemory _memory,
    if (block_size_B == 0 || (lvl0->row_stride_B % block_size_B) != 0)
       return VK_ERROR_FEATURE_NOT_PRESENT;
 
-   out->nvmap = nvkmd_switch_mem_get_nvmap(mem->mem);
+   out->nvmap_id = nvkmd_switch_mem_get_nvmap_id(mem->mem);
    out->offset_B = (uint32_t)lvl0->offset_B;
    out->size_B = (uint32_t)plane->nil.size_B;
    out->row_stride_B = lvl0->row_stride_B;

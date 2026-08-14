@@ -176,6 +176,10 @@ nvk_deps = [
   idep_vulkan_wsi_headers,
 ]
 
+if with_platform_switch
+  nvk_deps += [idep_nouveau_horizon]
+endif
+
 nvk_flags = []
 
 nvk_build_id = get_option('nvk-build-id')
@@ -216,8 +220,21 @@ if host_machine.system() == 'horizon'
   # at that name for any tooling that wants it.
   libvulkan_nouveau = libnvk
 
+  # The loaderless Horizon SDK is distributed as a standalone static package,
+  # so install the Khronos headers its pkg-config Cflags advertise instead of
+  # requiring every homebrew consumer to vendor a second header bundle.
+  install_subdir(
+    '../../../include/vulkan',
+    install_dir : get_option('includedir'),
+  )
+  install_subdir(
+    '../../../include/vk_video',
+    install_dir : get_option('includedir'),
+  )
+
   libvulkan_private_archives = [
     libnvk,
+    libnouveau_horizon,
     libvulkan_lite_runtime,
     libvulkan_runtime,
     libvulkan_lite_instance,
@@ -242,39 +259,20 @@ if host_machine.system() == 'horizon'
     _libmesa_util_c11,
   ]
 
-  libvulkan_private_link_dirs = []
-  foreach archive : libvulkan_private_archives
-    archive_dir = fs.parent(archive.full_path())
-    if not libvulkan_private_link_dirs.contains(archive_dir)
-      libvulkan_private_link_dirs += archive_dir
-    endif
-  endforeach
-
-  libvulkan_private_link_args = []
-  foreach archive_dir : libvulkan_private_link_dirs
-    libvulkan_private_link_args += '-L' + archive_dir
-  endforeach
-
-  # Preserve the original archive-group semantics behind a single
-  # client-facing libvulkan.a so Horizon consumers don't need bespoke link
-  # order or a manually curated archive list.
+  # Merge every private Mesa archive into one real archive.  Unlike an ld
+  # GROUP script, the result remains valid when a consumer passes an absolute
+  # libvulkan.a path without adding the SDK directory to its -L search path.
   libvulkan = custom_target(
     'nvk_loaderless_libvulkan',
     input : libvulkan_private_archives,
     output : 'libvulkan.a',
     command : [
-      prog_python, files('nvk_linker_script_gen.py'),
-      '--out', '@OUTPUT@',
-      '--link-library', 'elf',
-      '--link-library', 'drm_nouveau',
-      '--link-library', 'zstd',
-      '--link-library', 'z',
-      '--link-library', 'nx',
-      '--link-library', 'm',
-      '--link-library', 'stdc++',
+      prog_python, files('nvk_archive_merge.py'),
+      '--ar', 'ar',
+      '--output', '@OUTPUT@',
       '@INPUT@',
     ],
-    depend_files : files('nvk_linker_script_gen.py'),
+    depend_files : files('nvk_archive_merge.py'),
     build_by_default : true,
     install : true,
     install_dir : get_option('libdir'),
@@ -283,11 +281,18 @@ if host_machine.system() == 'horizon'
   dep_vulkan_horizon = declare_dependency(
     include_directories : inc_include,
     dependencies : [
-      dep_libdrm,
+      dep_elf,
+      dep_expat,
       dep_zlib,
       dep_zstd,
     ],
-    link_args : libvulkan_private_link_args + [libvulkan.full_path(), '-lnx', '-lm', '-lstdc++'],
+    sources : [libvulkan],
+    link_args : [
+      libvulkan.full_path(),
+      '-lnx',
+      '-lm',
+      '-lstdc++',
+    ],
   )
 
   meson.override_dependency('vulkan', dep_vulkan_horizon)
@@ -299,7 +304,7 @@ if host_machine.system() == 'horizon'
     version : meson.project_version(),
     libraries : ['-lvulkan'],
     libraries_private : ['-lnx', '-lm', '-lstdc++'],
-    requires_private : ['libdrm_nouveau', 'zlib', 'libzstd'],
+    requires_private : ['libelf', 'expat', 'zlib', 'libzstd'],
   )
 else
   libvulkan_nouveau = shared_library(

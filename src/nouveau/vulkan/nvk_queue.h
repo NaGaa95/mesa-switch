@@ -55,6 +55,12 @@ struct nvk_queue {
 #ifdef HAVE_SWITCH_PLATFORM
    /* Reused submission scratch sized to libnx's hardware GPFIFO ring. */
    struct nvkmd_ctx_exec *submit_execs;
+   uint64_t zbc_generation;
+
+   /* Once completion becomes unknowable, teardown is deliberately one-way:
+    * the queue (including this embedded stream/list state) remains allocated.
+    */
+   bool teardown_quarantined;
 #endif
 };
 
@@ -113,6 +119,14 @@ VkResult nvk_queue_create(struct nvk_device *dev,
                           uint32_t index_in_family);
 
 void nvk_queue_destroy(struct nvk_device *dev, struct nvk_queue *queue);
+
+#ifdef HAVE_SWITCH_PLATFORM
+/* Returns false only when Switch teardown cannot prove that GPU references
+ * are gone.  In that case the queue and its complete ownership graph remain
+ * live and the caller must quarantine the containing device as well.
+ */
+bool nvk_queue_try_destroy(struct nvk_device *dev, struct nvk_queue *queue);
+#endif
 
 VkResult nvk_push_draw_state_init(struct nvk_queue *queue,
                                   struct nv_push *p);

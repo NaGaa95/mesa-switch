@@ -49,6 +49,17 @@ typedef EGLBoolean (EGLAPIENTRYP PFNEGLSWAPBUFFERSREGIONNOK) (EGLDisplay dpy, EG
 #define EGL_DRM_BUFFER_FORMAT_RGB565_MESA       0x3292
 #endif /* EGL_MESA_drm_image_formats */
 
+/* Horizon's NWindow API cannot change dimensions while presentation buffers
+ * are registered.  This extension gives the EGL driver ownership of the
+ * required flush, cancel, release, resize and reconfiguration transaction.
+ * The surface must be a window surface bound to the calling thread's current
+ * context.  Retrieve the entrypoint with eglGetProcAddress. */
+#ifndef EGL_MESA_horizon_surface_resize
+#define EGL_MESA_horizon_surface_resize 1
+typedef EGLBoolean (EGLAPIENTRYP PFNEGLRESIZESURFACEMESAPROC) (
+    EGLDisplay dpy, EGLSurface surface, EGLint width, EGLint height);
+#endif /* EGL_MESA_horizon_surface_resize */
+
 #ifdef __cplusplus
 }
 #endif

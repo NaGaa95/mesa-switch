@@ -54,15 +54,37 @@ nvc0_destroy_query(struct pipe_context *pipe, struct pipe_query *pq)
 static bool
 nvc0_begin_query(struct pipe_context *pipe, struct pipe_query *pq)
 {
+   struct nvc0_context *nvc0 = nvc0_context(pipe);
    struct nvc0_query *q = nvc0_query(pq);
-   return q->funcs->begin_query(nvc0_context(pipe), q);
+
+#ifdef __SWITCH__
+   /* Horizon contexts share one screen-owned pushbuf.  Query callbacks can
+    * append methods (and the SM path can recursively launch compute), so keep
+    * the complete logical record bound to its originating context. */
+   nvc0_screen_state_lock(nvc0->screen);
+   nouveau_pushbuf_bind_context(nvc0->base.pushbuf, &nvc0->base);
+#endif
+   const bool ret = q->funcs->begin_query(nvc0, q);
+#ifdef __SWITCH__
+   nvc0_screen_state_unlock(nvc0->screen);
+#endif
+   return ret;
 }
 
 static bool
 nvc0_end_query(struct pipe_context *pipe, struct pipe_query *pq)
 {
+   struct nvc0_context *nvc0 = nvc0_context(pipe);
    struct nvc0_query *q = nvc0_query(pq);
-   q->funcs->end_query(nvc0_context(pipe), q);
+
+#ifdef __SWITCH__
+   nvc0_screen_state_lock(nvc0->screen);
+   nouveau_pushbuf_bind_context(nvc0->base.pushbuf, &nvc0->base);
+#endif
+   q->funcs->end_query(nvc0, q);
+#ifdef __SWITCH__
+   nvc0_screen_state_unlock(nvc0->screen);
+#endif
    return true;
 }
 
@@ -70,8 +92,21 @@ static bool
 nvc0_get_query_result(struct pipe_context *pipe, struct pipe_query *pq,
                       bool wait, union pipe_query_result *result)
 {
+   struct nvc0_context *nvc0 = nvc0_context(pipe);
    struct nvc0_query *q = nvc0_query(pq);
-   return q->funcs->get_query_result(nvc0_context(pipe), q, wait, result);
+
+#ifdef __SWITCH__
+   /* An availability probe may kick the pending batch and a blocking result
+    * may flush before waiting.  Keep that submission associated with this
+    * context; the recursive lock preserves nested query/compute paths. */
+   nvc0_screen_state_lock(nvc0->screen);
+   nouveau_pushbuf_bind_context(nvc0->base.pushbuf, &nvc0->base);
+#endif
+   const bool ret = q->funcs->get_query_result(nvc0, q, wait, result);
+#ifdef __SWITCH__
+   nvc0_screen_state_unlock(nvc0->screen);
+#endif
+   return ret;
 }
 
 static void
@@ -83,13 +118,21 @@ nvc0_get_query_result_resource(struct pipe_context *pipe,
                                struct pipe_resource *resource,
                                unsigned offset)
 {
+   struct nvc0_context *nvc0 = nvc0_context(pipe);
    struct nvc0_query *q = nvc0_query(pq);
    if (!q->funcs->get_query_result_resource) {
       assert(!"Unexpected lack of get_query_result_resource");
       return;
    }
-   q->funcs->get_query_result_resource(nvc0_context(pipe), q, flags, result_type,
-                                       index, resource, offset);
+#ifdef __SWITCH__
+   nvc0_screen_state_lock(nvc0->screen);
+   nouveau_pushbuf_bind_context(nvc0->base.pushbuf, &nvc0->base);
+#endif
+   q->funcs->get_query_result_resource(nvc0, q, flags, result_type, index,
+                                       resource, offset);
+#ifdef __SWITCH__
+   nvc0_screen_state_unlock(nvc0->screen);
+#endif
 }
 
 static void
@@ -99,12 +142,20 @@ nvc0_render_condition(struct pipe_context *pipe,
 {
    struct nvc0_context *nvc0 = nvc0_context(pipe);
    struct nouveau_pushbuf *push = nvc0->base.pushbuf;
+#ifdef __SWITCH__
+   struct pipe_query *old_pq = nvc0->cond_query;
+#endif
    struct nvc0_query *q = nvc0_query(pq);
    struct nvc0_hw_query *hq = nvc0_hw_query(q);
    uint32_t cond;
    bool wait =
       mode != PIPE_RENDER_COND_NO_WAIT &&
       mode != PIPE_RENDER_COND_BY_REGION_NO_WAIT;
+
+#ifdef __SWITCH__
+   nvc0_screen_state_lock(nvc0->screen);
+   nouveau_pushbuf_bind_context(push, &nvc0->base);
+#endif
 
    if (!pq) {
       cond = NVC0_3D_COND_MODE_ALWAYS;
@@ -146,7 +197,7 @@ nvc0_render_condition(struct pipe_context *pipe,
       IMMED_NVC0(push, NVC0_3D(COND_MODE), cond);
       if (nvc0->screen->compute)
          IMMED_NVC0(push, NVC0_CP(COND_MODE), cond);
-      return;
+      goto out;
    }
 
    if (wait && hq->state != NVC0_HW_QUERY_STATE_READY)
@@ -167,6 +218,19 @@ nvc0_render_condition(struct pipe_context *pipe,
       PUSH_DATA (push, hq->bo->offset + hq->offset);
       PUSH_DATA (push, cond);
    }
+
+out:
+   (void)0;
+#ifdef __SWITCH__
+   /* Conditional rendering may keep reading a query through many later draw
+    * packets.  Rebinding/disabling is the last dependent command for the old
+    * predicate; recording both sides also covers the new address setup. */
+   if (old_pq && old_pq != pq)
+      nvc0_hw_query_track_use(nvc0, nvc0_query(old_pq));
+   if (pq)
+      nvc0_hw_query_track_use(nvc0, q);
+   nvc0_screen_state_unlock(nvc0->screen);
+#endif
 }
 
 int

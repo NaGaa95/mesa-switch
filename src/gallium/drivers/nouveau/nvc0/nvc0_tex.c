@@ -787,9 +787,9 @@ nve4_set_tex_handles(struct nvc0_context *nvc0)
 }
 
 static uint64_t
-nve4_create_texture_handle(struct pipe_context *pipe,
-                           struct pipe_sampler_view *view,
-                           const struct pipe_sampler_state *sampler)
+nve4_create_texture_handle_locked(struct pipe_context *pipe,
+                                   struct pipe_sampler_view *view,
+                                   const struct pipe_sampler_state *sampler)
 {
    /* We have to create persistent handles that won't change for these objects
     * That means that we have to upload them into place and lock them so that
@@ -841,6 +841,24 @@ fail:
    return 0;
 }
 
+static uint64_t
+nve4_create_texture_handle(struct pipe_context *pipe,
+                            struct pipe_sampler_view *view,
+                            const struct pipe_sampler_state *sampler)
+{
+#ifdef __SWITCH__
+   struct nvc0_context *nvc0 = nvc0_context(pipe);
+   nvc0_screen_state_lock(nvc0->screen);
+   nouveau_pushbuf_bind_context(nvc0->base.pushbuf, &nvc0->base);
+#endif
+   const uint64_t handle =
+      nve4_create_texture_handle_locked(pipe, view, sampler);
+#ifdef __SWITCH__
+   nvc0_screen_state_unlock(nvc0->screen);
+#endif
+   return handle;
+}
+
 static bool
 view_bound(struct nvc0_context *nvc0, struct pipe_sampler_view *view) {
    for (int s = 0; s < 6; s++) {
@@ -852,7 +870,7 @@ view_bound(struct nvc0_context *nvc0, struct pipe_sampler_view *view) {
 }
 
 static void
-nve4_delete_texture_handle(struct pipe_context *pipe, uint64_t handle)
+nve4_delete_texture_handle_locked(struct pipe_context *pipe, uint64_t handle)
 {
    struct nvc0_context *nvc0 = nvc0_context(pipe);
    uint32_t tic = handle & NVE4_TIC_ENTRY_INVALID;
@@ -869,6 +887,19 @@ nve4_delete_texture_handle(struct pipe_context *pipe, uint64_t handle)
    }
 
    pipe->delete_sampler_state(pipe, nvc0->screen->tsc.entries[tsc]);
+}
+
+static void
+nve4_delete_texture_handle(struct pipe_context *pipe, uint64_t handle)
+{
+#ifdef __SWITCH__
+   struct nvc0_context *nvc0 = nvc0_context(pipe);
+   nvc0_screen_state_lock(nvc0->screen);
+#endif
+   nve4_delete_texture_handle_locked(pipe, handle);
+#ifdef __SWITCH__
+   nvc0_screen_state_unlock(nvc0->screen);
+#endif
 }
 
 static void
@@ -1351,8 +1382,8 @@ nvc0_validate_surfaces(struct nvc0_context *nvc0)
 }
 
 static uint64_t
-nve4_create_image_handle(struct pipe_context *pipe,
-                         const struct pipe_image_view *view)
+nve4_create_image_handle_locked(struct pipe_context *pipe,
+                                 const struct pipe_image_view *view)
 {
    struct nvc0_context *nvc0 = nvc0_context(pipe);
    struct nouveau_pushbuf *push = nvc0->base.pushbuf;
@@ -1382,8 +1413,24 @@ nve4_create_image_handle(struct pipe_context *pipe,
    return 0x100000000ULL | i;
 }
 
+static uint64_t
+nve4_create_image_handle(struct pipe_context *pipe,
+                          const struct pipe_image_view *view)
+{
+#ifdef __SWITCH__
+   struct nvc0_context *nvc0 = nvc0_context(pipe);
+   nvc0_screen_state_lock(nvc0->screen);
+   nouveau_pushbuf_bind_context(nvc0->base.pushbuf, &nvc0->base);
+#endif
+   const uint64_t handle = nve4_create_image_handle_locked(pipe, view);
+#ifdef __SWITCH__
+   nvc0_screen_state_unlock(nvc0->screen);
+#endif
+   return handle;
+}
+
 static void
-nve4_delete_image_handle(struct pipe_context *pipe, uint64_t handle)
+nve4_delete_image_handle_locked(struct pipe_context *pipe, uint64_t handle)
 {
    struct nvc0_context *nvc0 = nvc0_context(pipe);
    struct nvc0_screen *screen = nvc0->screen;
@@ -1391,6 +1438,19 @@ nve4_delete_image_handle(struct pipe_context *pipe, uint64_t handle)
 
    free(screen->img.entries[i]);
    screen->img.entries[i] = NULL;
+}
+
+static void
+nve4_delete_image_handle(struct pipe_context *pipe, uint64_t handle)
+{
+#ifdef __SWITCH__
+   struct nvc0_context *nvc0 = nvc0_context(pipe);
+   nvc0_screen_state_lock(nvc0->screen);
+#endif
+   nve4_delete_image_handle_locked(pipe, handle);
+#ifdef __SWITCH__
+   nvc0_screen_state_unlock(nvc0->screen);
+#endif
 }
 
 static void
@@ -1433,8 +1493,8 @@ nve4_make_image_handle_resident(struct pipe_context *pipe, uint64_t handle,
 }
 
 static uint64_t
-gm107_create_image_handle(struct pipe_context *pipe,
-                          const struct pipe_image_view *view)
+gm107_create_image_handle_locked(struct pipe_context *pipe,
+                                  const struct pipe_image_view *view)
 {
    /* GM107+ use TIC handles to reference images. As such, image handles are
     * just the TIC id.
@@ -1476,8 +1536,24 @@ fail:
    return 0;
 }
 
+static uint64_t
+gm107_create_image_handle(struct pipe_context *pipe,
+                           const struct pipe_image_view *view)
+{
+#ifdef __SWITCH__
+   struct nvc0_context *nvc0 = nvc0_context(pipe);
+   nvc0_screen_state_lock(nvc0->screen);
+   nouveau_pushbuf_bind_context(nvc0->base.pushbuf, &nvc0->base);
+#endif
+   const uint64_t handle = gm107_create_image_handle_locked(pipe, view);
+#ifdef __SWITCH__
+   nvc0_screen_state_unlock(nvc0->screen);
+#endif
+   return handle;
+}
+
 static void
-gm107_delete_image_handle(struct pipe_context *pipe, uint64_t handle)
+gm107_delete_image_handle_locked(struct pipe_context *pipe, uint64_t handle)
 {
    struct nvc0_context *nvc0 = nvc0_context(pipe);
    int tic = handle & NVE4_TIC_ENTRY_INVALID;
@@ -1488,6 +1564,19 @@ gm107_delete_image_handle(struct pipe_context *pipe, uint64_t handle)
    entry->bindless = 0;
    nvc0_screen_tic_unlock(nvc0->screen, entry);
    pipe_sampler_view_reference(&view, NULL);
+}
+
+static void
+gm107_delete_image_handle(struct pipe_context *pipe, uint64_t handle)
+{
+#ifdef __SWITCH__
+   struct nvc0_context *nvc0 = nvc0_context(pipe);
+   nvc0_screen_state_lock(nvc0->screen);
+#endif
+   gm107_delete_image_handle_locked(pipe, handle);
+#ifdef __SWITCH__
+   nvc0_screen_state_unlock(nvc0->screen);
+#endif
 }
 
 static void

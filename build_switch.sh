@@ -8,9 +8,6 @@ if ! command -v meson &> /dev/null; then
   pip3 install --break-system-packages meson mako
 fi
 
-echo "Fixing devkitPro pkg-config..."
-sed -i 's/$(DEVKITPRO)/\/opt\/devkitpro/g' /opt/devkitpro/portlibs/switch/lib/pkgconfig/libdrm_nouveau.pc || true
-
 echo "Configuring Mesa for Switch..."
 /opt/devkitpro/meson-cross.sh switch switch_cross_file.txt build --reconfigure -Db_ndebug=true || /opt/devkitpro/meson-cross.sh switch switch_cross_file.txt build -Db_ndebug=true
 
@@ -23,9 +20,6 @@ ninja -C build
 
 echo "Installing Mesa..."
 ninja -C build install
-
-echo "Fixing egl.pc..."
-sed -i "s,-lEGL,-lEGL -ldrm_nouveau," /opt/devkitpro/portlibs/switch/lib/pkgconfig/egl.pc
 
 echo "Installing OpenGLConfig.cmake..."
 install -Dm644 OpenGLConfig.cmake /opt/devkitpro/portlibs/switch/lib/cmake/OpenGL/OpenGLConfig.cmake

@@ -92,55 +92,6 @@ int vk_drm_syncobj_copy_payloads(void *device, unsigned int wait_count, const vo
     return 0; /* VK_SUCCESS */
 }
 
-/* --- regex stubs (needed for xmlconfig on bare metal) --- */
-int regcomp(void *preg, const char *regex, int cflags) { return 0; }
-int regexec(const void *preg, const char *string, size_t nmatch, void *pmatch, int eflags) { return 1; /* REG_NOMATCH */ }
-void regfree(void *preg) {}
-
-/* --- expat stubs (needed for xmlconfig on bare metal) --- */
-static void *dummy_parser_ptr = NULL;
-void *XML_ParserCreate(const char *encoding) { return &dummy_parser_ptr; }
-void XML_SetElementHandler(void *parser, void *start, void *end) {}
-void XML_SetUserData(void *parser, void *userData) { *(void **)parser = userData; }
-void *XML_GetBuffer(void *parser, int len) {
-    static char dummy_buf[4096];
-    return dummy_buf;
-}
-int XML_ParseBuffer(void *parser, int len, int isFinal) { return 1; /* XML_STATUS_OK */ }
-void XML_ParserFree(void *parser) {}
-int XML_GetErrorCode(void *parser) { return 0; }
-const char *XML_ErrorString(int code) { return "stub"; }
-
-/* --- EGL stubs (needed by SDL2 portlib, never called with Vulkan backend) --- */
-typedef void* EGLDisplay;
-typedef void* EGLSurface;
-typedef void* EGLContext;
-typedef void* EGLConfig;
-typedef unsigned int EGLBoolean;
-typedef int EGLint;
-
-EGLDisplay eglGetDisplay(void *native_display) { return NULL; }
-EGLDisplay eglGetPlatformDisplay(unsigned int platform, void *native_display, const void *attrib_list) { return NULL; }
-EGLBoolean eglInitialize(EGLDisplay dpy, EGLint *major, EGLint *minor) { return 0; }
-EGLBoolean eglTerminate(EGLDisplay dpy) { return 0; }
-void *eglGetProcAddress(const char *procname) { return NULL; }
-EGLBoolean eglChooseConfig(EGLDisplay dpy, const EGLint *attribs, EGLConfig *configs, EGLint config_size, EGLint *num_config) { return 0; }
-EGLBoolean eglGetConfigAttrib(EGLDisplay dpy, EGLConfig config, EGLint attribute, EGLint *value) { return 0; }
-EGLContext eglCreateContext(EGLDisplay dpy, EGLConfig config, EGLContext share, const EGLint *attribs) { return NULL; }
-EGLBoolean eglDestroyContext(EGLDisplay dpy, EGLContext ctx) { return 0; }
-EGLSurface eglCreatePbufferSurface(EGLDisplay dpy, EGLConfig config, const EGLint *attribs) { return NULL; }
-EGLSurface eglCreateWindowSurface(EGLDisplay dpy, EGLConfig config, void *win, const EGLint *attribs) { return NULL; }
-EGLBoolean eglDestroySurface(EGLDisplay dpy, EGLSurface surface) { return 0; }
-EGLBoolean eglMakeCurrent(EGLDisplay dpy, EGLSurface draw, EGLSurface read, EGLContext ctx) { return 0; }
-EGLBoolean eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) { return 0; }
-EGLBoolean eglSwapInterval(EGLDisplay dpy, EGLint interval) { return 0; }
-EGLBoolean eglWaitNative(EGLint engine) { return 0; }
-EGLBoolean eglWaitGL(void) { return 0; }
-EGLBoolean eglBindAPI(unsigned int api) { return 0; }
-unsigned int eglQueryAPI(void) { return 0; }
-const char *eglQueryString(EGLDisplay dpy, EGLint name) { return ""; }
-EGLint eglGetError(void) { return 0; }
-
 #if defined(__GNUC__)
 #pragma GCC diagnostic pop
 #endif

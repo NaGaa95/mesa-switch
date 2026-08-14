@@ -27,11 +27,21 @@
 #include "nvc0/nvc0_context.h"
 #include "nvc0/nvc0_screen.h"
 #include "nvc0/nvc0_resource.h"
+#ifdef __SWITCH__
+#include "clb097.h"
+#endif
 
 #ifndef __SWITCH__
 #include "xf86drm.h"
 #endif
 #include "drm-uapi/nouveau_drm.h"
+
+#ifdef __SWITCH__
+static thread_local struct nvc0_screen *nvc0_state_lock_screen;
+static thread_local unsigned nvc0_state_lock_depth;
+#endif
+
+#define nvc0_switch_context_checkpoint(phase) ((void)0)
 
 static void
 nvc0_svm_migrate(struct pipe_context *pipe, unsigned num_ptrs,
@@ -76,6 +86,38 @@ nvc0_svm_migrate(struct pipe_context *pipe, unsigned num_ptrs,
 #endif
 }
 
+void
+nvc0_screen_state_lock(struct nvc0_screen *screen)
+{
+#ifdef __SWITCH__
+   if (nvc0_state_lock_screen == screen) {
+      assert(nvc0_state_lock_depth > 0);
+      nvc0_state_lock_depth++;
+      return;
+   }
+   assert(nvc0_state_lock_screen == NULL);
+#endif
+
+   simple_mtx_lock(&screen->state_lock);
+#ifdef __SWITCH__
+   nvc0_state_lock_screen = screen;
+   nvc0_state_lock_depth = 1;
+#endif
+}
+
+void
+nvc0_screen_state_unlock(struct nvc0_screen *screen)
+{
+#ifdef __SWITCH__
+   assert(nvc0_state_lock_screen == screen);
+   assert(nvc0_state_lock_depth > 0);
+   if (--nvc0_state_lock_depth > 0)
+      return;
+   nvc0_state_lock_screen = NULL;
+#endif
+   simple_mtx_unlock(&screen->state_lock);
+}
+
 
 static void
 nvc0_flush(struct pipe_context *pipe,
@@ -83,6 +125,14 @@ nvc0_flush(struct pipe_context *pipe,
            unsigned flags)
 {
    struct nvc0_context *nvc0 = nvc0_context(pipe);
+
+#ifdef __SWITCH__
+   /* The Horizon port shares one screen-owned pushbuf across contexts.  Keep
+    * the fence snapshot, context binding and physical kick in the same
+    * critical section so another context cannot replace user_priv between
+    * the logical fence emission and its native batch association. */
+   nvc0_screen_state_lock(nvc0->screen);
+#endif
 
    if (fence)
       nouveau_fence_ref(nvc0->base.fence, (struct nouveau_fence **)fence,
@@ -95,15 +145,51 @@ nvc0_flush(struct pipe_context *pipe,
    PUSH_KICK(nvc0->base.pushbuf); /* fencing handled in kick_notify */
 
    nouveau_context_update_frame_stats(&nvc0->base);
+
+#ifdef __SWITCH__
+   nvc0_screen_state_unlock(nvc0->screen);
+#endif
 }
 
 static void
 nvc0_texture_barrier(struct pipe_context *pipe, unsigned flags)
 {
-   struct nouveau_pushbuf *push = nvc0_context(pipe)->base.pushbuf;
+   struct nvc0_context *nvc0 = nvc0_context(pipe);
+   struct nouveau_pushbuf *push = nvc0->base.pushbuf;
 
+#ifdef __SWITCH__
+   nvc0_screen_state_lock(nvc0->screen);
+   nouveau_pushbuf_bind_context(push, &nvc0->base);
+
+   if (nvc0->screen->base.class_3d >= GM107_3D_CLASS &&
+       flags == PIPE_TEXTURE_BARRIER_FRAMEBUFFER) {
+      /* Blend/framebuffer-fetch barriers are fragment-local.  Maxwell's
+       * public pixel-shader barrier orders those accesses without a global
+       * engine WFI or a needless texture-cache invalidate. */
+      IMMED_NVC0(push, SUBC_3D(NVB097_PIXEL_SHADER_BARRIER),
+                 NVB097_PIXEL_SHADER_BARRIER_SYSMEMBAR_ENABLE_TRUE);
+   } else if (nvc0->screen->base.class_3d >= GM107_3D_CLASS &&
+              flags == PIPE_TEXTURE_BARRIER_SAMPLER) {
+      /* glTextureBarrier has a known framebuffer-write -> sampler-read
+       * dependency.  Order fragments, then invalidate all texture lines with
+       * Maxwell's documented no-WFI form. */
+      IMMED_NVC0(push, SUBC_3D(NVB097_PIXEL_SHADER_BARRIER),
+                 NVB097_PIXEL_SHADER_BARRIER_SYSMEMBAR_ENABLE_TRUE);
+      IMMED_NVC0(push,
+                 SUBC_3D(NVB097_INVALIDATE_TEXTURE_DATA_CACHE_NO_WFI),
+                 NVB097_INVALIDATE_TEXTURE_DATA_CACHE_NO_WFI_LINES_ALL);
+   } else {
+      /* Unknown flag combinations and pre-Maxwell classes retain the proven
+       * full serialization path. */
+      IMMED_NVC0(push, NVC0_3D(SERIALIZE), 0);
+      IMMED_NVC0(push, NVC0_3D(TEX_CACHE_CTL), 0);
+   }
+   nvc0_screen_state_unlock(nvc0->screen);
+#else
+   (void)flags;
    IMMED_NVC0(push, NVC0_3D(SERIALIZE), 0);
    IMMED_NVC0(push, NVC0_3D(TEX_CACHE_CTL), 0);
+#endif
 }
 
 static void
@@ -113,8 +199,16 @@ nvc0_memory_barrier(struct pipe_context *pipe, unsigned flags)
    struct nouveau_pushbuf *push = nvc0->base.pushbuf;
    int i, s;
 
-   if (!(flags & ~PIPE_BARRIER_UPDATE))
+   if (!(flags & ~PIPE_BARRIER_UPDATE)) {
+#ifdef __SWITCH__
+#endif
       return;
+   }
+
+#ifdef __SWITCH__
+   nvc0_screen_state_lock(nvc0->screen);
+   nouveau_pushbuf_bind_context(push, &nvc0->base);
+#endif
 
    if (flags & PIPE_BARRIER_MAPPED_BUFFER) {
       for (i = 0; i < nvc0->num_vtxbufs; ++i) {
@@ -143,30 +237,53 @@ nvc0_memory_barrier(struct pipe_context *pipe, unsigned flags)
                nvc0->cb_dirty = true;
          }
       }
-   } else {
+      flags &= ~PIPE_BARRIER_MAPPED_BUFFER;
+   }
+
+   flags &= ~PIPE_BARRIER_UPDATE;
+   if (flags) {
       /* Pretty much any writing by shaders needs a serialize after
        * it. Especially when moving between 3d and compute pipelines, but even
-       * without that.
+       * without that. Gallium flags describe the destination but not a narrow
+       * enough source stage to prove that PIXEL_SHADER_BARRIER is sufficient,
+       * so every ambiguous class retains full serialization.
        */
       IMMED_NVC0(push, NVC0_3D(SERIALIZE), 0);
+#ifdef __SWITCH__
+#endif
+   } else {
+#ifdef __SWITCH__
+#endif
    }
 
    /* If we're going to texture from a buffer/image written by a shader, we
     * must flush the texture cache.
     */
-   if (flags & PIPE_BARRIER_TEXTURE)
+   if (flags & PIPE_BARRIER_TEXTURE) {
+#ifdef __SWITCH__
+      if (nvc0->screen->base.class_3d >= GM107_3D_CLASS) {
+         IMMED_NVC0(push,
+                    SUBC_3D(NVB097_INVALIDATE_TEXTURE_DATA_CACHE_NO_WFI),
+                    NVB097_INVALIDATE_TEXTURE_DATA_CACHE_NO_WFI_LINES_ALL);
+      } else
+#endif
       IMMED_NVC0(push, NVC0_3D(TEX_CACHE_CTL), 0);
+   }
 
    if (flags & PIPE_BARRIER_CONSTANT_BUFFER)
       nvc0->cb_dirty = true;
    if (flags & (PIPE_BARRIER_VERTEX_BUFFER | PIPE_BARRIER_INDEX_BUFFER))
       nvc0->base.vbo_dirty = true;
+#ifdef __SWITCH__
+   nvc0_screen_state_unlock(nvc0->screen);
+#endif
 }
 
 static void
 nvc0_emit_string_marker(struct pipe_context *pipe, const char *str, int len)
 {
-   struct nouveau_pushbuf *push = nvc0_context(pipe)->base.pushbuf;
+   struct nvc0_context *nvc0 = nvc0_context(pipe);
+   struct nouveau_pushbuf *push = nvc0->base.pushbuf;
    int string_words = len / 4;
    int data_words;
 
@@ -177,6 +294,11 @@ nvc0_emit_string_marker(struct pipe_context *pipe, const char *str, int len)
       data_words = string_words;
    else
       data_words = string_words + !!(len & 3);
+#ifdef __SWITCH__
+   /* Markers are ordinary pushbuf packets and space reservation may kick. */
+   nvc0_screen_state_lock(nvc0->screen);
+   nouveau_pushbuf_bind_context(push, &nvc0->base);
+#endif
    BEGIN_NIC0(push, SUBC_3D(NV04_GRAPH_NOP), data_words);
    if (string_words)
       PUSH_DATAp(push, str, string_words);
@@ -185,12 +307,35 @@ nvc0_emit_string_marker(struct pipe_context *pipe, const char *str, int len)
       memcpy(&data, &str[string_words * 4], len & 3);
       PUSH_DATA (push, data);
    }
+#ifdef __SWITCH__
+   nvc0_screen_state_unlock(nvc0->screen);
+#endif
 }
 
 static enum pipe_reset_status
 nvc0_get_device_reset_status(struct pipe_context *pipe)
 {
+#ifdef __SWITCH__
+   struct nvc0_context *nvc0 = nvc0_context(pipe);
+   struct nouveau_screen *screen = nvc0->base.screen;
+
+   /* The Horizon channel is shared by all GL contexts, so a native channel
+    * fault cannot be attributed safely to one context.  Host validation and
+    * allocation errors remain ordinary submission failures.  A durable
+    * channel notification/error or terminal native kickoff/wait failure is
+    * a graphics reset.
+    */
+   nvc0_screen_state_lock(nvc0->screen);
+   simple_mtx_lock(&screen->fence.lock);
+   const bool device_lost =
+      nouveau_switch_pushbuf_device_lost(nvc0->base.pushbuf);
+   simple_mtx_unlock(&screen->fence.lock);
+   nvc0_screen_state_unlock(nvc0->screen);
+
+   return device_lost ? PIPE_UNKNOWN_CONTEXT_RESET : PIPE_NO_RESET;
+#else
    return PIPE_NO_RESET;
+#endif
 }
 
 static void
@@ -250,25 +395,35 @@ nvc0_destroy(struct pipe_context *pipe)
 {
    struct nvc0_context *nvc0 = nvc0_context(pipe);
 
-   simple_mtx_lock(&nvc0->screen->state_lock);
+   nvc0_screen_state_lock(nvc0->screen);
    if (nvc0->screen->cur_ctx == nvc0) {
       nvc0->screen->cur_ctx = NULL;
       nvc0->screen->save_state = nvc0->state;
       nvc0->screen->save_state.tfb = NULL;
    }
-   simple_mtx_unlock(&nvc0->screen->state_lock);
-
-   if (nvc0->base.pipe.stream_uploader)
-      u_upload_destroy(nvc0->base.pipe.stream_uploader);
 
    /* Unset bufctx, we don't want to revalidate any resources after the flush.
-    * Other contexts will always set their bufctx again on action calls.
+    * Other contexts will always set their bufctx again on action calls.  The
+    * Switch pushbuf is screen-owned, so keep its bind/bufctx/kick mutation
+    * inside state_lock to avoid flushing another context's in-progress batch.
     */
    nouveau_pushbuf_bufctx(nvc0->base.pushbuf, NULL);
 #ifdef __SWITCH__
    nouveau_pushbuf_bind_context(nvc0->base.pushbuf, &nvc0->base);
 #endif
    PUSH_KICK(nvc0->base.pushbuf);
+#ifdef __SWITCH__
+   /* Fence cleanup may emit and physically kick the current fence.  Keep it
+    * in the same shared-pushbuf transaction, then detach this context before
+    * another thread can bind and begin recording a new batch.
+    */
+   nouveau_fence_cleanup(&nvc0->base);
+   nouveau_pushbuf_unbind_context(nvc0->base.pushbuf, &nvc0->base);
+#endif
+   nvc0_screen_state_unlock(nvc0->screen);
+
+   if (nvc0->base.pipe.stream_uploader)
+      u_upload_destroy(nvc0->base.pipe.stream_uploader);
 
    nvc0_context_unreference_resources(nvc0);
    nvc0_blitctx_destroy(nvc0);
@@ -283,9 +438,8 @@ nvc0_destroy(struct pipe_context *pipe)
       free(pos);
    }
 
+#ifndef __SWITCH__
    nouveau_fence_cleanup(&nvc0->base);
-#ifdef __SWITCH__
-   nouveau_pushbuf_unbind_context(nvc0->base.pushbuf, &nvc0->base);
 #endif
    nouveau_context_destroy(&nvc0->base);
 }
@@ -448,9 +602,11 @@ nvc0_create(struct pipe_screen *pscreen, void *priv, unsigned ctxflags)
    struct nvc0_screen *screen = nvc0_screen(pscreen);
    struct nvc0_context *nvc0;
    struct pipe_context *pipe;
+   bool base_initialized = false;
    int ret;
    uint32_t flags;
 
+   nvc0_switch_context_checkpoint("begin");
    nvc0 = CALLOC_STRUCT(nvc0_context);
    if (!nvc0)
       return NULL;
@@ -458,9 +614,12 @@ nvc0_create(struct pipe_screen *pscreen, void *priv, unsigned ctxflags)
 
    if (!nvc0_blitctx_create(nvc0))
       goto out_err;
+   nvc0_switch_context_checkpoint("blit context ready");
 
    if (nouveau_context_init(&nvc0->base, &screen->base))
       goto out_err;
+   base_initialized = true;
+   nvc0_switch_context_checkpoint("nouveau context ready");
    nvc0->base.kick_notify = nvc0_default_kick_notify;
    nvc0->base.pushbuf->rsvd_kick = 5;
 
@@ -473,6 +632,7 @@ nvc0_create(struct pipe_screen *pscreen, void *priv, unsigned ctxflags)
                                &nvc0->bufctx_cp);
    if (ret)
       goto out_err;
+   nvc0_switch_context_checkpoint("buffer contexts ready");
 
    nvc0->screen = screen;
    pipe->screen = pscreen;
@@ -480,6 +640,7 @@ nvc0_create(struct pipe_screen *pscreen, void *priv, unsigned ctxflags)
    pipe->stream_uploader = u_upload_create_default(pipe);
    if (!pipe->stream_uploader)
       goto out_err;
+   nvc0_switch_context_checkpoint("stream uploader ready");
    pipe->const_uploader = pipe->stream_uploader;
 
    pipe->destroy = nvc0_destroy;
@@ -524,14 +685,33 @@ nvc0_create(struct pipe_screen *pscreen, void *priv, unsigned ctxflags)
    pipe->create_video_codec = nvc0_create_decoder;
    pipe->create_video_buffer = nvc0_video_buffer_create;
 
-   /* shader builtin library is per-screen, but we need a context for m2mf */
-   nvc0_program_library_upload(nvc0);
+   nvc0_switch_context_checkpoint("creating empty tessellation program");
    nvc0_program_init_tcp_empty(nvc0);
    if (!nvc0->tcp_empty)
       goto out_err;
+   nvc0_switch_context_checkpoint("empty tessellation program ready");
 
    if (!nouveau_fence_new(&nvc0->base, &nvc0->base.fence))
       goto out_err;
+   nvc0_switch_context_checkpoint("initial Gallium fence ready");
+
+   /* The builtin library and text heap are screen-global.  Serialize their
+    * first upload and bind this context before push_data can trigger an
+    * automatic physical submission on the shared Switch channel.
+    */
+   nvc0_switch_context_checkpoint("uploading program library");
+   nvc0_screen_state_lock(screen);
+#ifdef __SWITCH__
+   nouveau_pushbuf_bind_context(nvc0->base.pushbuf, &nvc0->base);
+#endif
+   if (!nvc0_program_library_upload(nvc0)) {
+      nvc0_screen_state_unlock(screen);
+      goto out_err;
+   }
+#ifndef __SWITCH__
+   nvc0_screen_state_unlock(screen);
+#endif
+   nvc0_switch_context_checkpoint("program library ready");
 
    /* set the empty tctl prog on next draw in case one is never set */
    nvc0->dirty_3d |= NVC0_NEW_3D_TCTLPROG;
@@ -544,15 +724,23 @@ nvc0_create(struct pipe_screen *pscreen, void *priv, unsigned ctxflags)
    /* now that there are no more opportunities for errors, set the current
     * context if there isn't already one.
     */
-   simple_mtx_lock(&screen->state_lock);
+   nvc0_switch_context_checkpoint("acquiring screen state lock");
+#ifndef __SWITCH__
+   nvc0_screen_state_lock(screen);
+#endif
    if (!screen->cur_ctx) {
       nvc0->state = screen->save_state;
       screen->cur_ctx = nvc0;
    }
-   simple_mtx_unlock(&screen->state_lock);
+#ifndef __SWITCH__
+   nvc0_screen_state_unlock(screen);
+#endif
+   nvc0_switch_context_checkpoint("screen state ownership ready");
 
    nouveau_pushbuf_bufctx(nvc0->base.pushbuf, nvc0->bufctx);
+   nvc0_switch_context_checkpoint("primary buffer context selected");
    PUSH_SPACE(nvc0->base.pushbuf, 8);
+   nvc0_switch_context_checkpoint("initial push space ready");
 
    /* add permanently resident buffers to bufctxts */
 
@@ -564,6 +752,7 @@ nvc0_create(struct pipe_screen *pscreen, void *priv, unsigned ctxflags)
       BCTX_REFN_bo(nvc0->bufctx_cp, CP_SCREEN, flags, screen->uniform_bo);
       BCTX_REFN_bo(nvc0->bufctx_cp, CP_SCREEN, flags, screen->txc);
    }
+   nvc0_switch_context_checkpoint("read-only screen residency ready");
 
    flags = NV_VRAM_DOMAIN(&screen->base) | NOUVEAU_BO_RDWR;
 
@@ -571,6 +760,7 @@ nvc0_create(struct pipe_screen *pscreen, void *priv, unsigned ctxflags)
       BCTX_REFN_bo(nvc0->bufctx_3d, 3D_SCREEN, flags, screen->poly_cache);
    if (screen->compute)
       BCTX_REFN_bo(nvc0->bufctx_cp, CP_SCREEN, flags, screen->tls);
+   nvc0_switch_context_checkpoint("read-write screen residency ready");
 
    flags = NOUVEAU_BO_GART | NOUVEAU_BO_WR;
 
@@ -578,6 +768,7 @@ nvc0_create(struct pipe_screen *pscreen, void *priv, unsigned ctxflags)
    BCTX_REFN_bo(nvc0->bufctx, FENCE, flags, screen->fence.bo);
    if (screen->compute)
       BCTX_REFN_bo(nvc0->bufctx_cp, CP_SCREEN, flags, screen->fence.bo);
+   nvc0_switch_context_checkpoint("fence residency ready");
 
    nvc0->base.scratch.bo_size = 2 << 20;
 
@@ -592,8 +783,12 @@ nvc0_create(struct pipe_screen *pscreen, void *priv, unsigned ctxflags)
    // NOTE: Preliminary testing suggests that this isn't necessary at all at
    // least on GM20x (untested on Kepler). However this is ~free, so no reason
    // not to do it.
-   if (!screen->tsc.entries[0])
+   nvc0_switch_context_checkpoint("checking initial TSC entry");
+   if (!screen->tsc.entries[0]) {
+      nvc0_switch_context_checkpoint("uploading initial TSC entry");
       nvc0_upload_tsc0(nvc0);
+   }
+   nvc0_switch_context_checkpoint("initial TSC entry ready");
 
    // On Fermi, mark samplers dirty so that the proper binding can happen
    if (screen->base.class_3d < NVE4_3D_CLASS) {
@@ -604,13 +799,43 @@ nvc0_create(struct pipe_screen *pscreen, void *priv, unsigned ctxflags)
    }
 
 #ifdef __SWITCH__
+   nvc0_switch_context_checkpoint("binding pushbuf context callback");
    nouveau_pushbuf_bind_context(nvc0->base.pushbuf, &nvc0->base);
+   /* All operations above which mutate the shared pushbuf or screen-global
+    * TSC state are serialized as one creation transaction.
+    */
+   nvc0_screen_state_unlock(screen);
 #endif
+
+   nvc0_switch_context_checkpoint("complete");
 
    return pipe;
 
 out_err:
+   nvc0_switch_context_checkpoint("failed; unwinding");
    if (nvc0) {
+#ifdef __SWITCH__
+      if (base_initialized) {
+         /* Library upload can fail after binding this partially initialized
+          * context to the screen-owned pushbuf.  Detach it before freeing the
+          * context so a later automatic kickoff cannot call through a stale
+          * nouveau_context pointer.
+          */
+         nvc0_screen_state_lock(screen);
+         nouveau_pushbuf_unbind_context(nvc0->base.pushbuf, &nvc0->base);
+         if (screen->cur_ctx == nvc0)
+            screen->cur_ctx = NULL;
+         if (nvc0->base.pushbuf->bufctx == nvc0->bufctx)
+            nouveau_pushbuf_bufctx(nvc0->base.pushbuf, NULL);
+         nvc0_screen_state_unlock(screen);
+      }
+#endif
+      if (nvc0->tcp_empty && pipe->delete_tcs_state) {
+         pipe->delete_tcs_state(pipe, nvc0->tcp_empty);
+         nvc0->tcp_empty = NULL;
+      }
+      if (nvc0->base.fence)
+         nouveau_fence_ref(NULL, &nvc0->base.fence, &screen->base);
       if (pipe->stream_uploader)
          u_upload_destroy(pipe->stream_uploader);
       if (nvc0->bufctx_3d)
@@ -619,8 +844,12 @@ out_err:
          nouveau_bufctx_del(&nvc0->bufctx_cp);
       if (nvc0->bufctx)
          nouveau_bufctx_del(&nvc0->bufctx);
-      FREE(nvc0->blit);
-      FREE(nvc0);
+      if (nvc0->blit)
+         nvc0_blitctx_destroy(nvc0);
+      if (base_initialized)
+         nouveau_context_destroy(&nvc0->base);
+      else
+         FREE(nvc0);
    }
    return NULL;
 }

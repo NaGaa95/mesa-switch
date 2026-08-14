@@ -1,0 +1,75 @@
+get_filename_component(_VULKAN_SWITCH_PREFIX
+	"${CMAKE_CURRENT_LIST_DIR}/../../.." ABSOLUTE)
+set(_VULKAN_SWITCH_LIBDIR "${_VULKAN_SWITCH_PREFIX}/lib")
+set(_VULKAN_SWITCH_INCLUDEDIR "${_VULKAN_SWITCH_PREFIX}/include")
+
+find_library(Vulkan_LIBRARY vulkan
+	PATHS "${_VULKAN_SWITCH_LIBDIR}" NO_DEFAULT_PATH)
+find_path(Vulkan_INCLUDE_DIR NAMES vulkan/vulkan.h
+	PATHS "${_VULKAN_SWITCH_INCLUDEDIR}" NO_DEFAULT_PATH)
+find_library(_VULKAN_SWITCH_ELF_LIBRARY elf)
+find_library(_VULKAN_SWITCH_EXPAT_LIBRARY expat)
+find_library(_VULKAN_SWITCH_ZSTD_LIBRARY zstd)
+find_library(_VULKAN_SWITCH_Z_LIBRARY z)
+find_library(_VULKAN_SWITCH_NX_LIBRARY nx)
+
+set(Vulkan_VERSION "26.2.0")
+include(FindPackageHandleStandardArgs)
+find_package_handle_standard_args(Vulkan
+	REQUIRED_VARS
+		Vulkan_LIBRARY
+		Vulkan_INCLUDE_DIR
+		_VULKAN_SWITCH_ELF_LIBRARY
+		_VULKAN_SWITCH_EXPAT_LIBRARY
+		_VULKAN_SWITCH_ZSTD_LIBRARY
+		_VULKAN_SWITCH_Z_LIBRARY
+		_VULKAN_SWITCH_NX_LIBRARY
+	VERSION_VAR Vulkan_VERSION)
+set(Vulkan_INCLUDE_DIRS "${Vulkan_INCLUDE_DIR}")
+set(_VULKAN_SWITCH_LIBRARIES
+	"${Vulkan_LIBRARY}"
+	"${_VULKAN_SWITCH_ELF_LIBRARY}"
+	"${_VULKAN_SWITCH_EXPAT_LIBRARY}"
+	"${_VULKAN_SWITCH_ZSTD_LIBRARY}"
+	"${_VULKAN_SWITCH_Z_LIBRARY}"
+	"${_VULKAN_SWITCH_NX_LIBRARY}"
+	stdc++
+	m)
+
+if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.24" AND
+   NOT DEFINED CMAKE_LINK_GROUP_USING_RESCAN_SUPPORTED)
+	set(CMAKE_LINK_GROUP_USING_RESCAN
+		"LINKER:--start-group" "LINKER:--end-group")
+	set(CMAKE_LINK_GROUP_USING_RESCAN_SUPPORTED TRUE)
+endif()
+
+if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.24" AND
+   CMAKE_LINK_GROUP_USING_RESCAN_SUPPORTED)
+	string(JOIN "," _VULKAN_SWITCH_GROUP_LIBRARIES
+		${_VULKAN_SWITCH_LIBRARIES})
+	set(_VULKAN_SWITCH_LINK
+		"$<LINK_GROUP:RESCAN,${_VULKAN_SWITCH_GROUP_LIBRARIES}>")
+else()
+	# CMake added LINK_GROUP in 3.24. Two passes preserve static archive
+	# rescanning for older devkitPro projects.
+	set(_VULKAN_SWITCH_LINK
+		${_VULKAN_SWITCH_LIBRARIES} ${_VULKAN_SWITCH_LIBRARIES})
+endif()
+set(Vulkan_LIBRARIES "${_VULKAN_SWITCH_LINK}")
+
+if(Vulkan_FOUND)
+	if(NOT TARGET Vulkan::Headers)
+		add_library(Vulkan::Headers INTERFACE IMPORTED)
+		set_target_properties(Vulkan::Headers PROPERTIES
+			INTERFACE_INCLUDE_DIRECTORIES "${Vulkan_INCLUDE_DIR}")
+	endif()
+
+	if(NOT TARGET Vulkan::Vulkan)
+		add_library(Vulkan::Vulkan INTERFACE IMPORTED)
+		set_target_properties(Vulkan::Vulkan PROPERTIES
+			INTERFACE_INCLUDE_DIRECTORIES "${Vulkan_INCLUDE_DIR}"
+			INTERFACE_LINK_LIBRARIES "${_VULKAN_SWITCH_LINK}"
+			INTERFACE_LINK_OPTIONS
+				"-Wl,-u,vk_icdGetInstanceProcAddr;-Wl,-u,vk_icdNegotiateLoaderICDInterfaceVersion;-pthread")
+	endif()
+endif()

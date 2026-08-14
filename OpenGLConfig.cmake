@@ -19,7 +19,6 @@ find_library(_OPENGL_mesa_util_simd_LIBRARY mesa_util_simd
 	PATHS "${_OPENGL_SWITCH_LIBDIR}" NO_DEFAULT_PATH)
 find_library(_OPENGL_xmlconfig_LIBRARY xmlconfig
 	PATHS "${_OPENGL_SWITCH_LIBDIR}" NO_DEFAULT_PATH)
-find_library(_OPENGL_drm_nouveau_LIBRARY drm_nouveau)
 find_library(_OPENGL_expat_LIBRARY expat)
 find_library(OPENGL_gles1_LIBRARY GLESv1_CM
 	PATHS "${_OPENGL_SWITCH_LIBDIR}" NO_DEFAULT_PATH)
@@ -43,7 +42,7 @@ find_package_handle_standard_args(OpenGL
 		_OPENGL_mesa_util_c11_LIBRARY _OPENGL_blake3_LIBRARY
 		_OPENGL_mesa_util_LIBRARY _OPENGL_mesa_util_simd_LIBRARY
 		_OPENGL_xmlconfig_LIBRARY
-		_OPENGL_drm_nouveau_LIBRARY _OPENGL_expat_LIBRARY
+		_OPENGL_expat_LIBRARY
 		_OPENGL_zstd_LIBRARY _OPENGL_z_LIBRARY
 		_OPENGL_nx_LIBRARY _OPENGL_gl_gl_INCLUDE_DIR _OPENGL_gl_egl_INCLUDE_DIR
 )
@@ -63,7 +62,6 @@ set(_OPENGL_SWITCH_LIBRARIES
 	${_OPENGL_mesa_util_LIBRARY}
 	${_OPENGL_mesa_util_simd_LIBRARY}
 	${_OPENGL_xmlconfig_LIBRARY}
-	${_OPENGL_drm_nouveau_LIBRARY}
 	${_OPENGL_expat_LIBRARY}
 	${_OPENGL_zstd_LIBRARY}
 	${_OPENGL_z_LIBRARY}
