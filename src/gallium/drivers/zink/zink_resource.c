@@ -1939,9 +1939,12 @@ resource_create(struct pipe_screen *pscreen,
          /* frontbuffer */
          struct zink_resource *back = (void*)loader_private;
          struct kopper_displaytarget *cdt = back->obj->dt;
-         cdt->refcount++;
-         assert(back->obj->dt);
-         res->obj->dt = back->obj->dt;
+         if (!cdt || cdt->is_kill || !cdt->swapchain) {
+            mesa_loge("zink: frontbuffer swapchain is unavailable");
+            goto fail_obj;
+         }
+         p_atomic_inc(&cdt->refcount);
+         res->obj->dt = cdt;
       }
       struct kopper_displaytarget *cdt = res->obj->dt;
       if (zink_kopper_has_srgb(cdt))
@@ -1971,6 +1974,7 @@ resource_create(struct pipe_screen *pscreen,
    return &res->base.b;
 
 fail_obj:
+   FREE(res->obj->bo);
    FREE(res->obj);
 fail:
 #ifdef HAVE_LIBDRM

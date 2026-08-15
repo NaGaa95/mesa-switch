@@ -1598,6 +1598,25 @@ consolidate_pool_alloc(struct zink_screen *screen, struct zink_descriptor_pool_m
    util_dynarray_clear(&mpool->overflowed_pools[mpool->overflow_idx]);
 }
 
+static struct pipe_resource *
+create_descriptor_buffer(struct zink_screen *screen, unsigned size)
+{
+   struct pipe_resource templ = {
+      .target = PIPE_BUFFER,
+      .format = PIPE_FORMAT_R8_UNORM,
+      .bind = ZINK_BIND_DESCRIPTOR,
+      .usage = PIPE_USAGE_DEFAULT,
+      .flags = PIPE_RESOURCE_FLAG_MAP_PERSISTENT |
+               PIPE_RESOURCE_FLAG_MAP_COHERENT,
+      .width0 = size,
+      .height0 = 1,
+      .depth0 = 1,
+      .array_size = 1,
+   };
+
+   return screen->base.resource_create(&screen->base, &templ);
+}
+
 /* called when a batch state is reset, i.e., just before a batch state becomes the current state */
 void
 zink_batch_descriptor_reset(struct zink_screen *screen, struct zink_batch_state *bs)
@@ -1658,8 +1677,7 @@ zink_batch_descriptor_init(struct zink_screen *screen, struct zink_batch_state *
          }
       }
    } else if (zink_descriptor_mode == ZINK_DESCRIPTOR_MODE_DB) {
-      unsigned bind = ZINK_BIND_DESCRIPTOR;
-      struct pipe_resource *pres = pipe_buffer_create(&screen->base, bind, 0, bs->ctx->dd.db.max_db_size * screen->base_descriptor_size);
+      struct pipe_resource *pres = create_descriptor_buffer(screen, bs->ctx->dd.db.max_db_size * screen->base_descriptor_size);
       if (!pres)
          return false;
       bs->dd.db = zink_resource(pres);
@@ -1814,12 +1832,11 @@ zink_descriptors_init_bindless(struct zink_context *ctx)
    ctx->dd.bindless_init = true;
 
    if (zink_descriptor_mode == ZINK_DESCRIPTOR_MODE_DB) {
-      unsigned bind = ZINK_BIND_DESCRIPTOR;
       VkDeviceSize size;
       VKSCR(GetDescriptorSetLayoutSizeEXT)(screen->dev, screen->bindless_layout, &size);
-      struct pipe_resource *pres = pipe_buffer_create(&screen->base, bind, 0, size);
+      struct pipe_resource *pres = create_descriptor_buffer(screen, size);
       ctx->dd.db.bindless_db = zink_resource(pres);
-      ctx->dd.db.bindless_db_map = pipe_buffer_map(&ctx->base, pres, PIPE_MAP_READ | PIPE_MAP_WRITE | PIPE_MAP_PERSISTENT, &ctx->dd.db.bindless_db_xfer);
+      ctx->dd.db.bindless_db_map = pipe_buffer_map(&ctx->base, pres, PIPE_MAP_READ | PIPE_MAP_WRITE | PIPE_MAP_PERSISTENT | PIPE_MAP_COHERENT, &ctx->dd.db.bindless_db_xfer);
       zink_batch_bind_db(ctx);
       for (unsigned i = 0; i < 4; i++) {
          VkDeviceSize offset;

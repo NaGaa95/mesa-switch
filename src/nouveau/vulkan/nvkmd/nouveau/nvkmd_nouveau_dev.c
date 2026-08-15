@@ -71,12 +71,14 @@ nvkmd_nouveau_dev_destroy(struct nvkmd_dev *_dev)
    FREE(dev);
 }
 
-static inline uint64_t
-nvkmd_nouveau_dev_get_gpu_timestamp(struct nvkmd_dev *_dev)
+static VkResult
+nvkmd_nouveau_dev_get_gpu_timestamp(struct nvkmd_dev *_dev,
+                                    uint64_t *timestamp)
 {
    struct nvkmd_nouveau_dev *dev = nvkmd_nouveau_dev(_dev);
 
-   return nouveau_ws_device_timestamp(dev->ws_dev);
+   *timestamp = nouveau_ws_device_timestamp(dev->ws_dev);
+   return VK_SUCCESS;
 }
 
 static int

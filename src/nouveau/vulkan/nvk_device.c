@@ -176,8 +176,11 @@ static VkResult
 nvk_device_get_timestamp(struct vk_device *vk_dev, uint64_t *timestamp)
 {
    struct nvk_device *dev = container_of(vk_dev, struct nvk_device, vk);
-   *timestamp = nvkmd_dev_get_gpu_timestamp(dev->nvkmd);
-   return VK_SUCCESS;
+   VkResult result = nvkmd_dev_get_gpu_timestamp(dev->nvkmd, timestamp);
+   if (result != VK_SUCCESS)
+      return vk_device_set_lost(vk_dev, "Failed to query the GPU timestamp");
+
+   return result;
 }
 
 /* The Switch links NVK directly and relies on these common implementations

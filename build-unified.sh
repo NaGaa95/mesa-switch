@@ -131,7 +131,7 @@ fi
     -Db_lto=false \
     -Db_ndebug=true \
     -Dvulkan-drivers=nouveau \
-    -Dgallium-drivers=nouveau \
+    -Dgallium-drivers=nouveau,zink \
     -Dgallium-rusticl=false \
     -Dplatforms=switch \
     -Degl-native-platform=switch \
@@ -180,13 +180,18 @@ required_files=(
     lib/pkgconfig/gl.pc
     lib/pkgconfig/glesv1_cm.pc
     lib/pkgconfig/glesv2.pc
+    lib/pkgconfig/glapi.pc
     lib/pkgconfig/vulkan.pc
     lib/cmake/OpenGL/OpenGLConfig.cmake
     lib/cmake/Vulkan/VulkanConfig.cmake
     include/EGL/egl.h
+    include/EGL/eglext.h
+    include/GL/gl.h
     include/GL/glcorearb.h
     include/GLES2/gl2.h
     include/vulkan/vulkan.h
+    include/vulkan/vulkan_vi.h
+    share/drirc.d/00-zink-defaults.conf
 )
 for relative in "${required_files[@]}"; do
     if [[ ! -f "${SDK_DIR}/${relative}" ]]; then

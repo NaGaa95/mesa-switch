@@ -26,7 +26,6 @@
 
 #include <assert.h>
 #include <errno.h>
-#include <inttypes.h>
 #include <stdint.h>
 #include <stdio.h>
 
@@ -45,6 +44,13 @@
 #include "target-helpers/inline_debug_helper.h"
 
 #include "nouveau/switch/nouveau_switch_public.h"
+#ifdef HAVE_SWITCH_ZINK
+#include "gallium/drivers/zink/zink_kopper.h"
+#include "gallium/drivers/zink/zink_public.h"
+#include "kopper_interface.h"
+
+#include <vulkan/vulkan_vi.h>
+#endif
 
 #include "pipe/p_context.h"
 #include "pipe/p_screen.h"
@@ -54,7 +60,6 @@
 #include "util/u_debug.h"
 #include "util/log.h"
 #include "util/os_misc.h"
-#include "util/os_time.h"
 #include "util/format/u_format.h"
 #include "util/u_inlines.h"
 #include "util/u_memory.h"
@@ -79,10 +84,16 @@
 #endif
 _EGL_DRIVER_STANDARD_TYPECASTS(switch_egl)
 
+enum switch_gl_backend {
+    SWITCH_GL_BACKEND_NVC0,
+    SWITCH_GL_BACKEND_ZINK,
+};
+
 struct switch_egl_display
 {
     struct pipe_frontend_screen *fscreen;
     struct st_config_options st_options;
+    enum switch_gl_backend backend;
     int ref_count;
 };
 
@@ -96,6 +107,7 @@ struct switch_egl_context
 {
     _EGLContext base;
     struct st_context *st;
+    enum switch_gl_backend backend;
 };
 
 struct switch_egl_surface
@@ -103,6 +115,12 @@ struct switch_egl_surface
     _EGLSurface base;
     struct pipe_frontend_drawable *drawable;
     struct pipe_resource *attachments[ST_ATTACHMENT_COUNT];
+    enum switch_gl_backend backend;
+#ifdef HAVE_SWITCH_ZINK
+    struct kopper_loader_info kopper_info;
+    struct pipe_fence_handle *front_throttle_fence;
+    bool flushing_front;
+#endif
 
     NWindow* nw;
     s32 cur_slot;
@@ -113,27 +131,9 @@ struct switch_egl_surface
     struct pipe_resource *quarantined_buffers[NUM_BUFFERS];
     NvFence fences[NUM_BUFFERS];
 
-    bool present_log;
     bool allow_cpu_acquire_wait;
     bool quarantine_resources;
-    uint32_t present_log_interval;
-    uint64_t acquire_start_ns;
     int submission_error;
-    struct {
-        uint64_t dequeues;
-        uint64_t acquire_fences;
-        uint64_t gpu_acquire_waits;
-        uint64_t cpu_acquire_waits;
-        uint64_t cpu_render_waits;
-        uint64_t queues;
-        uint64_t queue_fences;
-        uint64_t cancellations;
-        uint64_t failures;
-        uint64_t dequeue_time_ns;
-        uint64_t max_dequeue_time_ns;
-        uint64_t acquire_to_queue_ns;
-        uint64_t max_acquire_to_queue_ns;
-    } present;
 };
 
 struct switch_framebuffer
@@ -157,47 +157,11 @@ switch_framebuffer(struct pipe_frontend_drawable *drawable)
 static uint32_t drifb_ID = 0;
 
 static void
-switch_present_log_stats(const struct switch_egl_surface *surface,
-                         const char *reason)
-{
-    if (!surface->present_log)
-        return;
-
-    const uint64_t avg_dequeue_us = surface->present.dequeues ?
-        surface->present.dequeue_time_ns /
-           (surface->present.dequeues * 1000) : 0;
-    const uint64_t avg_frame_us = surface->present.queues ?
-        surface->present.acquire_to_queue_ns /
-           (surface->present.queues * 1000) : 0;
-
-    mesa_logi("egl-switch present (%s): frames=%" PRIu64
-              " dequeues=%" PRIu64 " acquire_fences=%" PRIu64
-              " gpu_waits=%" PRIu64 " cpu_acquire_waits=%" PRIu64
-              " cpu_render_waits=%" PRIu64
-              " queue_fences=%" PRIu64 " cancels=%" PRIu64
-              " failures=%" PRIu64 " dequeue_us(avg/max)=%" PRIu64
-              "/%" PRIu64 " acquire_to_queue_us(avg/max)=%" PRIu64
-              "/%" PRIu64,
-              reason, surface->present.queues, surface->present.dequeues,
-              surface->present.acquire_fences,
-              surface->present.gpu_acquire_waits,
-              surface->present.cpu_acquire_waits,
-              surface->present.cpu_render_waits,
-              surface->present.queue_fences,
-              surface->present.cancellations, surface->present.failures,
-              avg_dequeue_us, surface->present.max_dequeue_time_ns / 1000,
-              avg_frame_us, surface->present.max_acquire_to_queue_ns / 1000);
-}
-
-static void
 switch_present_failure(struct switch_egl_surface *surface,
                        const char *operation, int error)
 {
-    if (surface->present_log) {
-        surface->present.failures++;
-        mesa_logw("egl-switch present: %s failed (error=%d, slot=%d)",
-                  operation, error, surface->cur_slot);
-    }
+    mesa_loge("egl-switch present: %s failed (error=%d, slot=%d)",
+              operation, error, surface->cur_slot);
 }
 
 static bool
@@ -208,15 +172,23 @@ switch_record_context_error(struct st_context *st,
     if (!st || !st->pipe)
         return false;
 
-    const int error = nouveau_switch_context_get_error(st->pipe);
+    int error;
+#ifdef HAVE_SWITCH_ZINK
+    if (surface->backend == SWITCH_GL_BACKEND_ZINK) {
+        const enum pipe_reset_status status =
+            st->pipe->get_device_reset_status ?
+            st->pipe->get_device_reset_status(st->pipe) : PIPE_NO_RESET;
+        error = status == PIPE_NO_RESET ? 0 : -EIO;
+    } else
+#endif
+        error = nouveau_switch_context_get_error(st->pipe);
+
     if (!error)
         return false;
 
     surface->base.Lost = EGL_TRUE;
     if (!surface->submission_error) {
         surface->submission_error = error;
-        if (surface->present_log)
-            surface->present.failures++;
         mesa_loge("egl-switch present: %s exposed durable GPU submission "
                   "error %d; dequeued buffer is quarantined",
                   operation, error);
@@ -234,8 +206,7 @@ switch_surface_cancel_dequeued(struct switch_egl_surface *surface,
 
     const s32 slot = surface->cur_slot;
     Result rc = nwindowCancelBuffer(surface->nw, slot, release_fence);
-    if (surface->present_log)
-        surface->present.cancellations++;
+    (void)reason;
 
     if (R_FAILED(rc)) {
         switch_present_failure(surface, "nwindowCancelBuffer", (int)rc);
@@ -248,13 +219,7 @@ switch_surface_cancel_dequeued(struct switch_egl_surface *surface,
     }
 
     surface->cur_slot = -1;
-    surface->acquire_start_ns = 0;
     surface->attachments[ST_ATTACHMENT_BACK_LEFT] = NULL;
-
-    if (surface->present_log)
-        mesa_logi("egl-switch present: cancelled slot %d (%s, fences=%u)",
-                  slot, reason,
-                  release_fence ? release_fence->num_fences : 0);
     return true;
 }
 
@@ -284,11 +249,8 @@ switch_wait_for_acquire(struct st_context *st,
         return true;
 
     int ret = nouveau_switch_context_wait_nvmultifence(st->pipe, fence);
-    if (!ret) {
-        if (surface->present_log)
-            surface->present.gpu_acquire_waits++;
+    if (!ret)
         return true;
-    }
 
     if (switch_record_context_error(st, surface,
                                     "acquire-fence import"))
@@ -309,12 +271,9 @@ switch_wait_for_acquire(struct st_context *st,
         return false;
     }
 
-    if (surface->present_log)
-        surface->present.cpu_acquire_waits++;
-    if (surface->present_log)
-        mesa_logw("egl-switch present: GPU acquire import returned %d; "
-                  "used MESA_SWITCH_ACQUIRE_CPU_WAIT compatibility path",
-                  ret);
+    mesa_logw_once("egl-switch present: GPU acquire import returned %d; "
+                   "used MESA_SWITCH_ACQUIRE_CPU_WAIT compatibility path",
+                   ret);
     return true;
 }
 
@@ -471,19 +430,159 @@ switch_surface_invalidate_window_attachments(struct switch_egl_surface *surface,
     st_context_invalidate_state(st, ST_INVALIDATE_FB_STATE);
 }
 
-// Called via pipe_frontend_screen_flush_frontbuffer. Users of this function include:
-// - st_context_flush with ST_FLUSH_FRONT
-// - glFlush
-// - glFinish
-// We don't support rendering to the front buffer, so our implementation is dummy.
-static bool
-switch_st_framebuffer_flush_front(struct st_context *st, struct pipe_frontend_drawable *drawable, enum st_attachment_type statt)
+#ifdef HAVE_SWITCH_ZINK
+struct switch_zink_before_flush_args {
+   struct pipe_context *pipe;
+   struct pipe_resource *resource;
+};
+
+static void
+switch_zink_flush_resource_before_submit(void *data)
 {
-    (void)st;
-    (void)drawable;
-    (void)statt;
+   struct switch_zink_before_flush_args *args = data;
+   args->pipe->flush_resource(args->pipe, args->resource);
+}
+#endif
+
+/* Called by the state tracker for GL_FRONT, glFlush and glFinish. */
+static bool
+switch_st_framebuffer_flush_front(struct st_context *st,
+                                  struct pipe_frontend_drawable *drawable,
+                                  enum st_attachment_type statt)
+{
+   struct switch_egl_surface *surface = switch_framebuffer(drawable)->surface;
+
+#ifdef HAVE_SWITCH_ZINK
+   if (surface->backend == SWITCH_GL_BACKEND_ZINK &&
+       statt == ST_ATTACHMENT_FRONT_LEFT) {
+      _mesa_glthread_finish(st->ctx);
+
+      if (surface->flushing_front)
+         return true;
+
+      struct pipe_resource *res = surface->attachments[statt];
+      if (!res)
+         return false;
+
+      surface->flushing_front = true;
+      struct switch_zink_before_flush_args args = {
+         .pipe = st->pipe,
+         .resource = res,
+      };
+      struct pipe_fence_handle *new_fence = NULL;
+      st_context_flush(st, ST_FLUSH_FRONT, &new_fence,
+                       switch_zink_flush_resource_before_submit, &args);
+      surface->flushing_front = false;
+
+      if (surface->front_throttle_fence) {
+         const bool complete = st->screen->fence_finish(
+            st->screen, st->pipe, surface->front_throttle_fence,
+            SWITCH_CONTEXT_DESTROY_TIMEOUT_NS);
+         st->screen->fence_reference(st->screen, &surface->front_throttle_fence,
+                                     NULL);
+         if (!complete) {
+            if (new_fence)
+               st->screen->fence_reference(st->screen, &new_fence, NULL);
+            surface->base.Lost = EGL_TRUE;
+            return false;
+         }
+      }
+      surface->front_throttle_fence = new_fence;
+
+      st->screen->flush_frontbuffer(st->screen, st->pipe, res, 0, 0, drawable,
+                                    0, NULL);
+      p_atomic_inc(&drawable->stamp);
+   }
+#endif
+
     return true;
 }
+
+#ifdef HAVE_SWITCH_ZINK
+static bool
+switch_zink_framebuffer_validate(struct pipe_frontend_drawable *drawable,
+                                 const enum st_attachment_type *statts,
+                                 unsigned count, struct pipe_resource **out,
+                                 struct pipe_resource **resolve)
+{
+    struct switch_framebuffer *fb = switch_framebuffer(drawable);
+    struct switch_egl_surface *surface = fb->surface;
+    struct pipe_screen *screen = drawable->fscreen->screen;
+    struct pipe_screen *zscreen = kopper_get_zink_screen(screen);
+    bool back_requested = false;
+
+    if (resolve)
+        *resolve = NULL;
+
+    for (unsigned i = 0; i < count; i++)
+        back_requested |= statts[i] == ST_ATTACHMENT_BACK_LEFT;
+
+    for (unsigned i = 0; i < count; i++) {
+        const enum st_attachment_type statt = statts[i];
+        if (statt < 0 || statt >= ST_ATTACHMENT_COUNT)
+            return false;
+
+        struct pipe_resource *res = surface->attachments[statt];
+        if (!res) {
+            struct pipe_resource templ = fb->template;
+
+            switch (statt) {
+            case ST_ATTACHMENT_BACK_LEFT:
+                templ.format = drawable->visual->color_format;
+                templ.bind = PIPE_BIND_RENDER_TARGET |
+                             PIPE_BIND_DISPLAY_TARGET;
+                res = zscreen->resource_create_drawable(
+                    zscreen, &templ, &surface->kopper_info);
+                break;
+            case ST_ATTACHMENT_FRONT_LEFT:
+                if (!surface->attachments[ST_ATTACHMENT_BACK_LEFT] &&
+                    back_requested) {
+                    templ.format = drawable->visual->color_format;
+                    templ.bind = PIPE_BIND_RENDER_TARGET |
+                                 PIPE_BIND_DISPLAY_TARGET;
+                    surface->attachments[ST_ATTACHMENT_BACK_LEFT] =
+                        zscreen->resource_create_drawable(
+                            zscreen, &templ, &surface->kopper_info);
+                }
+
+                templ.format = drawable->visual->color_format;
+                if (surface->attachments[ST_ATTACHMENT_BACK_LEFT]) {
+                    templ.bind = PIPE_BIND_RENDER_TARGET;
+                    res = zscreen->resource_create_drawable(
+                        zscreen, &templ,
+                        surface->attachments[ST_ATTACHMENT_BACK_LEFT]);
+                } else {
+                    templ.bind = PIPE_BIND_RENDER_TARGET |
+                                 PIPE_BIND_DISPLAY_TARGET;
+                    res = zscreen->resource_create_drawable(
+                        zscreen, &templ, &surface->kopper_info);
+                }
+                break;
+            case ST_ATTACHMENT_DEPTH_STENCIL:
+                templ.format = drawable->visual->depth_stencil_format;
+                templ.bind = PIPE_BIND_DEPTH_STENCIL;
+                res = screen->resource_create(screen, &templ);
+                break;
+            case ST_ATTACHMENT_ACCUM:
+                templ.format = drawable->visual->accum_format;
+                templ.bind = PIPE_BIND_RENDER_TARGET;
+                res = screen->resource_create(screen, &templ);
+                break;
+            default:
+                break;
+            }
+
+            if (!res)
+                return false;
+            surface->attachments[statt] = res;
+        }
+
+        pipe_resource_reference(&out[i], res);
+    }
+
+    return true;
+}
+#endif
 
 // Called via st_framebuffer_validate.
 static bool
@@ -506,6 +605,12 @@ switch_st_framebuffer_validate(struct st_context *st, struct pipe_frontend_drawa
     }
     if (surface->base.Lost)
         return false;
+
+#ifdef HAVE_SWITCH_ZINK
+    if (surface->backend == SWITCH_GL_BACKEND_ZINK)
+        return switch_zink_framebuffer_validate(drawable, statts, count, out,
+                                                resolve);
+#endif
 
     if (resolve)
         *resolve = NULL;
@@ -539,14 +644,10 @@ switch_st_framebuffer_validate(struct st_context *st, struct pipe_frontend_drawa
                         return false;
                     }
 
-                    const uint64_t dequeue_start_ns = surface->present_log ?
-                        os_time_get_nano() : 0;
                     NvMultiFence acquire_fence = {0};
                     s32 slot = -1;
                     Result rc = nwindowDequeueBuffer(surface->nw, &slot,
                                                      &acquire_fence);
-                    const uint64_t dequeue_time_ns = surface->present_log ?
-                        os_time_get_nano() - dequeue_start_ns : 0;
                     if (R_FAILED(rc)) {
                         switch_present_failure(surface,
                                                "nwindowDequeueBuffer",
@@ -558,13 +659,6 @@ switch_st_framebuffer_validate(struct st_context *st, struct pipe_frontend_drawa
                     }
 
                     surface->cur_slot = slot;
-                    if (surface->present_log) {
-                        surface->present.dequeues++;
-                        surface->present.dequeue_time_ns += dequeue_time_ns;
-                        surface->present.max_dequeue_time_ns =
-                            MAX2(surface->present.max_dequeue_time_ns,
-                                 dequeue_time_ns);
-                    }
 
                     if (slot < 0 || slot >= NUM_BUFFERS ||
                         !surface->buffers[slot]) {
@@ -598,8 +692,6 @@ switch_st_framebuffer_validate(struct st_context *st, struct pipe_frontend_drawa
                     }
 
                     if (fence_count) {
-                        if (surface->present_log)
-                            surface->present.acquire_fences += fence_count;
                         if (!switch_wait_for_acquire(st, surface,
                                                      &compact_fence)) {
                             switch_surface_cancel_dequeued(surface,
@@ -612,8 +704,6 @@ switch_st_framebuffer_validate(struct st_context *st, struct pipe_frontend_drawa
                         }
                     }
 
-                    surface->acquire_start_ns = surface->present_log ?
-                        os_time_get_nano() : 0;
                     acquired_buffer = true;
 
                     // Use the dequeued buffer as the back buffer
@@ -679,8 +769,10 @@ switch_egl_surface_cleanup(struct switch_egl_surface *surface)
 {
     u32 i;
     const bool is_pbuffer = surface->nw == NULL;
+    const bool zink_window = !is_pbuffer &&
+        surface->backend == SWITCH_GL_BACKEND_ZINK;
 
-    if (surface->nw)
+    if (surface->nw && !zink_window)
     {
         if (surface->quarantine_resources || surface->submission_error) {
             /* A failed GPU channel or NWindow ownership transition cannot be
@@ -689,7 +781,6 @@ switch_egl_surface_cleanup(struct switch_egl_surface *surface)
             mesa_loge("egl-switch present: retaining lost surface and all "
                       "registered resources (GPU error=%d, slot=%d)",
                       surface->submission_error, surface->cur_slot);
-            switch_present_log_stats(surface, "surface quarantined");
             return;
         }
 
@@ -708,11 +799,9 @@ switch_egl_surface_cleanup(struct switch_egl_surface *surface)
                 mesa_loge("egl-switch present: retaining lost surface slot "
                           "%d and its resources after GPU error %d",
                           surface->cur_slot, surface->submission_error);
-                switch_present_log_stats(surface, "surface quarantined");
                 return;
             }
-            if (release_status == SWITCH_RELEASE_LIFECYCLE_FLUSH &&
-                surface->present_log)
+            if (release_status == SWITCH_RELEASE_LIFECYCLE_FLUSH)
                 mesa_logw("egl-switch present: teardown found no current "
                           "context or native release fence; EGL lifecycle "
                           "flush is assumed complete");
@@ -720,7 +809,6 @@ switch_egl_surface_cleanup(struct switch_egl_surface *surface)
                     surface,
                     release_fence.num_fences ? &release_fence : NULL,
                     "surface cleanup")) {
-                switch_present_log_stats(surface, "surface quarantined");
                 return;
             }
         }
@@ -732,19 +820,24 @@ switch_egl_surface_cleanup(struct switch_egl_surface *surface)
             surface->base.Lost = EGL_TRUE;
             mesa_loge("egl-switch present: NWindow release failed; retaining "
                       "surface resources with uncertain compositor ownership");
-            switch_present_log_stats(surface, "surface quarantined");
             return;
         }
     }
 
-    switch_present_log_stats(surface, "surface destroyed");
+#ifdef HAVE_SWITCH_ZINK
+    if (surface->front_throttle_fence && surface->drawable) {
+        struct pipe_screen *screen = surface->drawable->fscreen->screen;
+        screen->fence_reference(screen, &surface->front_throttle_fence, NULL);
+    }
+#endif
 
     // For window surfaces, FRONT_LEFT/BACK_LEFT are managed by buffers[].
     // For PBuffer surfaces, they're owned by attachments[].
     for (i = 0; i < ST_ATTACHMENT_COUNT; i ++)
     {
-        if (!is_pbuffer && (i == ST_ATTACHMENT_FRONT_LEFT ||
-                            i == ST_ATTACHMENT_BACK_LEFT))
+        if (!is_pbuffer && !zink_window &&
+            (i == ST_ATTACHMENT_FRONT_LEFT ||
+             i == ST_ATTACHMENT_BACK_LEFT))
             continue;
         pipe_resource_reference(&surface->attachments[i], NULL);
     }
@@ -782,14 +875,9 @@ switch_create_window_surface(_EGLDisplay *dpy,
         return NULL;
     }
     surface->cur_slot = -1;
-    surface->present_log =
-        debug_get_bool_option("MESA_SWITCH_PRESENT_LOG", false);
+    surface->backend = display->backend;
     surface->allow_cpu_acquire_wait =
         debug_get_bool_option("MESA_SWITCH_ACQUIRE_CPU_WAIT", false);
-    int64_t log_interval =
-        debug_get_num_option("MESA_SWITCH_PRESENT_LOG_INTERVAL", 300);
-    surface->present_log_interval =
-        log_interval > 0 && log_interval <= UINT32_MAX ? log_interval : 300;
 
     if (!_eglInitSurface(&surface->base, dpy, EGL_WINDOW_BIT, conf, attrib_list, native_window))
         goto cleanup;
@@ -822,55 +910,63 @@ switch_create_window_surface(_EGLDisplay *dpy,
     surface->base.Height = height;
     fb->display = display;
     fb->surface = surface;
-    fb->template.target = PIPE_TEXTURE_RECT;
+    fb->template.target = display->backend == SWITCH_GL_BACKEND_ZINK ?
+                          PIPE_TEXTURE_2D : PIPE_TEXTURE_RECT;
     fb->template.format = config->stvis.color_format;
     fb->template.width0 = (u16)width;
     fb->template.height0 = (u16)height;
     fb->template.depth0 = 1;
     fb->template.array_size = 1;
     fb->template.usage = PIPE_USAGE_DEFAULT;
-    /* Presentation resources are exported to NWindow.  Mark them shared so
-     * the winsys gives small surfaces a dedicated, nameable NvMap too. */
-    fb->template.bind = PIPE_BIND_RENDER_TARGET | PIPE_BIND_SHARED;
-    for (i = 0; i < NUM_BUFFERS; i ++)
-    {
-        // Allocate a framebuffer
-        surface->fences[i].id = UINT32_MAX;
-        surface->buffers[i] = display->fscreen->screen->resource_create(display->fscreen->screen, &fb->template);
-        if (!surface->buffers[i])
+#ifdef HAVE_SWITCH_ZINK
+    if (display->backend == SWITCH_GL_BACKEND_ZINK) {
+        static_assert(sizeof(struct kopper_vk_surface_create_storage) >=
+                      sizeof(VkViSurfaceCreateInfoNN),
+                      "Kopper VI surface storage is too small");
+        VkViSurfaceCreateInfoNN *vi =
+            (VkViSurfaceCreateInfoNN *)&surface->kopper_info.bos;
+        vi->sType = VK_STRUCTURE_TYPE_VI_SURFACE_CREATE_INFO_NN;
+        vi->window = surface->nw;
+        surface->kopper_info.has_alpha = config->base.AlphaSize > 0;
+        surface->kopper_info.initial_swap_interval = surface->base.SwapInterval;
+        surface->kopper_info.present_opaque = surface->base.PresentOpaque;
+        fb->template.bind = PIPE_BIND_RENDER_TARGET |
+                            PIPE_BIND_DISPLAY_TARGET;
+    } else {
+#endif
+        /* NVC0 exports its render targets directly to NWindow. */
+        fb->template.bind = PIPE_BIND_RENDER_TARGET | PIPE_BIND_SHARED;
+        for (i = 0; i < NUM_BUFFERS; i ++)
         {
-            _eglError(EGL_BAD_ALLOC, "switch_create_window_surface: failed to allocate framebuffers");
-            goto cleanup;
-        }
+            surface->fences[i].id = UINT32_MAX;
+            surface->buffers[i] = display->fscreen->screen->resource_create(display->fscreen->screen, &fb->template);
+            if (!surface->buffers[i])
+            {
+                _eglError(EGL_BAD_ALLOC, "switch_create_window_surface: failed to allocate framebuffers");
+                goto cleanup;
+            }
 
-        // Retrieve the native graphic buffer struct associated with this framebuffer
-        NvGraphicBuffer grbuf;
-        int err = nouveau_switch_resource_get_buffer(surface->buffers[i], &grbuf);
-        if (err != 0)
-        {
-            _eglError(EGL_BAD_ALLOC, "switch_create_window_surface: nouveau_switch_resource_get_buffer failed");
-            goto cleanup;
-        }
+            NvGraphicBuffer grbuf;
+            int err = nouveau_switch_resource_get_buffer(surface->buffers[i], &grbuf);
+            if (err != 0)
+            {
+                _eglError(EGL_BAD_ALLOC, "switch_create_window_surface: nouveau_switch_resource_get_buffer failed");
+                goto cleanup;
+            }
 
-        // Attach the framebuffer to the native window
-        rc = nwindowConfigureBuffer(surface->nw, i, &grbuf);
-        if (R_FAILED(rc)) {
-            _eglError(EGL_BAD_NATIVE_WINDOW,
-                      "switch_create_window_surface: nwindowConfigureBuffer failed");
-            goto cleanup;
+            rc = nwindowConfigureBuffer(surface->nw, i, &grbuf);
+            if (R_FAILED(rc)) {
+                _eglError(EGL_BAD_NATIVE_WINDOW,
+                          "switch_create_window_surface: nwindowConfigureBuffer failed");
+                goto cleanup;
+            }
         }
+#ifdef HAVE_SWITCH_ZINK
     }
+#endif
 
     surface->drawable = &fb->base;
     surface->cur_slot = -1;
-
-    if (surface->present_log)
-        mesa_logi("egl-switch present: initialized %ux%u, buffers=%u, "
-                  "GPU acquire waits enabled%s, log_interval=%u",
-                  width, height, (unsigned)NUM_BUFFERS,
-                  surface->allow_cpu_acquire_wait ?
-                     ", CPU compatibility fallback enabled" : "",
-                  surface->present_log_interval);
 
     // Setup the pipe_frontend_drawable
     fb->base.visual = &config->stvis;
@@ -995,6 +1091,7 @@ switch_create_pbuffer_surface(_EGLDisplay *disp,
         _eglError(EGL_BAD_ALLOC, "switch_create_pbuffer_surface: failed to allocate switch_egl_surface");
         return NULL;
     }
+    surface->backend = display->backend;
 
     if (!_eglInitSurface(&surface->base, disp, EGL_PBUFFER_BIT, conf, attrib_list, NULL))
         goto cleanup;
@@ -1024,7 +1121,8 @@ switch_create_pbuffer_surface(_EGLDisplay *disp,
     // Setup template for resource creation
     fb->display = display;
     fb->surface = surface;
-    fb->template.target = PIPE_TEXTURE_RECT;
+    fb->template.target = display->backend == SWITCH_GL_BACKEND_ZINK ?
+                          PIPE_TEXTURE_2D : PIPE_TEXTURE_RECT;
     fb->template.format = config->stvis.color_format;
     fb->template.width0 = (u16)width;
     fb->template.height0 = (u16)height;
@@ -1132,7 +1230,7 @@ switch_add_config(_EGLDisplay *dpy, EGLint *id, enum pipe_format colorfmt, enum 
     conf->stvis.buffer_mask = ST_ATTACHMENT_FRONT_LEFT_MASK | ST_ATTACHMENT_BACK_LEFT_MASK;
     conf->stvis.color_format = colorfmt;
     conf->stvis.depth_stencil_format = depthfmt;
-    conf->stvis.accum_format = PIPE_FORMAT_R16G16B16A16_FLOAT;
+    conf->stvis.accum_format = PIPE_FORMAT_NONE;
 
     if (!_eglValidateConfig(&conf->base, EGL_FALSE)) {
         _eglLog(_EGL_DEBUG, "Switch: failed to validate config");
@@ -1149,6 +1247,8 @@ static EGLBoolean
 switch_add_configs_for_visuals(_EGLDisplay *dpy)
 {
     CALLED();
+    struct switch_egl_display *display = switch_egl_display(dpy);
+    struct pipe_screen *screen = display->fscreen->screen;
 
     // List of supported color buffer formats
     static const enum pipe_format colorfmts[] = {
@@ -1171,13 +1271,36 @@ switch_add_configs_for_visuals(_EGLDisplay *dpy)
     // Add all combinations of color/depth buffer formats
     EGLint config_id = 0;
     EGLint i, j;
-    for (i = 0; i < sizeof(colorfmts)/sizeof(colorfmts[0]); i ++) {
+    const unsigned colorfmt_count =
+        display->backend == SWITCH_GL_BACKEND_ZINK ?
+        ARRAY_SIZE(colorfmts) - 1 : ARRAY_SIZE(colorfmts);
+    for (i = 0; i < colorfmt_count; i ++) {
+        if (display->backend == SWITCH_GL_BACKEND_ZINK &&
+            (!screen->is_format_supported(
+                 screen, colorfmts[i], PIPE_TEXTURE_2D, 0, 0,
+                 PIPE_BIND_RENDER_TARGET) ||
+             !screen->is_format_supported(
+                 screen, colorfmts[i], PIPE_TEXTURE_2D, 0, 0,
+                 PIPE_BIND_RENDER_TARGET | PIPE_BIND_DISPLAY_TARGET)))
+            continue;
+
         for (j = 0; j < sizeof(depthfmts)/sizeof(depthfmts[0]); j ++) {
+            if (display->backend == SWITCH_GL_BACKEND_ZINK &&
+                depthfmts[j] != PIPE_FORMAT_NONE &&
+                !screen->is_format_supported(
+                    screen, depthfmts[j], PIPE_TEXTURE_2D, 0, 0,
+                    PIPE_BIND_DEPTH_STENCIL))
+                continue;
+
             EGLBoolean rc = switch_add_config(dpy, &config_id, colorfmts[i], depthfmts[j]);
             if (!rc)
                 return rc;
         }
     }
+
+    if (config_id == 0)
+        return _eglError(EGL_NOT_INITIALIZED,
+                         "switch_add_configs_for_visuals: no supported configs");
 
     return EGL_TRUE;
 }
@@ -1214,6 +1337,28 @@ switch_glthread_requested(void)
         enabled = debug_get_bool_option("MESA_SWITCH_GLTHREAD", enabled);
 
     return enabled;
+}
+
+static enum switch_gl_backend
+switch_gl_backend_requested(const _EGLDisplay *dpy)
+{
+    const char *name = os_get_option("MESA_SWITCH_GL_DRIVER");
+
+    if (name && (strcmp(name, "nvc0") == 0 ||
+                 strcmp(name, "nouveau") == 0))
+        return SWITCH_GL_BACKEND_NVC0;
+
+    if (name && strcmp(name, "zink") == 0)
+        return SWITCH_GL_BACKEND_ZINK;
+
+    if (name && name[0])
+        mesa_logw("egl-switch: unknown MESA_SWITCH_GL_DRIVER=%s; using "
+                  "the EGL-selected backend", name);
+
+    if (dpy->Options.Zink)
+        return SWITCH_GL_BACKEND_ZINK;
+
+    return SWITCH_GL_BACKEND_NVC0;
 }
 
 static void
@@ -1274,6 +1419,21 @@ switch_initialize(_EGLDisplay *dpy)
     }
     dpy->DriverData = display;
     dpy->Version = 14;
+    if (dpy->Options.ForceSoftware) {
+        _eglError(EGL_NOT_INITIALIZED,
+                  "switch_initialize: no software renderer is available");
+        switch_display_destroy(dpy);
+        return EGL_FALSE;
+    }
+    display->backend = switch_gl_backend_requested(dpy);
+#ifndef HAVE_SWITCH_ZINK
+    if (display->backend == SWITCH_GL_BACKEND_ZINK) {
+        _eglError(EGL_NOT_INITIALIZED,
+                  "switch_initialize: Zink support is not present in this SDK");
+        switch_display_destroy(dpy);
+        return EGL_FALSE;
+    }
+#endif
 
     dpy->ClientAPIs = 0;
     if (_eglIsApiValid(EGL_OPENGL_API))
@@ -1306,19 +1466,33 @@ switch_initialize(_EGLDisplay *dpy)
     stmgr->get_param = switch_st_get_param;
     stmgr->set_background_context = switch_st_set_background_context;
 
-    // Create nouveau screen
-    TRACE("Creating nouveau screen\n");
-    screen = nouveau_switch_screen_create();
+#ifdef HAVE_SWITCH_ZINK
+    if (display->backend == SWITCH_GL_BACKEND_ZINK)
+        screen = zink_create_screen(NULL, NULL);
+    else
+#endif
+        screen = nouveau_switch_screen_create();
     if (!screen)
     {
-        TRACE("Failed to create nouveau screen\n");
+        mesa_loge("egl-switch: failed to create %s GL screen",
+                  display->backend == SWITCH_GL_BACKEND_ZINK ?
+                     "zink" : "nvc0");
         switch_display_destroy(dpy);
         return EGL_FALSE;
     }
 
-    // Inject optional trace/debug/etc wrappers
-    TRACE("Wrapping screen\n");
-    stmgr->screen = debug_screen_wrap(screen);
+    TRACE("Using %s GL backend\n",
+          display->backend == SWITCH_GL_BACKEND_ZINK ?
+             "zink over NVK" : "nvc0");
+
+    /* Gallium's generic debug wrappers do not all forward
+     * resource_create_drawable, which Kopper requires for window images. */
+#ifdef HAVE_SWITCH_ZINK
+    if (display->backend == SWITCH_GL_BACKEND_ZINK)
+        stmgr->screen = screen;
+    else
+#endif
+        stmgr->screen = debug_screen_wrap(screen);
 
     if (!switch_add_configs_for_visuals(dpy)) {
         _eglCleanupDisplay(dpy);
@@ -1359,6 +1533,7 @@ switch_create_context(_EGLDisplay *dpy, _EGLConfig *conf,
         _eglError(EGL_BAD_ALLOC, "switch_create_context");
         return NULL;
     }
+    context->backend = display->backend;
 
     if (!_eglInitContext(&context->base, dpy, conf, share_list, attrib_list))
         goto cleanup;
@@ -1463,46 +1638,60 @@ cleanup:
     return NULL;
 }
 
-
 static EGLBoolean
-switch_destroy_context(_EGLDisplay *disp, _EGLContext* ctx)
+switch_destroy_context(_EGLDisplay *disp, _EGLContext *ctx)
 {
-    struct switch_egl_context* context = switch_egl_context(ctx);
-    (void)disp;
-    CALLED();
+   if (!ctx)
+      return EGL_TRUE;
 
-    if (_eglPutContext(ctx))
-    {
-        _mesa_glthread_finish(context->st->ctx);
+   struct switch_egl_context *context = switch_egl_context(ctx);
+   _EGLDisplay *owner_disp = ctx->Resource.Display;
+   (void)disp;
+   CALLED();
 
-        /* Gallium currently shares one GM20B channel and one shader text heap
-         * between EGL contexts.  Flush and retire the exact native completion
-         * before st_destroy_context releases shader heap ranges which a new
-         * context may immediately reuse.  On failure retain the complete
-         * context instead of freeing storage that may still be executing.
-         */
-        st_context_flush(context->st, ST_FLUSH_END_OF_FRAME,
-                         NULL, NULL, NULL);
-        const int finish_error = nouveau_switch_context_finish_required(
+   if (_eglPutContext(ctx)) {
+      _mesa_glthread_finish(context->st->ctx);
+
+      if (context->backend == SWITCH_GL_BACKEND_ZINK) {
+         struct pipe_fence_handle *fence = NULL;
+         st_context_flush(context->st, ST_FLUSH_END_OF_FRAME, &fence, NULL,
+                          NULL);
+         if (fence) {
+            const bool complete = context->st->screen->fence_finish(
+               context->st->screen, context->st->pipe, fence,
+               SWITCH_CONTEXT_DESTROY_TIMEOUT_NS);
+            context->st->screen->fence_reference(context->st->screen, &fence,
+                                                 NULL);
+            if (!complete) {
+               mesa_loge("egl-switch: zink context completion timed out "
+                         "during destruction; retaining the context "
+                         "and display ownership graph");
+               p_atomic_inc(&switch_egl_display(owner_disp)->ref_count);
+               return EGL_TRUE;
+            }
+         }
+      } else {
+         /* NVC0 shares one channel and shader text heap between contexts.
+          * Retire the exact native completion before releasing either. */
+         st_context_flush(context->st, ST_FLUSH_END_OF_FRAME, NULL, NULL, NULL);
+         const int finish_error = nouveau_switch_context_finish_required(
             context->st->pipe, SWITCH_CONTEXT_DESTROY_TIMEOUT_NS,
             "EGL context destruction");
-        if (finish_error) {
+         if (finish_error) {
             mesa_loge("egl-switch: quarantining context %p after required "
-                      "destroy wait failed: %d", (void *)context,
-                      finish_error);
+                      "destroy wait failed: %d",
+                      (void *)context, finish_error);
+            p_atomic_inc(&switch_egl_display(owner_disp)->ref_count);
             return EGL_TRUE;
-        }
+         }
+      }
 
-        if (debug_get_bool_option("MESA_SWITCH_PRESENT_LOG", false))
-            mesa_logi("egl-switch: context %p retired before destruction",
-                      (void *)context);
-        st_destroy_context(context->st);
-        free(context);
-        ctx = NULL;
-    }
-    return EGL_TRUE;
+      st_destroy_context(context->st);
+      free(context);
+      ctx = NULL;
+   }
+   return EGL_TRUE;
 }
-
 
 static EGLBoolean
 switch_make_current(_EGLDisplay* dpy, _EGLSurface *dsurf,
@@ -1607,50 +1796,158 @@ switch_make_current(_EGLDisplay* dpy, _EGLSurface *dsurf,
     switch_destroy_surface(dpy, old_dsurf);
     switch_destroy_surface(dpy, old_rsurf);
     if (old_ctx) {
-        switch_destroy_context(dpy, old_ctx);
-        switch_display_release(old_dpy);
+       switch_destroy_context(dpy, old_ctx);
+       switch_display_release(old_dpy);
     }
 
     if (!ret)
-        return _eglError(EGL_BAD_MATCH, "switch_make_current");
+       return _eglError(EGL_BAD_MATCH, "switch_make_current");
 
     return EGL_TRUE;
 }
-
 
 static EGLBoolean
 switch_swap_interval(_EGLDisplay *dpy, _EGLSurface *surf, EGLint interval)
 {
-    CALLED();
-    struct switch_egl_surface* surface = switch_egl_surface(surf);
+   CALLED();
+   struct switch_egl_surface *surface = switch_egl_surface(surf);
 
-    if (!surface->nw)
-        return _eglError(EGL_BAD_SURFACE, "switch_swap_interval");
+   if (!surface->nw)
+      return _eglError(EGL_BAD_SURFACE, "switch_swap_interval");
 
-    Result rc = nwindowSetSwapInterval(surface->nw, interval);
-    if (R_FAILED(rc)) {
-        switch_present_failure(surface, "nwindowSetSwapInterval", (int)rc);
-        NvMultiFence release_fence = {0};
-        struct switch_egl_context *context =
+#ifdef HAVE_SWITCH_ZINK
+   if (surface->backend == SWITCH_GL_BACKEND_ZINK) {
+      surface->kopper_info.initial_swap_interval = interval;
+      struct pipe_resource *res =
+         surface->attachments[ST_ATTACHMENT_BACK_LEFT]
+            ? surface->attachments[ST_ATTACHMENT_BACK_LEFT]
+            : surface->attachments[ST_ATTACHMENT_FRONT_LEFT];
+      if (res) {
+         struct switch_egl_context *context =
             switch_egl_context(surface->base.CurrentContext);
-        if (context && context->st)
+         if (context && context->st)
             _mesa_glthread_finish(context->st->ctx);
-        const enum switch_release_status release_status =
-            switch_prepare_release_fence(context ? context->st : NULL,
-                                         surface, &release_fence);
-        if (release_status != SWITCH_RELEASE_GPU_ERROR)
-            switch_surface_cancel_dequeued(
-                surface, release_fence.num_fences ? &release_fence : NULL,
-                "swap interval failed");
-        surface->base.Lost = EGL_TRUE;
-        return _eglError(EGL_BAD_SURFACE,
-                         "switch_swap_interval: nwindowSetSwapInterval failed");
-    }
-    if (surface->present_log)
-        mesa_logi("egl-switch present: swap interval=%d", interval);
-    return EGL_TRUE;
+
+         struct switch_framebuffer *fb = switch_framebuffer(surface->drawable);
+         struct pipe_screen *zscreen =
+            kopper_get_zink_screen(fb->display->fscreen->screen);
+         zink_kopper_set_swap_interval(zscreen, res, interval);
+         if (!zink_kopper_check(res)) {
+            surface->base.Lost = EGL_TRUE;
+            return _eglError(
+               EGL_BAD_SURFACE,
+               "switch_swap_interval: zink swapchain recreation failed");
+         }
+      }
+      return EGL_TRUE;
+   }
+#endif
+
+   Result rc = nwindowSetSwapInterval(surface->nw, interval);
+   if (R_FAILED(rc)) {
+      switch_present_failure(surface, "nwindowSetSwapInterval", (int)rc);
+      NvMultiFence release_fence = {0};
+      struct switch_egl_context *context =
+         switch_egl_context(surface->base.CurrentContext);
+      if (context && context->st)
+         _mesa_glthread_finish(context->st->ctx);
+      const enum switch_release_status release_status =
+         switch_prepare_release_fence(context ? context->st : NULL, surface,
+                                      &release_fence);
+      if (release_status != SWITCH_RELEASE_GPU_ERROR)
+         switch_surface_cancel_dequeued(
+            surface, release_fence.num_fences ? &release_fence : NULL,
+            "swap interval failed");
+      surface->base.Lost = EGL_TRUE;
+      return _eglError(EGL_BAD_SURFACE,
+                       "switch_swap_interval: nwindowSetSwapInterval failed");
+   }
+   return EGL_TRUE;
 }
 
+#ifdef HAVE_SWITCH_ZINK
+static EGLBoolean
+switch_resize_zink_surface(struct switch_egl_surface *surface,
+                           struct switch_egl_context *context,
+                           struct switch_framebuffer *fb,
+                           EGLint width, EGLint height)
+{
+    if (context->backend != SWITCH_GL_BACKEND_ZINK ||
+        _eglGetCurrentContext() != &context->base ||
+        context->base.DrawSurface != &surface->base)
+        return _eglError(EGL_BAD_MATCH,
+                         "switch_resize_surface: zink surface is not current");
+
+    _mesa_glthread_finish(context->st->ctx);
+
+    struct pipe_fence_handle *fence = NULL;
+    st_context_flush(context->st, ST_FLUSH_END_OF_FRAME,
+                     &fence, NULL, NULL);
+    bool complete = true;
+    if (fence) {
+        complete = context->st->screen->fence_finish(
+            context->st->screen, context->st->pipe, fence,
+            SWITCH_CONTEXT_DESTROY_TIMEOUT_NS);
+        context->st->screen->fence_reference(context->st->screen,
+                                              &fence, NULL);
+    }
+    if (!complete ||
+        switch_record_context_error(context->st, surface, "zink resize")) {
+        surface->base.Lost = EGL_TRUE;
+        return _eglError(EGL_BAD_SURFACE,
+                         "switch_resize_surface: zink GPU drain failed");
+    }
+
+    struct pipe_resource *back =
+        surface->attachments[ST_ATTACHMENT_BACK_LEFT];
+    struct pipe_resource *front =
+        surface->attachments[ST_ATTACHMENT_FRONT_LEFT];
+    struct pipe_resource *primary = back ? back : front;
+    struct pipe_resource *secondary =
+        back && front && back != front ? front : NULL;
+
+    if (primary && !zink_kopper_resize(context->st->screen, primary,
+                                       secondary, width, height)) {
+        surface->base.Lost = EGL_TRUE;
+        return _eglError(EGL_BAD_SURFACE,
+                         "switch_resize_surface: zink swapchain release failed");
+    }
+
+    Result rc = nwindowSetDimensions(surface->nw, width, height);
+    if (R_FAILED(rc)) {
+        surface->base.Lost = EGL_TRUE;
+        mesa_loge("egl-switch: zink resize to %dx%d failed after "
+                  "swapchain release (0x%x)", width, height, rc);
+        return _eglError(EGL_BAD_SURFACE,
+                         "switch_resize_surface: NWindow resize failed");
+    }
+
+    if (primary && !zink_kopper_finish_resize(context->st->screen,
+                                              primary)) {
+        surface->base.Lost = EGL_TRUE;
+        return _eglError(EGL_BAD_SURFACE,
+                         "switch_resize_surface: zink swapchain recreation failed");
+    }
+
+    for (unsigned i = 0; i < ST_ATTACHMENT_COUNT; i++) {
+        struct pipe_resource *res = surface->attachments[i];
+        if (res == primary &&
+            (i == ST_ATTACHMENT_BACK_LEFT ||
+             i == ST_ATTACHMENT_FRONT_LEFT))
+            continue;
+        pipe_resource_reference(&surface->attachments[i], NULL);
+    }
+
+    fb->template.width0 = width;
+    fb->template.height0 = height;
+    surface->base.Width = width;
+    surface->base.Height = height;
+    surface->cur_slot = -1;
+    p_atomic_inc(&surface->drawable->stamp);
+    st_context_invalidate_state(context->st, ST_INVALIDATE_FB_STATE);
+    return EGL_TRUE;
+}
+#endif
 
 static EGLBoolean
 switch_resize_surface(_EGLDisplay *dpy, _EGLSurface *surf,
@@ -1677,6 +1974,12 @@ switch_resize_surface(_EGLDisplay *dpy, _EGLSurface *surf,
                          "switch_resize_surface: invalid arguments");
     if ((uint32_t)width == old_width && (uint32_t)height == old_height)
         return EGL_TRUE;
+
+#ifdef HAVE_SWITCH_ZINK
+    if (surface->backend == SWITCH_GL_BACKEND_ZINK)
+        return switch_resize_zink_surface(surface, context, fb,
+                                          width, height);
+#endif
 
     /* Allocate/export every replacement before disturbing the live NWindow.
      * This makes ordinary allocation failures completely transactional. */
@@ -1721,8 +2024,6 @@ switch_resize_surface(_EGLDisplay *dpy, _EGLSurface *surf,
             return _eglError(EGL_BAD_SURFACE,
                              "switch_resize_surface: GPU drain failed");
         }
-        if (surface->present_log)
-            surface->present.cpu_render_waits++;
     }
 
     /* Keep independent references for rollback.  NWindow owns only the NvMap
@@ -1793,7 +2094,6 @@ switch_resize_surface(_EGLDisplay *dpy, _EGLSurface *surf,
         }
 
         surface->cur_slot = -1;
-        surface->acquire_start_ns = 0;
         switch_surface_invalidate_window_attachments(surface, context->st,
                                                       false);
         switch_window_buffer_set_finish(&rollback);
@@ -1823,148 +2123,163 @@ switch_resize_surface(_EGLDisplay *dpy, _EGLSurface *surf,
     surface->base.Width = width;
     surface->base.Height = height;
     surface->cur_slot = -1;
-    surface->acquire_start_ns = 0;
-
-    if (surface->present_log)
-        mesa_logi("egl-switch present: resized %ux%u -> %dx%d, buffers=%u",
-                  old_width, old_height, width, height,
-                  (unsigned)NUM_BUFFERS);
     return EGL_TRUE;
 }
-
 
 static EGLBoolean
 switch_swap_buffers(_EGLDisplay *dpy, _EGLSurface *surf)
 {
-    (void)dpy;
-    CALLED();
-    struct switch_egl_surface* surface = switch_egl_surface(surf);
-    struct switch_egl_context* context = switch_egl_context(surface->base.CurrentContext);
+   (void)dpy;
+   CALLED();
+   struct switch_egl_surface *surface = switch_egl_surface(surf);
+   struct switch_egl_context *context =
+      switch_egl_context(surface->base.CurrentContext);
 
-    if (surface->base.Lost)
-        return _eglError(EGL_BAD_SURFACE,
-                         "switch_swap_buffers: surface is lost");
+   if (surface->base.Lost)
+      return _eglError(EGL_BAD_SURFACE, "switch_swap_buffers: surface is lost");
 
-    if (!context || !context->st)
-        return _eglError(EGL_BAD_CONTEXT,
-                         "switch_swap_buffers: surface has no current context");
+   if (!context || !context->st)
+      return _eglError(EGL_BAD_CONTEXT,
+                       "switch_swap_buffers: surface has no current context");
 
-    /* Drain queued draws before inspecting or presenting the back buffer. */
-    _mesa_glthread_finish(context->st->ctx);
+   /* Drain queued draws before inspecting or presenting the back buffer. */
+   _mesa_glthread_finish(context->st->ctx);
 
-    if (surface->cur_slot < 0) {
-        TRACE("Nothing to do\n");
-        return EGL_TRUE;
-    }
+   if (!surface->nw) {
+      st_context_flush(context->st, ST_FLUSH_END_OF_FRAME, NULL, NULL, NULL);
+      if (switch_record_context_error(context->st, surface,
+                                      "pbuffer swap flush"))
+         return _eglError(EGL_BAD_SURFACE,
+                          "switch_swap_buffers: pbuffer flush failed");
+      return EGL_TRUE;
+   }
 
-    if (!surface->nw || surface->cur_slot >= NUM_BUFFERS ||
-        !surface->buffers[surface->cur_slot]) {
-        switch_present_failure(surface, "invalid queued buffer slot",
-                               surface->cur_slot);
-        NvMultiFence release_fence = {0};
-        const enum switch_release_status release_status =
-            switch_prepare_release_fence(context->st, surface,
-                                         &release_fence);
-        if (release_status != SWITCH_RELEASE_GPU_ERROR)
-            switch_surface_cancel_dequeued(
-                surface, release_fence.num_fences ? &release_fence : NULL,
-                "invalid queue state");
-        surface->base.Lost = EGL_TRUE;
-        return _eglError(EGL_BAD_SURFACE,
-                         "switch_swap_buffers: invalid buffer slot");
-    }
+#ifdef HAVE_SWITCH_ZINK
+   if (surface->backend == SWITCH_GL_BACKEND_ZINK) {
+      struct pipe_resource *back =
+         surface->attachments[ST_ATTACHMENT_BACK_LEFT];
+      if (!back) {
+         st_manager_validate_framebuffers(context->st);
+         back = surface->attachments[ST_ATTACHMENT_BACK_LEFT];
+      }
+      if (!back)
+         return _eglError(EGL_BAD_SURFACE,
+                          "switch_swap_buffers: no zink back buffer");
 
-    /* Keep the exact rendered attachment while the native release fence is
-     * upgraded and queued.  Ownership moves from BACK_LEFT to FRONT_LEFT
-     * only after nwindowQueueBuffer succeeds below. */
-    struct pipe_resource *old_back =
-        surface->attachments[ST_ATTACHMENT_BACK_LEFT];
+      struct switch_zink_before_flush_args args = {
+         .pipe = context->st->pipe,
+         .resource = back,
+      };
+      st_context_flush(context->st, ST_FLUSH_END_OF_FRAME, NULL,
+                       switch_zink_flush_resource_before_submit, &args);
+      context->st->screen->flush_frontbuffer(context->st->screen,
+                                             context->st->pipe, back, 0, 0,
+                                             surface->drawable, 0, NULL);
+      if (switch_record_context_error(context->st, surface, "zink present") ||
+          !zink_kopper_check(back)) {
+         surface->base.Lost = EGL_TRUE;
+         return _eglError(EGL_BAD_SURFACE,
+                          "switch_swap_buffers: zink present failed");
+      }
 
-    TRACE("Flushing context\n");
-    st_context_flush(context->st, ST_FLUSH_END_OF_FRAME, NULL, NULL, NULL);
-    if (switch_record_context_error(context->st, surface, "swap flush"))
-        return _eglError(EGL_BAD_SURFACE,
-                         "switch_swap_buffers: GPU submission failed");
+      if (surface->attachments[ST_ATTACHMENT_FRONT_LEFT]) {
+         surface->attachments[ST_ATTACHMENT_BACK_LEFT] =
+            surface->attachments[ST_ATTACHMENT_FRONT_LEFT];
+         surface->attachments[ST_ATTACHMENT_FRONT_LEFT] = back;
+      }
 
-    NvMultiFence mf = {0};
-    NvFence fence = { .id = UINT32_MAX };
-    const int fence_ret = nouveau_switch_context_get_cpu_fence(
-        context->st->pipe, &fence);
-    if (!fence_ret) {
-        NvFence* surf_fence = &surface->fences[surface->cur_slot];
-        if (surf_fence->id != fence.id || surf_fence->value != fence.value) {
-            TRACE("Using fence: {%d,%u}\n", (int)fence.id, fence.value);
-            *surf_fence = fence;
-            nvMultiFenceCreate(&mf, &fence);
-        }
-    } else if (fence_ret == -ENODATA) {
-        TRACE("No native work for this frame; using an empty release fence\n");
-    } else {
-        struct pipe_fence_handle *wait_fence = NULL;
-        st_context_flush(context->st,
-                         ST_FLUSH_END_OF_FRAME | ST_FLUSH_WAIT,
-                         &wait_fence, NULL, NULL);
-        if (wait_fence)
-            context->st->screen->fence_reference(context->st->screen,
-                                                  &wait_fence, NULL);
-        if (switch_record_context_error(context->st, surface,
-                                        "swap CPU wait"))
-            return _eglError(EGL_BAD_SURFACE,
-                             "switch_swap_buffers: GPU wait failed");
-        if (surface->present_log)
-            surface->present.cpu_render_waits++;
-        if (surface->present_log)
-            mesa_logw("egl-switch present: render resource had no native "
-                      "syncpoint; used a CPU render wait");
-    }
+      p_atomic_inc(&surface->drawable->stamp);
+      st_context_invalidate_state(context->st, ST_INVALIDATE_FB_STATE);
+      return EGL_TRUE;
+   }
+#endif
 
-    TRACE("Queuing buffer\n");
-    const s32 queued_slot = surface->cur_slot;
-    Result rc = nwindowQueueBuffer(surface->nw, queued_slot, &mf);
-    if (R_FAILED(rc)) {
-        switch_present_failure(surface, "nwindowQueueBuffer", (int)rc);
-        switch_surface_cancel_dequeued(surface,
-                                        mf.num_fences ? &mf : NULL,
-                                        "queue failed");
-        surface->base.Lost = EGL_TRUE;
-        return _eglError(EGL_BAD_SURFACE,
-                         "switch_swap_buffers: nwindowQueueBuffer failed");
-    }
+   if (surface->cur_slot < 0) {
+      TRACE("Nothing to do\n");
+      return EGL_TRUE;
+   }
 
-    if (surface->present_log) {
-        surface->present.queues++;
-        if (mf.num_fences)
-            surface->present.queue_fences++;
-        if (surface->acquire_start_ns) {
-            const uint64_t acquire_to_queue_ns =
-                os_time_get_nano() - surface->acquire_start_ns;
-            surface->present.acquire_to_queue_ns += acquire_to_queue_ns;
-            surface->present.max_acquire_to_queue_ns =
-                MAX2(surface->present.max_acquire_to_queue_ns,
-                     acquire_to_queue_ns);
-        }
+   if (!surface->nw || surface->cur_slot >= NUM_BUFFERS ||
+       !surface->buffers[surface->cur_slot]) {
+      switch_present_failure(surface, "invalid queued buffer slot",
+                             surface->cur_slot);
+      NvMultiFence release_fence = {0};
+      const enum switch_release_status release_status =
+         switch_prepare_release_fence(context->st, surface, &release_fence);
+      if (release_status != SWITCH_RELEASE_GPU_ERROR)
+         switch_surface_cancel_dequeued(
+            surface, release_fence.num_fences ? &release_fence : NULL,
+            "invalid queue state");
+      surface->base.Lost = EGL_TRUE;
+      return _eglError(EGL_BAD_SURFACE,
+                       "switch_swap_buffers: invalid buffer slot");
+   }
 
-        if (surface->present.queues == 1 ||
-            surface->present.queues % surface->present_log_interval == 0)
-            switch_present_log_stats(surface, "periodic");
-    }
+   /* Keep the exact rendered attachment while the native release fence is
+    * upgraded and queued.  Ownership moves from BACK_LEFT to FRONT_LEFT
+    * only after nwindowQueueBuffer succeeds below. */
+   struct pipe_resource *old_back =
+      surface->attachments[ST_ATTACHMENT_BACK_LEFT];
 
-    // Update framebuffer state
-    surface->cur_slot = -1;
-    surface->acquire_start_ns = 0;
-    surface->attachments[ST_ATTACHMENT_BACK_LEFT] = NULL;
-    surface->attachments[ST_ATTACHMENT_FRONT_LEFT] = old_back;
-    p_atomic_inc(&surface->drawable->stamp);
+   TRACE("Flushing context\n");
+   st_context_flush(context->st, ST_FLUSH_END_OF_FRAME, NULL, NULL, NULL);
+   if (switch_record_context_error(context->st, surface, "swap flush"))
+      return _eglError(EGL_BAD_SURFACE,
+                       "switch_swap_buffers: GPU submission failed");
 
-    /* Invalidate framebuffer state so the state tracker re-validates
-     * attachments on the next draw call (lightweight flag set, matching
-     * the DRI frontend pattern — NOT st_manager_validate_framebuffers
-     * which would eagerly call nwindowDequeueBuffer). */
-    st_context_invalidate_state(context->st, ST_INVALIDATE_FB_STATE);
+   NvMultiFence mf = {0};
+   NvFence fence = {.id = UINT32_MAX};
+   const int fence_ret =
+      nouveau_switch_context_get_cpu_fence(context->st->pipe, &fence);
+   if (!fence_ret) {
+      NvFence *surf_fence = &surface->fences[surface->cur_slot];
+      if (surf_fence->id != fence.id || surf_fence->value != fence.value) {
+         TRACE("Using fence: {%d,%u}\n", (int)fence.id, fence.value);
+         *surf_fence = fence;
+         nvMultiFenceCreate(&mf, &fence);
+      }
+   } else if (fence_ret == -ENODATA) {
+      TRACE("No native work for this frame; using an empty release fence\n");
+   } else {
+      struct pipe_fence_handle *wait_fence = NULL;
+      st_context_flush(context->st, ST_FLUSH_END_OF_FRAME | ST_FLUSH_WAIT,
+                       &wait_fence, NULL, NULL);
+      if (wait_fence)
+         context->st->screen->fence_reference(context->st->screen, &wait_fence,
+                                              NULL);
+      if (switch_record_context_error(context->st, surface, "swap CPU wait"))
+         return _eglError(EGL_BAD_SURFACE,
+                          "switch_swap_buffers: GPU wait failed");
+      mesa_logw_once("egl-switch present: render resource had no native "
+                     "syncpoint; used a CPU render wait");
+   }
 
-    return EGL_TRUE;
+   TRACE("Queuing buffer\n");
+   const s32 queued_slot = surface->cur_slot;
+   Result rc = nwindowQueueBuffer(surface->nw, queued_slot, &mf);
+   if (R_FAILED(rc)) {
+      switch_present_failure(surface, "nwindowQueueBuffer", (int)rc);
+      switch_surface_cancel_dequeued(surface, mf.num_fences ? &mf : NULL,
+                                     "queue failed");
+      surface->base.Lost = EGL_TRUE;
+      return _eglError(EGL_BAD_SURFACE,
+                       "switch_swap_buffers: nwindowQueueBuffer failed");
+   }
+
+   // Update framebuffer state
+   surface->cur_slot = -1;
+   surface->attachments[ST_ATTACHMENT_BACK_LEFT] = NULL;
+   surface->attachments[ST_ATTACHMENT_FRONT_LEFT] = old_back;
+   p_atomic_inc(&surface->drawable->stamp);
+
+   /* Invalidate framebuffer state so the state tracker re-validates
+    * attachments on the next draw call (lightweight flag set, matching
+    * the DRI frontend pattern — NOT st_manager_validate_framebuffers
+    * which would eagerly call nwindowDequeueBuffer). */
+   st_context_invalidate_state(context->st, ST_INVALIDATE_FB_STATE);
+
+   return EGL_TRUE;
 }
-
 
 /*
  * Called from eglGetProcAddress() via drv->API.GetProcAddress().

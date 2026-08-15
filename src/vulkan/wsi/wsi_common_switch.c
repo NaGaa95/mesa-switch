@@ -24,6 +24,7 @@
 
 #include "util/macros.h"
 #include "util/os_time.h"
+#include "util/simple_mtx.h"
 #include "vk_util.h"
 #include "vk_instance.h"
 #include "vk_physical_device.h"
@@ -35,6 +36,61 @@
 struct wsi_switch {
    struct wsi_interface base;
 };
+
+/* DestroySwapchainKHR cannot report a failed NWindow release.  Keep a
+ * process-lifetime record outside the swapchain object so destroying that
+ * object cannot make uncertain compositor ownership look safe again.  This
+ * path is exceptional, so a fixed registry avoids relying on allocation in
+ * the failure path.  Overflow deliberately poisons every NWindow rather than
+ * risk reusing storage which the compositor may still reference.
+ */
+#define WSI_SWITCH_MAX_POISONED_NWINDOWS 16
+static simple_mtx_t wsi_switch_poisoned_nwindows_lock =
+   SIMPLE_MTX_INITIALIZER;
+static NWindow *wsi_switch_poisoned_nwindows[
+   WSI_SWITCH_MAX_POISONED_NWINDOWS];
+static uint32_t wsi_switch_poisoned_nwindow_count;
+static bool wsi_switch_poisoned_nwindow_overflow;
+
+static bool
+wsi_switch_nwindow_is_poisoned(NWindow *nw)
+{
+   simple_mtx_lock(&wsi_switch_poisoned_nwindows_lock);
+
+   bool poisoned = wsi_switch_poisoned_nwindow_overflow;
+   for (uint32_t i = 0;
+        !poisoned && i < wsi_switch_poisoned_nwindow_count; i++)
+      poisoned = wsi_switch_poisoned_nwindows[i] == nw;
+
+   simple_mtx_unlock(&wsi_switch_poisoned_nwindows_lock);
+   return poisoned;
+}
+
+static void
+wsi_switch_nwindow_poison(NWindow *nw)
+{
+   simple_mtx_lock(&wsi_switch_poisoned_nwindows_lock);
+
+   if (!nw) {
+      wsi_switch_poisoned_nwindow_overflow = true;
+      goto out;
+   }
+
+   for (uint32_t i = 0; i < wsi_switch_poisoned_nwindow_count; i++) {
+      if (wsi_switch_poisoned_nwindows[i] == nw)
+         goto out;
+   }
+
+   if (wsi_switch_poisoned_nwindow_count <
+       ARRAY_SIZE(wsi_switch_poisoned_nwindows)) {
+      wsi_switch_poisoned_nwindows[wsi_switch_poisoned_nwindow_count++] = nw;
+   } else {
+      wsi_switch_poisoned_nwindow_overflow = true;
+   }
+
+out:
+   simple_mtx_unlock(&wsi_switch_poisoned_nwindows_lock);
+}
 
 static VkResult
 wsi_switch_surface_get_support(VkIcdSurfaceBase *surface,
@@ -48,6 +104,7 @@ wsi_switch_surface_get_support(VkIcdSurfaceBase *surface,
 
 static const VkPresentModeKHR present_modes[] = {
    VK_PRESENT_MODE_FIFO_KHR,
+   VK_PRESENT_MODE_IMMEDIATE_KHR,
 };
 
 static bool
@@ -123,6 +180,13 @@ wsi_switch_surface_get_capabilities2(VkIcdSurfaceBase *surface,
    VkResult result =
       wsi_switch_surface_get_capabilities(surface, wsi_device,
                                           &caps->surfaceCapabilities);
+
+   /* libnx only honors swap interval 0 when at least three NWindow buffers
+    * are configured.
+    */
+   if (present_mode &&
+       present_mode->presentMode == VK_PRESENT_MODE_IMMEDIATE_KHR)
+      caps->surfaceCapabilities.minImageCount = 3;
 
    vk_foreach_struct(ext, caps->pNext) {
       switch (ext->sType) {
@@ -274,6 +338,10 @@ struct wsi_switch_swapchain {
    NWindow *nw;
    VkExtent2D extent;
    bool owns_nwindow_buffers;
+   /* A failed Binder transaction cannot prove whether registrations remain.
+    * Once unknown, backing storage is quarantined instead of destroyed. */
+   bool nwindow_ownership_unknown;
+   bool retired;
    uint32_t pixel_format;
    NvColorFormat color_format;
 
@@ -281,6 +349,26 @@ struct wsi_switch_swapchain {
 };
 VK_DEFINE_NONDISP_HANDLE_CASTS(wsi_switch_swapchain, base.base, VkSwapchainKHR,
                                VK_OBJECT_TYPE_SWAPCHAIN_KHR)
+
+static void
+wsi_switch_swapchain_mark_nwindow_unknown(
+   struct wsi_switch_swapchain *chain)
+{
+   chain->nwindow_ownership_unknown = true;
+   wsi_switch_nwindow_poison(chain->nw);
+}
+
+static bool
+wsi_switch_swapchain_has_unknown_nwindow_ownership(
+   struct wsi_switch_swapchain *chain)
+{
+   if (!chain->nwindow_ownership_unknown &&
+       !wsi_switch_nwindow_is_poisoned(chain->nw))
+      return false;
+
+   wsi_switch_swapchain_mark_nwindow_unknown(chain);
+   return true;
+}
 
 static struct wsi_image *
 wsi_switch_swapchain_get_wsi_image(struct wsi_swapchain *wsi_chain,
@@ -349,6 +437,11 @@ wsi_switch_create_scanout_image(struct wsi_switch_swapchain *chain,
    const struct wsi_device *wsi = chain->base.wsi;
    VkResult result;
 
+   if (wsi_switch_nwindow_is_poisoned(chain->nw)) {
+      wsi_switch_swapchain_mark_nwindow_unknown(chain);
+      return VK_ERROR_SURFACE_LOST_KHR;
+   }
+
    memset(&img->base, 0, sizeof(img->base));
 #ifndef _WIN32
    img->base.dma_buf_fd = -1;
@@ -368,9 +461,35 @@ wsi_switch_create_scanout_image(struct wsi_switch_swapchain *chain,
       .sType = VK_STRUCTURE_TYPE_WSI_IMAGE_CREATE_INFO_MESA,
       .scanout = true,
    };
+
+   VkImageCreateFlags image_flags = 0;
+   const void *image_pnext = &wsi_image_info;
+   VkImageFormatListCreateInfo image_format_list = { 0 };
+
+   if (pCreateInfo->flags & VK_SWAPCHAIN_CREATE_MUTABLE_FORMAT_BIT_KHR) {
+      const VkImageFormatListCreateInfo *swapchain_format_list =
+         vk_find_struct_const(pCreateInfo->pNext,
+                              IMAGE_FORMAT_LIST_CREATE_INFO);
+
+      if (swapchain_format_list == NULL ||
+          swapchain_format_list->viewFormatCount == 0)
+         return VK_ERROR_INITIALIZATION_FAILED;
+
+      image_flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT |
+                    VK_IMAGE_CREATE_EXTENDED_USAGE_BIT;
+      image_format_list = (VkImageFormatListCreateInfo) {
+         .sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO,
+         .pNext = &wsi_image_info,
+         .viewFormatCount = swapchain_format_list->viewFormatCount,
+         .pViewFormats = swapchain_format_list->pViewFormats,
+      };
+      image_pnext = &image_format_list;
+   }
+
    const VkImageCreateInfo image_info = {
       .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
-      .pNext = &wsi_image_info,
+      .pNext = image_pnext,
+      .flags = image_flags,
       .imageType = VK_IMAGE_TYPE_2D,
       .format = pCreateInfo->imageFormat,
       .extent = {
@@ -493,12 +612,24 @@ wsi_switch_create_scanout_image(struct wsi_switch_swapchain *chain,
    grbuf.planes[0].size = img->layout.size_B;
    grbuf.planes[0].offset = img->layout.offset_B;
 
-   Result rc = nwindowConfigureBuffer(chain->nw, slot, &grbuf);
-   if (R_FAILED(rc)) {
-      result = VK_ERROR_INITIALIZATION_FAILED;
-      goto fail;
+   /* Check again after allocation: another failed ownership transition on
+    * this NWindow must prevent any subsequent registration attempt. */
+   if (wsi_switch_nwindow_is_poisoned(chain->nw)) {
+      wsi_switch_swapchain_mark_nwindow_unknown(chain);
+      return VK_ERROR_SURFACE_LOST_KHR;
    }
 
+   Result rc = nwindowConfigureBuffer(chain->nw, slot, &grbuf);
+   if (R_FAILED(rc)) {
+      /* A failed Binder transaction does not prove whether the compositor
+       * accepted the registration.  Keep this image and all previously
+       * configured images alive until process teardown rather than freeing
+       * storage which NWindow may still reference. */
+      wsi_switch_swapchain_mark_nwindow_unknown(chain);
+      return VK_ERROR_SURFACE_LOST_KHR;
+   }
+
+   chain->owns_nwindow_buffers = true;
    img->slot = slot;
    img->busy_on_host = false;
    img->busy_on_device = false;
@@ -511,24 +642,45 @@ fail:
    return result;
 }
 
-static void
+static bool
 wsi_switch_swapchain_close_nwindow_buffers(struct wsi_switch_swapchain *chain)
 {
-   if (chain->owns_nwindow_buffers && chain->nw)
-      nwindowReleaseBuffers(chain->nw);
+   if (wsi_switch_swapchain_has_unknown_nwindow_ownership(chain))
+      return false;
+
+   if (!chain->owns_nwindow_buffers)
+      return true;
+
+   if (!chain->nw) {
+      wsi_switch_swapchain_mark_nwindow_unknown(chain);
+      return false;
+   }
+
+   Result rc = nwindowReleaseBuffers(chain->nw);
+   if (R_FAILED(rc)) {
+      wsi_switch_swapchain_mark_nwindow_unknown(chain);
+      return false;
+   }
 
    chain->owns_nwindow_buffers = false;
+   return true;
 }
 
 /* EGL explicitly cancels any currently dequeued slot before releasing
  * NWindow buffers. Mirror that behavior here so a stale dequeued slot
  * from the previous run cannot block subsequent swapchain init/present.
  */
-static void
+static bool
 wsi_switch_swapchain_cancel_outstanding_images(struct wsi_switch_swapchain *chain)
 {
-   if (!chain->nw)
-      return;
+   if (wsi_switch_swapchain_has_unknown_nwindow_ownership(chain))
+      return false;
+
+   if (!chain->nw) {
+      if (chain->owns_nwindow_buffers)
+         wsi_switch_swapchain_mark_nwindow_unknown(chain);
+      return !chain->owns_nwindow_buffers;
+   }
 
    for (uint32_t i = 0; i < chain->base.image_count; i++) {
       struct wsi_switch_image *img = &chain->images[i];
@@ -536,12 +688,18 @@ wsi_switch_swapchain_cancel_outstanding_images(struct wsi_switch_swapchain *chai
       if (img->slot < 0 || !img->busy_on_host)
          continue;
 
-      nwindowCancelBuffer(chain->nw, img->slot, NULL);
+      Result rc = nwindowCancelBuffer(chain->nw, img->slot, NULL);
+      if (R_FAILED(rc)) {
+         wsi_switch_swapchain_mark_nwindow_unknown(chain);
+         return false;
+      }
       img->busy_on_host = false;
       img->busy_on_device = false;
       img->have_acquire_fence = false;
       memset(&img->acquire_fence, 0, sizeof(img->acquire_fence));
    }
+
+   return true;
 }
 
 static VkResult
@@ -551,6 +709,11 @@ wsi_switch_swapchain_release_images(struct wsi_swapchain *wsi_chain,
    struct wsi_switch_swapchain *chain =
       (struct wsi_switch_swapchain *)wsi_chain;
 
+   if (wsi_switch_swapchain_has_unknown_nwindow_ownership(chain))
+      return VK_ERROR_SURFACE_LOST_KHR;
+   if (chain->retired)
+      return VK_ERROR_OUT_OF_DATE_KHR;
+
    for (uint32_t i = 0; i < count; i++) {
       uint32_t index = indices[i];
       assert(index < chain->base.image_count);
@@ -558,8 +721,15 @@ wsi_switch_swapchain_release_images(struct wsi_swapchain *wsi_chain,
       /* release_images can be called on images that are still dequeued but
        * not yet presented. Ensure the slot is returned to NWindow.
        */
-      if (chain->images[index].slot >= 0 && chain->images[index].busy_on_host)
-         nwindowCancelBuffer(chain->nw, chain->images[index].slot, NULL);
+      if (chain->images[index].slot >= 0 &&
+          chain->images[index].busy_on_host) {
+         Result rc = nwindowCancelBuffer(chain->nw,
+                                         chain->images[index].slot, NULL);
+         if (R_FAILED(rc)) {
+            wsi_switch_swapchain_mark_nwindow_unknown(chain);
+            return VK_ERROR_SURFACE_LOST_KHR;
+         }
+      }
 
       chain->images[index].busy_on_device = false;
       chain->images[index].busy_on_host = false;
@@ -602,6 +772,7 @@ wsi_switch_dequeue_buffer(NWindow *nw, uint64_t timeout_ns,
    NvMultiFence fence;
    s32 slot;
    Result rc;
+   bool ownership_unknown = false;
 
    if (eventActive(&nw->event)) {
       /* Async BufferQueue: the release event is signaled whenever a buffer
@@ -641,10 +812,12 @@ wsi_switch_dequeue_buffer(NWindow *nw, uint64_t timeout_ns,
 
    if (R_SUCCEEDED(rc) && !(nw->slots_requested & (1UL << slot))) {
       rc = bqRequestBuffer(&nw->bq, slot, NULL);
-      if (R_FAILED(rc))
-         bqCancelBuffer(&nw->bq, slot, &fence);
-      else
+      if (R_FAILED(rc)) {
+         Result cancel_rc = bqCancelBuffer(&nw->bq, slot, &fence);
+         ownership_unknown = R_FAILED(cancel_rc);
+      } else {
          nw->slots_requested |= 1UL << slot;
+      }
    }
 
    if (R_SUCCEEDED(rc)) {
@@ -655,7 +828,10 @@ wsi_switch_dequeue_buffer(NWindow *nw, uint64_t timeout_ns,
 
    mutexUnlock(&nw->mutex);
 
-   return R_SUCCEEDED(rc) ? VK_SUCCESS : VK_ERROR_OUT_OF_DATE_KHR;
+   if (R_SUCCEEDED(rc))
+      return VK_SUCCESS;
+   return ownership_unknown ? VK_ERROR_SURFACE_LOST_KHR :
+                              VK_ERROR_OUT_OF_DATE_KHR;
 }
 
 static VkResult
@@ -666,13 +842,21 @@ wsi_switch_swapchain_acquire_next_image(struct wsi_swapchain *wsi_chain,
    struct wsi_switch_swapchain *chain =
       (struct wsi_switch_swapchain *)wsi_chain;
 
+   if (wsi_switch_swapchain_has_unknown_nwindow_ownership(chain))
+      return VK_ERROR_SURFACE_LOST_KHR;
+   if (chain->retired || !chain->owns_nwindow_buffers)
+      return VK_ERROR_OUT_OF_DATE_KHR;
+
    int32_t slot;
    NvMultiFence acquire_mf = { 0 };
 
    VkResult dq = wsi_switch_dequeue_buffer(chain->nw, info->timeout,
                                            &slot, &acquire_mf);
-   if (dq != VK_SUCCESS)
+   if (dq != VK_SUCCESS) {
+      if (dq == VK_ERROR_SURFACE_LOST_KHR)
+         wsi_switch_swapchain_mark_nwindow_unknown(chain);
       return dq;
+   }
 
    for (uint32_t i = 0; i < chain->base.image_count; i++) {
       if (chain->images[i].slot == slot) {
@@ -696,7 +880,11 @@ wsi_switch_swapchain_acquire_next_image(struct wsi_swapchain *wsi_chain,
       }
    }
 
-   nwindowCancelBuffer(chain->nw, slot, NULL);
+   Result rc = nwindowCancelBuffer(chain->nw, slot, NULL);
+   if (R_FAILED(rc)) {
+      wsi_switch_swapchain_mark_nwindow_unknown(chain);
+      return VK_ERROR_SURFACE_LOST_KHR;
+   }
    return VK_ERROR_OUT_OF_DATE_KHR;
 }
 
@@ -747,6 +935,11 @@ wsi_switch_swapchain_queue_present(struct wsi_swapchain *wsi_chain,
 
    assert(image_index < chain->base.image_count);
 
+   if (wsi_switch_swapchain_has_unknown_nwindow_ownership(chain))
+      return VK_ERROR_SURFACE_LOST_KHR;
+   if (chain->retired || !chain->owns_nwindow_buffers)
+      return VK_ERROR_OUT_OF_DATE_KHR;
+
    struct wsi_switch_image *img = &chain->images[image_index];
    VkFence vk_fence = chain->base.fences[image_index];
 
@@ -771,6 +964,7 @@ wsi_switch_swapchain_queue_present(struct wsi_swapchain *wsi_chain,
    Result rc = nwindowQueueBuffer(chain->nw, img->slot,
                                   have_multifence ? &mf : NULL);
    if (R_FAILED(rc)) {
+      wsi_switch_swapchain_mark_nwindow_unknown(chain);
       return VK_ERROR_SURFACE_LOST_KHR;
    }
 
@@ -785,6 +979,8 @@ wsi_switch_swap_interval_for_present_mode(VkPresentModeKHR mode)
    switch (mode) {
    case VK_PRESENT_MODE_FIFO_KHR:
       return 1;
+   case VK_PRESENT_MODE_IMMEDIATE_KHR:
+      return 0;
    default:
       return 1;
    }
@@ -794,6 +990,9 @@ static VkResult
 wsi_switch_swapchain_apply_present_mode(struct wsi_switch_swapchain *chain,
                                         VkPresentModeKHR mode)
 {
+   if (wsi_switch_swapchain_has_unknown_nwindow_ownership(chain))
+      return VK_ERROR_SURFACE_LOST_KHR;
+
    const uint32_t interval = wsi_switch_swap_interval_for_present_mode(mode);
    Result rc = nwindowSetSwapInterval(chain->nw, interval);
 
@@ -811,6 +1010,11 @@ wsi_switch_swapchain_set_present_mode(struct wsi_swapchain *wsi_chain,
    struct wsi_switch_swapchain *chain =
       (struct wsi_switch_swapchain *)wsi_chain;
 
+   if (chain->retired ||
+       wsi_switch_swapchain_has_unknown_nwindow_ownership(chain) ||
+       !chain->owns_nwindow_buffers)
+      return;
+
    (void)wsi_switch_swapchain_apply_present_mode(chain, mode);
 }
 
@@ -821,7 +1025,7 @@ wsi_switch_swapchain_destroy(struct wsi_swapchain *wsi_chain,
    struct wsi_switch_swapchain *chain =
       (struct wsi_switch_swapchain *)wsi_chain;
 
-   wsi_switch_swapchain_cancel_outstanding_images(chain);
+   bool released = wsi_switch_swapchain_cancel_outstanding_images(chain);
 
    /* Keep the scanout images alive until after the NWindow slots are released.
     * Horizon may still be scanning out the most recently queued buffer when
@@ -832,16 +1036,19 @@ wsi_switch_swapchain_destroy(struct wsi_swapchain *wsi_chain,
     * cancel/dequeue cleanup first, nwindowReleaseBuffers next, then drop the
     * backing resources once the window side has let go of them.
     */
-   wsi_switch_swapchain_close_nwindow_buffers(chain);
+   if (released)
+      released = wsi_switch_swapchain_close_nwindow_buffers(chain);
 
-   for (uint32_t i = 0; i < chain->base.image_count; i++)
-      wsi_switch_destroy_scanout_image(chain, &chain->images[i]);
+   if (released) {
+      for (uint32_t i = 0; i < chain->base.image_count; i++)
+         wsi_switch_destroy_scanout_image(chain, &chain->images[i]);
+   }
 
    wsi_swapchain_finish(&chain->base);
 
    vk_free(pAllocator, chain);
 
-   return VK_SUCCESS;
+   return released ? VK_SUCCESS : VK_ERROR_SURFACE_LOST_KHR;
 }
 
 static VkResult
@@ -853,12 +1060,40 @@ wsi_switch_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
                                     struct wsi_swapchain **swapchain_out)
 {
    VkIcdSurfaceVi *surface = (VkIcdSurfaceVi *)icd_surface;
+   NWindow *nw = (NWindow *)surface->window;
    struct wsi_switch_swapchain *chain;
    VkResult result;
 
    assert(pCreateInfo->sType == VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR);
 
-   uint32_t num_images = pCreateInfo->minImageCount;
+   /* A non-null oldSwapchain is retired even if creating its replacement
+    * fails.  NWindow has a single registration set, so release the old slots
+    * before configuring any replacement buffers.  The old VkImages remain
+    * alive until their swapchain is destroyed, but no longer own the NWindow
+    * registrations and cannot release the replacement set later.
+    */
+   if (pCreateInfo->oldSwapchain != VK_NULL_HANDLE) {
+      VK_FROM_HANDLE(wsi_switch_swapchain, old_chain,
+                     pCreateInfo->oldSwapchain);
+      old_chain->retired = true;
+      if (wsi_switch_nwindow_is_poisoned(old_chain->nw) ||
+          wsi_switch_nwindow_is_poisoned(nw))
+         return VK_ERROR_SURFACE_LOST_KHR;
+      if (!wsi_switch_swapchain_cancel_outstanding_images(old_chain) ||
+          !wsi_switch_swapchain_close_nwindow_buffers(old_chain))
+         return VK_ERROR_SURFACE_LOST_KHR;
+   }
+
+   /* Poison is sticky across DestroySwapchainKHR because that API is void.
+    * Never configure new slots on an NWindow whose ownership could not be
+    * proven released by an earlier swapchain. */
+   if (wsi_switch_nwindow_is_poisoned(nw))
+      return VK_ERROR_SURFACE_LOST_KHR;
+
+   const VkPresentModeKHR present_mode =
+      wsi_swapchain_get_present_mode(wsi_device, pCreateInfo);
+   /* Keep NWindow's slot count stable across FIFO/IMMEDIATE transitions. */
+   uint32_t num_images = MAX2(pCreateInfo->minImageCount, 3);
    if (num_images > 4)
       num_images = 4;
 
@@ -867,9 +1102,11 @@ wsi_switch_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
    if (chain == NULL)
       return VK_ERROR_OUT_OF_HOST_MEMORY;
 
-   chain->nw = (NWindow *)surface->window;
+   chain->nw = nw;
    chain->extent = pCreateInfo->imageExtent;
    chain->owns_nwindow_buffers = false;
+   chain->nwindow_ownership_unknown = false;
+   chain->retired = false;
 
    if (!wsi_switch_get_format_info(pCreateInfo->imageFormat,
                                    &chain->pixel_format,
@@ -904,7 +1141,7 @@ wsi_switch_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
    chain->base.release_images = wsi_switch_swapchain_release_images;
    chain->base.queue_present = wsi_switch_swapchain_queue_present;
    chain->base.set_present_mode = wsi_switch_swapchain_set_present_mode;
-   chain->base.present_mode = wsi_swapchain_get_present_mode(wsi_device, pCreateInfo);
+   chain->base.present_mode = present_mode;
    chain->base.image_count = num_images;
 
    for (uint32_t i = 0; i < chain->base.image_count; i++) {
@@ -919,6 +1156,12 @@ wsi_switch_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
       goto fail;
    }
 
+   if (wsi_switch_nwindow_is_poisoned(chain->nw)) {
+      wsi_switch_swapchain_mark_nwindow_unknown(chain);
+      result = VK_ERROR_SURFACE_LOST_KHR;
+      goto fail;
+   }
+
    Result rc = nwindowSetDimensions(chain->nw,
                                     pCreateInfo->imageExtent.width,
                                     pCreateInfo->imageExtent.height);
@@ -927,30 +1170,27 @@ wsi_switch_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
       goto fail;
    }
 
-   result = wsi_switch_swapchain_apply_present_mode(chain,
-                                                   chain->base.present_mode);
-   if (result != VK_SUCCESS)
-      goto fail;
-
    for (uint32_t i = 0; i < chain->base.image_count; i++) {
       result = wsi_switch_create_scanout_image(chain, pCreateInfo, i,
                                                &chain->images[i]);
-      if (result != VK_SUCCESS) {
-         for (uint32_t j = 0; j < i; j++)
-            wsi_switch_destroy_scanout_image(chain, &chain->images[j]);
-         nwindowReleaseBuffers(chain->nw);
+      if (result != VK_SUCCESS)
          goto fail;
-      }
    }
 
-   chain->owns_nwindow_buffers = true;
+   result = wsi_switch_swapchain_apply_present_mode(chain,
+                                                    chain->base.present_mode);
+   if (result != VK_SUCCESS)
+      goto fail;
 
    *swapchain_out = &chain->base;
 
    return VK_SUCCESS;
 
 fail:
-   wsi_switch_swapchain_destroy(&chain->base, pAllocator);
+   VkResult cleanup =
+      wsi_switch_swapchain_destroy(&chain->base, pAllocator);
+   if (cleanup != VK_SUCCESS)
+      return cleanup;
    return result;
 }
 

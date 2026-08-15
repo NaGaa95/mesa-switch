@@ -169,7 +169,8 @@ struct nvkmd_pdev {
 struct nvkmd_dev_ops {
    void (*destroy)(struct nvkmd_dev *dev);
 
-   uint64_t (*get_gpu_timestamp)(struct nvkmd_dev *dev);
+   VkResult (*get_gpu_timestamp)(struct nvkmd_dev *dev,
+                                 uint64_t *timestamp);
 
    int (*get_drm_fd)(struct nvkmd_dev *dev);
 
@@ -434,10 +435,10 @@ nvkmd_dev_destroy(struct nvkmd_dev *dev)
    dev->ops->destroy(dev);
 }
 
-static inline uint64_t
-nvkmd_dev_get_gpu_timestamp(struct nvkmd_dev *dev)
+static inline VkResult
+nvkmd_dev_get_gpu_timestamp(struct nvkmd_dev *dev, uint64_t *timestamp)
 {
-   return dev->ops->get_gpu_timestamp(dev);
+   return dev->ops->get_gpu_timestamp(dev, timestamp);
 }
 
 static inline int

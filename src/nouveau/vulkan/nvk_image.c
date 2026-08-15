@@ -1369,6 +1369,14 @@ nvk_get_image_memory_requirements(struct nvk_device *dev,
       align_B = image->image_align_B;
    }
 
+#ifdef __SWITCH__
+   /* Horizon binds memory at 64 KiB granularity.  Reporting the rounded size
+    * lets Vulkan suballocators pack small images into page-aligned slabs
+    * instead of consuming one NvMap object per image.
+    */
+   size_B = align64(size_B, align_B);
+#endif
+
    pMemoryRequirements->memoryRequirements.memoryTypeBits = memory_types;
    pMemoryRequirements->memoryRequirements.alignment = align_B;
    pMemoryRequirements->memoryRequirements.size = size_B;
@@ -1386,7 +1394,7 @@ nvk_get_image_memory_requirements(struct nvk_device *dev,
 #else
          /* No DRM format modifiers on Switch; struct vk_image has no
           * drm_format_mod field on this platform. */
-         if (image->can_compress) {
+         if (image->can_compress && size_B > (1u << 20)) {
 #endif
             /* We need dedicated allocations as compressed images have to be
              * pinned to VRAM due to nouveau, and we can't have a separate

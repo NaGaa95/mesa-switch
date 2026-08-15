@@ -74,7 +74,8 @@ struct kopper_swapchain {
 enum kopper_type {
    KOPPER_X11,
    KOPPER_WAYLAND,
-   KOPPER_WIN32
+   KOPPER_WIN32,
+   KOPPER_VI,
 };
 
 struct kopper_displaytarget
@@ -136,7 +137,8 @@ zink_kopper_last_present_eq(const struct kopper_displaytarget *cdt, uint32_t idx
 static inline bool
 zink_kopper_acquired(const struct kopper_displaytarget *cdt, uint32_t idx)
 {
-   return idx != UINT32_MAX && cdt->swapchain->images[idx].acquired;
+   return cdt->swapchain && idx != UINT32_MAX &&
+          cdt->swapchain->images[idx].acquired;
 }
 
 static inline struct pipe_screen * kopper_get_zink_screen(struct pipe_screen *screen)
@@ -176,6 +178,14 @@ void
 zink_kopper_deinit_displaytarget(struct zink_screen *screen, struct kopper_displaytarget *cdt);
 bool
 zink_kopper_update(struct pipe_screen *pscreen, struct pipe_resource *pres, int *w, int *h);
+bool
+zink_kopper_resize(struct pipe_screen *pscreen,
+                   struct pipe_resource *pres,
+                   struct pipe_resource *secondary,
+                   unsigned width, unsigned height);
+bool
+zink_kopper_finish_resize(struct pipe_screen *pscreen,
+                          struct pipe_resource *pres);
 bool
 zink_kopper_is_cpu(const struct pipe_screen *pscreen);
 void

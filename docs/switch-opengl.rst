@@ -55,6 +55,26 @@ The installed CMake packages export ``OpenGL::GL``, ``OpenGL::EGL``,
 ``Vulkan::Vulkan``.  The Vulkan archive is loaderless and is linked directly
 by the application.
 
+The unified SDK also embeds Zink in ``libEGL``.  It calls the loaderless NVK
+entrypoints directly, so no Vulkan loader or second driver package is needed.
+NVC0 remains the default OpenGL backend.  Select Zink before
+``eglInitialize`` with either:
+
+.. code-block:: sh
+
+   MESA_SWITCH_GL_DRIVER=zink
+   MESA_LOADER_DRIVER_OVERRIDE=zink
+
+``MESA_SWITCH_GL_DRIVER=nvc0`` explicitly selects the native Gallium driver.
+One EGL display uses one backend for its lifetime.  Zink supports NWindow and
+pbuffer surfaces through VI_NN/Kopper, including swap intervals zero and one
+and ``EGL_MESA_horizon_surface_resize``.  Explicit Vulkan and either OpenGL
+backend may coexist in the same process through the shared Horizon runtime.
+
+Switch Vulkan WSI supports ``FIFO`` and ``IMMEDIATE`` presentation.  Immediate
+swapchains use at least three NWindow buffers and swap interval zero.  NVK
+calibrated device timestamps use Horizon's GPU timestamp query.
+
 Runtime policy
 --------------
 

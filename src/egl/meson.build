@@ -16,6 +16,7 @@ if with_platform_windows
 endif
 deps_for_egl = []
 switch_egl_private_libs = []
+switch_egl_private_reqs = []
 incs_for_egl = [inc_include, inc_src, inc_egl]
 objs_for_egl = []
 
@@ -152,6 +153,13 @@ elif with_platform_haiku
   link_for_egl += [libmesa, libgallium, libswhgl, libsthgl, libglapi]
   deps_for_egl += [cpp.find_library('be'), driver_swrast]
 elif with_platform_switch
+  if not with_gallium_nouveau
+    error('Switch EGL requires the nouveau Gallium driver')
+  endif
+  if with_gallium_zink and not with_nouveau_vk
+    error('Switch EGL Zink support requires the nouveau Vulkan driver')
+  endif
+
   incs_for_egl += [inc_gallium, inc_gallium_aux, inc_gallium_winsys, inc_mesa]
   files_egl += sha1_h
   files_egl += files('drivers/switch/egl_switch.c')
@@ -175,6 +183,11 @@ elif with_platform_switch
     blake3.extract_all_objects(recursive : false),
     _libxmlconfig.extract_all_objects(recursive : false)
   ]
+  if with_gallium_zink
+    c_args_for_egl += '-DHAVE_SWITCH_ZINK'
+    objs_for_egl += libzink.extract_all_objects(recursive : false)
+    switch_egl_private_reqs += 'vulkan'
+  endif
   deps_for_egl += [dep_zstd]
   switch_egl_private_libs += [
     '-lexpat', '-lstdc++', '-lnx'
@@ -282,7 +295,7 @@ else
     version : meson.project_version(),
     libraries : libegl,
     libraries_private: [gl_priv_libs, switch_egl_private_libs],
-    requires_private : gl_priv_reqs,
+    requires_private : [gl_priv_reqs, switch_egl_private_reqs],
     extra_cflags : gl_pkgconfig_c_flags,
   )
 endif

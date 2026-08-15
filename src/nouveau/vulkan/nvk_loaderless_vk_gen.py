@@ -99,6 +99,26 @@ vk${e.name}(${e.decl_params() if e.decl_params() else 'void'});
 
 % endfor
 
+/* Keep driver-private aliases for static consumers which define vk* symbols
+ * of their own.  The public wrappers remain the normal SDK entrypoints. */
+PUBLIC VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
+nvk_loaderless_GetInstanceProcAddr(VkInstance instance, const char *pName);
+
+PUBLIC VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
+nvk_loaderless_GetDeviceProcAddr(VkDevice device, const char *pName);
+
+PUBLIC VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
+nvk_loaderless_GetInstanceProcAddr(VkInstance instance, const char *pName)
+{
+   return vkGetInstanceProcAddr(instance, pName);
+}
+
+PUBLIC VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
+nvk_loaderless_GetDeviceProcAddr(VkDevice device, const char *pName)
+{
+   return vkGetDeviceProcAddr(device, pName);
+}
+
 static PFN_vkVoidFunction
 nvk_loaderless_lookup_public_proc(const char *pName)
 {

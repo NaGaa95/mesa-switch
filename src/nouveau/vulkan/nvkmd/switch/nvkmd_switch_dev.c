@@ -5,7 +5,6 @@
 
 #include "nvkmd_switch.h"
 
-#include "util/os_time.h"
 #include "util/stack_array.h"
 #include "util/u_debug.h"
 #include "util/u_math.h"
@@ -675,13 +674,17 @@ nvkmd_switch_dev_destroy(struct nvkmd_dev *_dev)
    FREE(dev);
 }
 
-static uint64_t
-nvkmd_switch_dev_get_gpu_timestamp(struct nvkmd_dev *_dev)
+static VkResult
+nvkmd_switch_dev_get_gpu_timestamp(struct nvkmd_dev *_dev,
+                                   uint64_t *timestamp)
 {
-   /* libnx does not expose PTIMER.  Both PTIMER and this monotonic clock are
-    * nanosecond-rate clocks, so calibrated consumers cancel the origin.
-    */
-   return os_time_get_nano();
+   uint64_t gpu_timestamp;
+   Result rc = nvGpuGetTimestamp(&gpu_timestamp);
+   if (R_FAILED(rc))
+      return VK_ERROR_DEVICE_LOST;
+
+   *timestamp = gpu_timestamp;
+   return VK_SUCCESS;
 }
 
 static int

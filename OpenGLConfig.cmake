@@ -19,6 +19,13 @@ find_library(_OPENGL_mesa_util_simd_LIBRARY mesa_util_simd
 	PATHS "${_OPENGL_SWITCH_LIBDIR}" NO_DEFAULT_PATH)
 find_library(_OPENGL_xmlconfig_LIBRARY xmlconfig
 	PATHS "${_OPENGL_SWITCH_LIBDIR}" NO_DEFAULT_PATH)
+if(DEFINED OPENGL_SWITCH_VULKAN_LIBRARY)
+	set(_OPENGL_vulkan_LIBRARY "${OPENGL_SWITCH_VULKAN_LIBRARY}")
+else()
+	find_library(_OPENGL_vulkan_LIBRARY vulkan
+		PATHS "${_OPENGL_SWITCH_LIBDIR}" NO_DEFAULT_PATH)
+endif()
+find_library(_OPENGL_elf_LIBRARY elf)
 find_library(_OPENGL_expat_LIBRARY expat)
 find_library(OPENGL_gles1_LIBRARY GLESv1_CM
 	PATHS "${_OPENGL_SWITCH_LIBDIR}" NO_DEFAULT_PATH)
@@ -37,14 +44,18 @@ find_path(_OPENGL_gles2_INCLUDE_DIR NAMES GLES2/gl2.h
 	PATHS "${_OPENGL_SWITCH_INCLUDEDIR}" NO_DEFAULT_PATH)
 
 include(FindPackageHandleStandardArgs)
+set(_OPENGL_SWITCH_REQUIRED_VARS
+    OPENGL_gl_LIBRARY OPENGL_egl_LIBRARY _OPENGL_glapi_LIBRARY
+    _OPENGL_mesa_util_c11_LIBRARY _OPENGL_blake3_LIBRARY
+    _OPENGL_mesa_util_LIBRARY _OPENGL_mesa_util_simd_LIBRARY
+    _OPENGL_xmlconfig_LIBRARY _OPENGL_expat_LIBRARY
+    _OPENGL_zstd_LIBRARY _OPENGL_z_LIBRARY _OPENGL_nx_LIBRARY
+    _OPENGL_gl_gl_INCLUDE_DIR _OPENGL_gl_egl_INCLUDE_DIR)
+if(_OPENGL_vulkan_LIBRARY)
+    list(APPEND _OPENGL_SWITCH_REQUIRED_VARS _OPENGL_elf_LIBRARY)
+endif()
 find_package_handle_standard_args(OpenGL
-	REQUIRED_VARS OPENGL_gl_LIBRARY OPENGL_egl_LIBRARY _OPENGL_glapi_LIBRARY
-		_OPENGL_mesa_util_c11_LIBRARY _OPENGL_blake3_LIBRARY
-		_OPENGL_mesa_util_LIBRARY _OPENGL_mesa_util_simd_LIBRARY
-		_OPENGL_xmlconfig_LIBRARY
-		_OPENGL_expat_LIBRARY
-		_OPENGL_zstd_LIBRARY _OPENGL_z_LIBRARY
-		_OPENGL_nx_LIBRARY _OPENGL_gl_gl_INCLUDE_DIR _OPENGL_gl_egl_INCLUDE_DIR
+	REQUIRED_VARS ${_OPENGL_SWITCH_REQUIRED_VARS}
 )
 
 set(OPENGL_FOUND ${OpenGL_FOUND})
@@ -70,6 +81,16 @@ set(_OPENGL_SWITCH_LIBRARIES
 	m
 )
 
+# Unified Switch SDKs embed Zink in libEGL and resolve its Vulkan entrypoints
+# from the loaderless NVK archive.  Keep the libraries optional so the same
+# package file remains usable with legacy NVC0-only SDK installations.
+set(_OPENGL_SWITCH_ZINK_LIBRARIES)
+if(_OPENGL_vulkan_LIBRARY)
+	list(APPEND _OPENGL_SWITCH_ZINK_LIBRARIES
+		${_OPENGL_vulkan_LIBRARY}
+		${_OPENGL_elf_LIBRARY})
+endif()
+
 if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.24" AND
    NOT DEFINED CMAKE_LINK_GROUP_USING_RESCAN_SUPPORTED)
 	# devkitPro's NintendoSwitch platform uses GNU ld but does not define
@@ -92,9 +113,11 @@ function(_opengl_switch_make_rescan_group output)
 endfunction()
 
 _opengl_switch_make_rescan_group(_OPENGL_SWITCH_EGL_LINK
-	${OPENGL_egl_LIBRARY} ${_OPENGL_SWITCH_LIBRARIES})
+	${OPENGL_egl_LIBRARY} ${_OPENGL_SWITCH_ZINK_LIBRARIES}
+	${_OPENGL_SWITCH_LIBRARIES})
 _opengl_switch_make_rescan_group(_OPENGL_SWITCH_GL_LINK
 	${OPENGL_gl_LIBRARY} ${OPENGL_egl_LIBRARY}
+	${_OPENGL_SWITCH_ZINK_LIBRARIES}
 	${_OPENGL_SWITCH_LIBRARIES})
 _opengl_switch_make_rescan_group(_OPENGL_SWITCH_GLES1_LINK
 	${OPENGL_gles1_LIBRARY} ${_OPENGL_SWITCH_LIBRARIES})

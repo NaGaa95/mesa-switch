@@ -283,6 +283,9 @@ zink_get_device_reset_status(struct pipe_context *pctx)
 {
    struct zink_context *ctx = zink_context(pctx);
 
+   if (zink_screen(pctx->screen)->device_lost)
+      ctx->is_device_lost = true;
+
    enum pipe_reset_status status = PIPE_NO_RESET;
 
    if (ctx->is_device_lost) {

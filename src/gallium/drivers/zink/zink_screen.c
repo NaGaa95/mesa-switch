@@ -38,7 +38,9 @@
 #include "nir_to_spirv/nir_to_spirv.h" // for SPIRV_VERSION
 
 #include "util/u_debug.h"
+#if !DETECT_OS_SWITCH
 #include "util/u_dl.h"
+#endif
 #include "util/os_file.h"
 #include "util/u_memory.h"
 #include "util/u_screen.h"
@@ -65,7 +67,17 @@
 static int num_screens = 0;
 bool zink_tracing = false;
 
-#if DETECT_OS_WINDOWS
+#if DETECT_OS_SWITCH
+#if !defined(HAVE_SWITCH_PLATFORM) || !defined(HAVE_NVK)
+#error "Switch Zink requires the Horizon Vulkan platform and NVK"
+#endif
+
+extern VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
+nvk_loaderless_GetInstanceProcAddr(VkInstance instance, const char *pName);
+
+extern VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
+nvk_loaderless_GetDeviceProcAddr(VkDevice device, const char *pName);
+#elif DETECT_OS_WINDOWS
 #include <io.h>
 #define VK_LIBNAME "vulkan-1.dll"
 #else
@@ -1676,8 +1688,10 @@ zink_destroy_screen(struct pipe_screen *pscreen)
 
    util_idalloc_mt_fini(&screen->buffer_ids);
 
+#if !DETECT_OS_SWITCH
    if (screen->loader_lib)
       util_dl_close(screen->loader_lib);
+#endif
 
 #ifdef HAVE_LIBDRM
    if (screen->ro)
@@ -3422,6 +3436,10 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
 
    u_trace_state_init();
 
+#if DETECT_OS_SWITCH
+   screen->vk_GetInstanceProcAddr = nvk_loaderless_GetInstanceProcAddr;
+   screen->vk_GetDeviceProcAddr = nvk_loaderless_GetDeviceProcAddr;
+#else
    screen->loader_lib = util_dl_open(VK_LIBNAME);
    if (!screen->loader_lib) {
       if (!screen->driver_name_is_inferred)
@@ -3437,6 +3455,7 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
          mesa_loge("ZINK: failed to get proc address");
       goto fail;
    }
+#endif
 
    if (config) {
       driParseConfigFiles(config->options, config->options_info,
@@ -3860,10 +3879,10 @@ struct pipe_screen *
 zink_create_screen(struct sw_winsys *winsys, const struct pipe_screen_config *config)
 {
    struct zink_screen *ret = zink_internal_create_screen(config, -1, -1, 0);
-   if (ret) {
-      ret->drm_fd = -1;
-   }
+   if (!ret)
+      return NULL;
 
+   ret->drm_fd = -1;
    return &ret->base;
 }
 
