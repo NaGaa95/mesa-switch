@@ -309,11 +309,21 @@ nvc0_clear_render_target(struct pipe_context *pipe,
 {
    struct nvc0_context *nvc0 = nvc0_context(pipe);
    struct nouveau_pushbuf *push = nvc0->base.pushbuf;
-   struct nv50_surface *sf = nv50_surface(dst);
-   struct nv04_resource *res = nv04_resource(sf->base.texture);
+   struct pipe_surface *driver_surface;
+   struct nv50_surface *sf;
+   struct nv04_resource *res;
    unsigned z;
 
    assert(dst->texture->target != PIPE_BUFFER);
+
+   /* util_clear_render_target() passes a public pipe_surface template.  The
+    * Nouveau emitter needs its private offset and dimensions, so materialize
+    * a real driver surface before using nv50_surface(). */
+   driver_surface = nvc0_miptree_surface_new(pipe, dst->texture, dst);
+   if (!driver_surface)
+      return;
+   sf = nv50_surface(driver_surface);
+   res = nv04_resource(sf->base.texture);
 
 #ifdef __SWITCH__
    /* Horizon uses one screen-owned pushbuf.  Direct clear callbacks bypass
@@ -402,6 +412,7 @@ out:
 #ifdef __SWITCH__
    nvc0_screen_state_unlock(nvc0->screen);
 #endif
+   nv50_surface_destroy(pipe, driver_surface);
 }
 
 static void
@@ -686,12 +697,20 @@ nvc0_clear_depth_stencil(struct pipe_context *pipe,
    struct nvc0_context *nvc0 = nvc0_context(pipe);
    struct nouveau_pushbuf *push = nvc0->base.pushbuf;
    struct nv50_miptree *mt = nv50_miptree(dst->texture);
-   struct nv50_surface *sf = nv50_surface(dst);
+   struct pipe_surface *driver_surface;
+   struct nv50_surface *sf;
    uint32_t mode = 0;
    int unk = mt->base.base.target == PIPE_TEXTURE_2D;
    unsigned z;
 
    assert(dst->texture->target != PIPE_BUFFER);
+
+   /* See nvc0_clear_render_target(): direct clear callbacks receive only the
+    * public surface template and must materialize Nouveau's private layout. */
+   driver_surface = nvc0_miptree_surface_new(pipe, dst->texture, dst);
+   if (!driver_surface)
+      return;
+   sf = nv50_surface(driver_surface);
 
 #ifdef __SWITCH__
    nvc0_screen_state_lock(nvc0->screen);
@@ -759,6 +778,7 @@ out:
 #ifdef __SWITCH__
    nvc0_screen_state_unlock(nvc0->screen);
 #endif
+   nv50_surface_destroy(pipe, driver_surface);
 }
 
 void
