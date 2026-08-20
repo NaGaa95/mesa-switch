@@ -1132,6 +1132,16 @@ nvk_image_init(struct nvk_device *dev,
 
       image->stencil_copy_temp.plane_align_B =
          image->stencil_copy_temp.nil.align_B;
+
+      /* The stencil copy temp is bound through nvk_image_plane_bind like the
+       * main planes, so its memory offset and bind range must satisfy the
+       * kernel bind granularity.
+       */
+      if (image->stencil_copy_temp.nil.pte_kind) {
+         image->stencil_copy_temp.plane_align_B =
+            MAX2(image->stencil_copy_temp.plane_align_B,
+                 pdev->nvkmd->bind_align_B);
+      }
    }
 
    uint64_t plane_offset_B = 0;
