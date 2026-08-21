@@ -92,7 +92,8 @@ nouveau_buffer_allocate(struct nouveau_screen *screen,
       if (buf->base.flags & PIPE_RESOURCE_FLAG_MAP_COHERENT) {
          const int ret = nouveau_bo_new(
             screen->device,
-            NOUVEAU_BO_GART | NOUVEAU_BO_MAP | NOUVEAU_BO_COHERENT,
+            NOUVEAU_BO_GART | NOUVEAU_BO_MAP | NOUVEAU_BO_COHERENT |
+            NOUVEAU_BO_SWITCH_GPU_CACHED,
             0x1000, size, NULL, &buf->bo);
          if (ret)
             return false;
@@ -1061,9 +1062,10 @@ nouveau_scratch_bo_alloc(struct nouveau_context *nv, struct nouveau_bo **pbo,
     * validation split could consume the dirty bit before translation had
     * finished.  Uncached coherent storage matches the Switch command/query
     * upload model: CPU writes are immediately GPU-visible and no cache-range
-    * publication is required.
+    * publication is required.  Keep the GPU mapping cached; the GM20B L2
+    * sysmem acquire at the head of every submission covers it.
     */
-   flags |= NOUVEAU_BO_COHERENT;
+   flags |= NOUVEAU_BO_COHERENT | NOUVEAU_BO_SWITCH_GPU_CACHED;
 #endif
 
    return nouveau_bo_new(nv->screen->device, flags, 4096, size, NULL, pbo);
