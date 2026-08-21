@@ -476,14 +476,21 @@ _nouveau_fence_wait(struct nouveau_fence *fence,
       return false;
    }
 
-   /* Native completion orders the query write.  Allow a few scheduler yields
-    * for its CPU mapping to become visible, without an unbounded busy loop.
+   /* Native completion orders the query write, so the sequence word is due
+    * momentarily.  Give it a bounded settle window rather than a fixed
+    * number of scheduler yields: a false failure here propagates to
+    * glFinish/glClientWaitSync as an error and quarantine-leaks the screen
+    * at teardown, which is far worse than a short wait.
     */
-   for (uint32_t poll = 0; poll < 64; poll++) {
+   const int64_t settle_deadline_ns =
+      os_time_get_nano() + 10 * 1000 * 1000;
+   for (;;) {
       _nouveau_fence_update(screen, false);
       if (fence->state == NOUVEAU_FENCE_STATE_SIGNALLED)
          goto wait_complete;
-      svcSleepThread(0);
+      if (os_time_get_nano() >= settle_deadline_ns)
+         break;
+      svcSleepThread(10 * 1000);
    }
 
    _debug_printf("nouveau/switch: native fence completed but Gallium fence "

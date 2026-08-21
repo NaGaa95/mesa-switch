@@ -85,9 +85,13 @@ nvc0_switch_zbc_update(struct nvc0_screen *screen,
                     NVB197_SET_COLOR_ZERO_BANDWIDTH_CLEAR + 4,
                  "GM20B color/depth ZBC methods must be consecutive");
 
+   /* GM20B binds the Maxwell B 3D class (0xb197); the NVB197_* ZBC methods
+    * below belong to it.  Gating on the Maxwell A class made this whole
+    * update path unreachable on the only supported chip.
+    */
    if (screen == NULL || push == NULL || generation == NULL ||
        screen->eng3d == NULL ||
-       screen->eng3d->oclass != GM107_3D_CLASS)
+       screen->eng3d->oclass != GM200_3D_CLASS)
       return true;
 
    struct nouveau_horizon_device *hdev =
