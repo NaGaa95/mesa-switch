@@ -138,9 +138,14 @@ wsi_switch_surface_get_capabilities(VkIcdSurfaceBase *icd_surface,
    if (nw && nwindowIsValid(nw))
       nwindowGetDimensions(nw, &width, &height);
 
-   /* libnx supports up to 4 buffers per NWindow. */
-   caps->minImageCount = 2;
-   caps->maxImageCount = 4;
+   /* libnx's NWindow holds at most one dequeued slot at a time, so this
+    * backend can only ever grant one concurrent acquire.  The spec lets an
+    * application acquire imageCount - minImageCount + 1 images without
+    * waiting for a present; the only way to make that equal 1 is to pin the
+    * image count.  Triple buffering matches libnx/deko3d defaults.
+    */
+   caps->minImageCount = 3;
+   caps->maxImageCount = 3;
 
    caps->currentExtent = (VkExtent2D) { width, height };
    caps->minImageExtent = (VkExtent2D) { 1, 1 };
@@ -181,12 +186,11 @@ wsi_switch_surface_get_capabilities2(VkIcdSurfaceBase *surface,
       wsi_switch_surface_get_capabilities(surface, wsi_device,
                                           &caps->surfaceCapabilities);
 
-   /* libnx only honors swap interval 0 when at least three NWindow buffers
-    * are configured.
+   /* The base capabilities pin the image count at 3, which also satisfies
+    * libnx's requirement of at least three NWindow buffers for swap
+    * interval 0 (IMMEDIATE).
     */
-   if (present_mode &&
-       present_mode->presentMode == VK_PRESENT_MODE_IMMEDIATE_KHR)
-      caps->surfaceCapabilities.minImageCount = 3;
+   (void)present_mode;
 
    vk_foreach_struct(ext, caps->pNext) {
       switch (ext->sType) {
@@ -760,9 +764,20 @@ wsi_switch_dequeue_buffer(NWindow *nw, uint64_t timeout_ns,
 {
    mutexLock(&nw->mutex);
 
-   if (!nw->slots_configured || nw->cur_slot >= 0) {
+   if (!nw->slots_configured) {
       mutexUnlock(&nw->mutex);
       return VK_ERROR_OUT_OF_DATE_KHR;
+   }
+
+   /* NWindow tracks a single dequeued slot.  A second concurrent acquire is
+    * an application forward-progress violation with our pinned image count;
+    * report it as not-ready/timeout rather than OUT_OF_DATE, which would
+    * send well-behaved recovery paths into an endless swapchain-recreate
+    * loop.
+    */
+   if (nw->cur_slot >= 0) {
+      mutexUnlock(&nw->mutex);
+      return timeout_ns == 0 ? VK_NOT_READY : VK_TIMEOUT;
    }
 
    const bool infinite = timeout_ns == UINT64_MAX;
@@ -1092,10 +1107,14 @@ wsi_switch_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
 
    const VkPresentModeKHR present_mode =
       wsi_swapchain_get_present_mode(wsi_device, pCreateInfo);
-   /* Keep NWindow's slot count stable across FIFO/IMMEDIATE transitions. */
-   uint32_t num_images = MAX2(pCreateInfo->minImageCount, 3);
-   if (num_images > 4)
-      num_images = 4;
+   /* The surface capabilities pin min == max == 3 so that the spec's
+    * imageCount - minImageCount + 1 concurrent-acquire allowance equals the
+    * single slot NWindow can hold; ignore out-of-range requests instead of
+    * honoring an image count whose acquire contract we cannot serve.  A
+    * fixed count also keeps NWindow's slots stable across FIFO/IMMEDIATE
+    * transitions.
+    */
+   const uint32_t num_images = 3;
 
    size_t size = sizeof(*chain) + num_images * sizeof(chain->images[0]);
    chain = vk_zalloc(pAllocator, size, 8, VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);

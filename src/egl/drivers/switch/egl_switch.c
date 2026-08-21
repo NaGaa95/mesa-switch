@@ -2290,6 +2290,56 @@ switch_get_proc_address(const char *procname)
     return _mesa_glapi_get_proc_address(procname);
 }
 
+/* eglWaitClient / eglWaitGL: finish all client API rendering for the
+ * current context.  eglapi.c calls this hook unconditionally after
+ * validation, so it must exist even though native rendering never overlaps
+ * EGL surfaces on Horizon.
+ */
+static EGLBoolean
+switch_wait_client(_EGLDisplay *disp, _EGLContext *ctx)
+{
+    struct switch_egl_context *context = switch_egl_context(ctx);
+
+    (void)disp;
+    if (!context || !context->st)
+        return EGL_TRUE;
+
+    _mesa_glthread_finish(context->st->ctx);
+
+    struct pipe_fence_handle *fence = NULL;
+    st_context_flush(context->st, ST_FLUSH_END_OF_FRAME, &fence, NULL, NULL);
+    if (fence) {
+        context->st->screen->fence_finish(context->st->screen,
+                                          context->st->pipe, fence,
+                                          UINT64_MAX);
+        context->st->screen->fence_reference(context->st->screen,
+                                             &fence, NULL);
+    }
+    return EGL_TRUE;
+}
+
+static EGLBoolean
+switch_wait_native(EGLint engine)
+{
+    if (engine != EGL_CORE_NATIVE_ENGINE)
+        return _eglError(EGL_BAD_PARAMETER, "eglWaitNative");
+
+    /* No native rendering engine draws into EGL surfaces on Horizon. */
+    return EGL_TRUE;
+}
+
+static EGLBoolean
+switch_copy_buffers(_EGLDisplay *disp, _EGLSurface *surface,
+                    void *native_pixmap_target)
+{
+    (void)disp;
+    (void)surface;
+    (void)native_pixmap_target;
+
+    /* Horizon has no native pixmap type. */
+    return _eglError(EGL_BAD_NATIVE_PIXMAP, "eglCopyBuffers");
+}
+
 
 /**
  * This is the main entrypoint into the driver, referenced by libEGL.
@@ -2307,5 +2357,8 @@ const _EGLDriver _eglDriver = {
     .ResizeSurfaceMESA = switch_resize_surface,
     .SwapInterval = switch_swap_interval,
     .SwapBuffers = switch_swap_buffers,
+    .WaitClient = switch_wait_client,
+    .WaitNative = switch_wait_native,
+    .CopyBuffers = switch_copy_buffers,
 
 };
