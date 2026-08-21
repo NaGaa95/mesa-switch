@@ -475,6 +475,25 @@ nvk_cmd_buffer_switch_sync_host(struct nvk_cmd_buffer *cmd)
 
    cmd->switch_mme_sync_pending = false;
 
+   /* Re-arm the semaphore word from the host on every execution.  The word
+    * lives in this command buffer's upload stream, so the record-time zero
+    * above covers only the first submission; on a re-submitted command
+    * buffer the word still holds 1 from the previous pass and the acquire
+    * below would complete before the engine release retires.  RELEASE_WFI
+    * is disabled so this stays a plain in-order PBDMA store, not a channel
+    * wait-for-idle.
+    */
+   struct nv_push *p = nvk_cmd_buffer_push(cmd, 5);
+   __push_mthd(p, SUBC_NV9097, NV906F_SEMAPHOREA);
+   P_NV906F_SEMAPHOREA(p, addr >> 32);
+   P_NV906F_SEMAPHOREB(p, (addr & UINT32_MAX) >> 2);
+   P_NV906F_SEMAPHOREC(p, 0);
+   P_NV906F_SEMAPHORED(p, {
+      .operation = OPERATION_RELEASE,
+      .release_wfi = RELEASE_WFI_DIS,
+      .release_size = RELEASE_SIZE_4BYTE,
+   });
+
    /* Use a semaphore release/acquire pair followed by a GPFIFO
     * sync/no-prefetch split.  This avoids the channel host-WFI from
     * SET_REFERENCE while still stopping host prefetch before later indirect
@@ -482,7 +501,7 @@ nvk_cmd_buffer_switch_sync_host(struct nvk_cmd_buffer *cmd)
     */
    nvk_cmd_buffer_switch_report_semaphore(cmd, addr, 1);
 
-   struct nv_push *p = nvk_cmd_buffer_push(cmd, 5);
+   p = nvk_cmd_buffer_push(cmd, 5);
    __push_mthd(p, SUBC_NV9097, NV906F_SEMAPHOREA);
    P_NV906F_SEMAPHOREA(p, addr >> 32);
    P_NV906F_SEMAPHOREB(p, (addr & UINT32_MAX) >> 2);
