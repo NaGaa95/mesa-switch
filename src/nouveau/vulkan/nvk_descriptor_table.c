@@ -114,6 +114,32 @@ nvk_descriptor_table_map_locked(struct nvk_descriptor_table *table,
                                               table->desc_size);
 }
 
+/* Descriptor tables are written by the CPU and only ever read by the GPU.
+ * On non-coherent memory, publish each slot as soon as it changes rather
+ * than only at the next submit: the GPU may still be reading a slot that is
+ * being cleared or reused, and a deferred clean would leave the previous
+ * descriptor, and the image address it carries, visible to that work.
+ */
+static void
+nvk_descriptor_table_publish_locked(struct nvk_descriptor_table *table,
+                                    uint32_t index)
+{
+   struct nvk_mem_arena *arena = &table->arena;
+   const uint64_t offset_B = (uint64_t)index * table->desc_size;
+   const uint32_t mem_idx =
+      nvk_contiguous_mem_arena_find_mem_by_offset(arena, offset_B);
+   const uint64_t mem_offset_B =
+      offset_B - nvk_contiguous_mem_arena_mem_offset_B(mem_idx);
+   struct nvkmd_mem *mem = arena->mem[mem_idx].mem;
+   const uint32_t atom_size_B = mem->dev->pdev->dev_info.nc_atom_size_B;
+   const uint64_t start_B = ROUND_DOWN_TO(mem_offset_B, atom_size_B);
+   const uint64_t end_B =
+      MIN2(align(mem_offset_B + table->desc_size, atom_size_B), mem->size_B);
+
+   if (end_B > start_B)
+      nvkmd_mem_sync_map_to_gpu(mem, start_B, end_B - start_B);
+}
+
 static void
 nvk_descriptor_table_write_locked(struct nvk_descriptor_table *table,
                                   uint32_t index,
@@ -124,6 +150,7 @@ nvk_descriptor_table_write_locked(struct nvk_descriptor_table *table,
    assert(desc_size == table->desc_size);
    memcpy(map, desc_data, table->desc_size);
    nvk_mem_arena_set_map_dirty(&table->arena);
+   nvk_descriptor_table_publish_locked(table, index);
 }
 
 static void
@@ -134,6 +161,7 @@ nvk_descriptor_table_clear_locked(struct nvk_descriptor_table *table,
 
    memset(map, 0, table->desc_size);
    nvk_mem_arena_set_map_dirty(&table->arena);
+   nvk_descriptor_table_publish_locked(table, index);
 }
 
 static VkResult
