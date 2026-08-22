@@ -17,18 +17,6 @@
 #define NOUVEAU_HORIZON_MEMORY_IDENTITY_FLAGS                              \
    NOUVEAU_HORIZON_MEMORY_GPU_CACHED
 
-static bool
-nouveau_horizon_memory_set_cpu_uncached(void *addr, uint64_t size_B,
-                                        bool uncached)
-{
-   if (uncached)
-      armDCacheFlush(addr, (size_t)size_B);
-
-   return R_SUCCEEDED(svcSetMemoryAttribute(
-      addr, size_B, MemAttr_IsUncached,
-      uncached ? MemAttr_IsUncached : 0));
-}
-
 static void
 nouveau_horizon_memory_record_create_call(
    struct nouveau_horizon_device *device)
@@ -311,26 +299,12 @@ nouveau_horizon_memory_create(
     */
    memset(identity->cpu_addr, 0, (size_t)size_B);
 
-   const bool requested_cpu_cacheable =
+   const bool cpu_cacheable =
       (create_info->flags & NOUVEAU_HORIZON_MEMORY_CPU_CACHED) != 0;
-
-   /* The Horizon NVK paths do not cover every CPU write with explicit cache
-    * maintenance.  Keep their CPU aliases uncached while retaining GPU
-    * caching.  Coherent allocations must enter that state before NvMap is
-    * registered because the common NVK layer never flushes them. */
-   if (!requested_cpu_cacheable &&
-       !nouveau_horizon_memory_set_cpu_uncached(identity->cpu_addr,
-                                                 size_B, true)) {
-      nouveau_horizon_memory_record_create_failure(device);
-      free(identity->cpu_addr);
-      FREE(identity);
-      return NOUVEAU_HORIZON_ERROR_SYSTEM;
-   }
-
    Result rc = nvMapCreate(&identity->map, identity->cpu_addr,
                            (uint32_t)size_B, (uint32_t)align_B,
                            (NvKind)create_info->backing_kind,
-                           false);
+                           cpu_cacheable);
    if (R_FAILED(rc)) {
       nouveau_horizon_memory_record_create_failure(device);
       struct nouveau_horizon_device_debug_stats stats = {0};
@@ -350,14 +324,14 @@ nouveau_horizon_memory_create(
                            (unsigned long long)stats.mappings_live,
                            (unsigned long long)stats.mappings_peak,
                            (unsigned long long)stats.memory_create_failures);
-      if (!requested_cpu_cacheable)
-         nouveau_horizon_memory_set_cpu_uncached(identity->cpu_addr,
-                                                  size_B, false);
       free(identity->cpu_addr);
       FREE(identity);
       return nouveau_horizon_status_from_result(
          rc, NOUVEAU_HORIZON_ERROR_OUT_OF_DEVICE_MEMORY);
    }
+
+   if (cpu_cacheable)
+      armDCacheClean(identity->cpu_addr, (size_t)size_B);
 
    identity->runtime = device->runtime;
    identity->refcnt = 1;
