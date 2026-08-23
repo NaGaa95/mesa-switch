@@ -237,7 +237,6 @@ if host_machine.system() == 'horizon'
     libnouveau_horizon,
     libvulkan_lite_runtime,
     libvulkan_runtime,
-    libvulkan_lite_instance,
     libvulkan_instance,
     libvulkan_util,
     libvulkan_wsi,
