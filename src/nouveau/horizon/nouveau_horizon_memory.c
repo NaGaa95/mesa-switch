@@ -6,6 +6,7 @@
 #include "nouveau_horizon_private.h"
 
 #include "util/u_atomic.h"
+#include "util/u_debug.h"
 #include "util/u_math.h"
 #include "util/u_memory.h"
 #include "util/os_time.h"
@@ -13,6 +14,12 @@
 #include <assert.h>
 #include <malloc.h>
 #include <string.h>
+
+/* Defined with the backing-store cache below; the identity release path
+ * needs it first. */
+static bool
+nouveau_horizon_bo_cache_put(struct nouveau_horizon_device *device,
+                             struct nouveau_horizon_memory_identity *identity);
 
 #define NOUVEAU_HORIZON_MEMORY_IDENTITY_FLAGS                              \
    NOUVEAU_HORIZON_MEMORY_GPU_CACHED
@@ -26,7 +33,27 @@ nouveau_horizon_memory_record_create_call(
 
    simple_mtx_lock(&device->debug_stats_mutex);
    device->debug_stats.memory_create_calls++;
+   const uint64_t calls = device->debug_stats.memory_create_calls;
    simple_mtx_unlock(&device->debug_stats_mutex);
+
+   /* In-session rate beacon.  Attributing process-heap fragmentation needs
+    * the create rate while the workload runs; a session that crashes or is
+    * force-quit never reaches the destroy-time summary.
+    */
+   if (calls % 1024 == 0) {
+      simple_mtx_lock(&device->bo_cache_mutex);
+      const uint64_t hits = device->bo_cache_hits;
+      const uint64_t misses = device->bo_cache_misses;
+      const uint64_t held_B = device->bo_cache_held_B;
+      simple_mtx_unlock(&device->bo_cache_mutex);
+      nouveau_horizon_log(device, NOUVEAU_HORIZON_LOG_INFO,
+                          "memory: %llu creates, bo-cache %llu hits / "
+                          "%llu misses, %llu MiB held",
+                          (unsigned long long)calls,
+                          (unsigned long long)hits,
+                          (unsigned long long)misses,
+                          (unsigned long long)(held_B >> 20));
+   }
 }
 
 static void
@@ -207,6 +234,12 @@ nouveau_horizon_memory_identity_put(
    }
 
    assert(identity->mapping_count == 0);
+   /* A published NvMap ID may still be referenced by an importer, so its
+    * handle must genuinely close rather than resurface under a new logical
+    * allocation.
+    */
+   const bool recyclable = !identity->imported && !identity->registered &&
+                           identity->accounting_device != NULL;
    if (identity->registered) {
       assert(_mesa_hash_table_u64_search(runtime->memory_identities,
                                          identity->nvmap_id) == identity);
@@ -216,9 +249,12 @@ nouveau_horizon_memory_identity_put(
    }
    simple_mtx_unlock(&runtime->memory_identity_mutex);
 
-   nvMapClose(&identity->map);
-   if (!identity->imported)
-      free(identity->cpu_addr);
+   if (!recyclable ||
+       !nouveau_horizon_bo_cache_put(identity->accounting_device, identity)) {
+      nvMapClose(&identity->map);
+      if (!identity->imported)
+         free(identity->cpu_addr);
+   }
 
    if (identity->accounting_device != NULL) {
       struct nouveau_horizon_device *device = identity->accounting_device;
@@ -227,6 +263,189 @@ nouveau_horizon_memory_identity_put(
    }
 
    FREE(identity);
+}
+
+
+/* Backing stores are recycled whole.  dlmalloc satisfies a 64 KiB-aligned
+ * request by splitting a free chunk on both sides of the returned block, so
+ * plain create/free churn manufactures two persistent free-list entries per
+ * allocation and the process heap degrades until neither the driver nor its
+ * host application can find contiguous space.  Reuse also keeps the NvMap
+ * handle and the kernel cache-attribute transition out of the steady state.
+ */
+struct nouveau_horizon_bo_cache_entry {
+   struct list_head bucket_link;
+   struct list_head lru_link;
+   NvMap map;
+   void *cpu_addr;
+   uint64_t size_B;
+   uint32_t align_B;
+   uint8_t backing_kind;
+   bool cpu_cacheable;
+};
+
+static unsigned
+nouveau_horizon_bo_cache_bucket(uint64_t size_B)
+{
+   assert(size_B >= NOUVEAU_HORIZON_BIND_ALIGN_B &&
+          size_B <= NOUVEAU_HORIZON_BO_CACHE_MAX_ENTRY_B);
+   return util_logbase2_ceil64(size_B / NOUVEAU_HORIZON_BIND_ALIGN_B);
+}
+
+static void
+nouveau_horizon_bo_cache_entry_free(
+   struct nouveau_horizon_bo_cache_entry *entry)
+{
+   nvMapClose(&entry->map);
+   free(entry->cpu_addr);
+   FREE(entry);
+}
+
+static void
+nouveau_horizon_bo_cache_free_list(struct list_head *evicted)
+{
+   list_for_each_entry_safe(struct nouveau_horizon_bo_cache_entry, entry,
+                            evicted, lru_link)
+      nouveau_horizon_bo_cache_entry_free(entry);
+}
+
+/* Called with device->bo_cache_mutex held.  Evicted entries are collected on
+ * a caller list so no NvMap ioctl ever runs under the lock.
+ */
+static void
+nouveau_horizon_bo_cache_evict_locked(struct nouveau_horizon_device *device,
+                                      struct list_head *evicted)
+{
+   while (device->bo_cache_entry_count > 0 &&
+          (device->bo_cache_held_B > device->bo_cache_cap_B ||
+           device->bo_cache_entry_count >
+              NOUVEAU_HORIZON_BO_CACHE_MAX_ENTRIES)) {
+      struct nouveau_horizon_bo_cache_entry *entry =
+         list_last_entry(&device->bo_cache_lru,
+                         struct nouveau_horizon_bo_cache_entry, lru_link);
+      list_del(&entry->bucket_link);
+      list_del(&entry->lru_link);
+      device->bo_cache_held_B -= entry->size_B;
+      device->bo_cache_entry_count--;
+      device->bo_cache_evictions++;
+      list_addtail(&entry->lru_link, evicted);
+   }
+}
+
+static struct nouveau_horizon_bo_cache_entry *
+nouveau_horizon_bo_cache_take(struct nouveau_horizon_device *device,
+                              uint64_t size_B, uint64_t align_B,
+                              uint8_t backing_kind, bool cpu_cacheable)
+{
+   if (device->bo_cache_cap_B == 0 ||
+       size_B > NOUVEAU_HORIZON_BO_CACHE_MAX_ENTRY_B)
+      return NULL;
+
+   const unsigned bucket = nouveau_horizon_bo_cache_bucket(size_B);
+   struct nouveau_horizon_bo_cache_entry *match = NULL;
+
+   simple_mtx_lock(&device->bo_cache_mutex);
+   list_for_each_entry(struct nouveau_horizon_bo_cache_entry, entry,
+                       &device->bo_cache_buckets[bucket], bucket_link) {
+      /* The NvMap object bakes in exactly these four parameters.  A larger
+       * alignment still satisfies a smaller request; the size must match
+       * exactly because the extent of the handle is fixed.
+       */
+      if (entry->size_B == size_B && entry->backing_kind == backing_kind &&
+          entry->cpu_cacheable == cpu_cacheable &&
+          entry->align_B >= align_B) {
+         list_del(&entry->bucket_link);
+         list_del(&entry->lru_link);
+         device->bo_cache_held_B -= entry->size_B;
+         device->bo_cache_entry_count--;
+         match = entry;
+         break;
+      }
+   }
+   if (match != NULL)
+      device->bo_cache_hits++;
+   else
+      device->bo_cache_misses++;
+   simple_mtx_unlock(&device->bo_cache_mutex);
+   return match;
+}
+
+static bool
+nouveau_horizon_bo_cache_put(struct nouveau_horizon_device *device,
+                             struct nouveau_horizon_memory_identity *identity)
+{
+   if (device->bo_cache_cap_B == 0 ||
+       identity->size_B > NOUVEAU_HORIZON_BO_CACHE_MAX_ENTRY_B)
+      return false;
+
+   struct nouveau_horizon_bo_cache_entry *entry =
+      CALLOC_STRUCT(nouveau_horizon_bo_cache_entry);
+   if (entry == NULL)
+      return false;
+
+   entry->map = identity->map;
+   entry->cpu_addr = identity->cpu_addr;
+   entry->size_B = identity->size_B;
+   entry->align_B = identity->align_B;
+   entry->backing_kind = identity->backing_kind;
+   entry->cpu_cacheable = identity->cpu_cacheable;
+
+   const unsigned bucket = nouveau_horizon_bo_cache_bucket(entry->size_B);
+   struct list_head evicted;
+   list_inithead(&evicted);
+
+   simple_mtx_lock(&device->bo_cache_mutex);
+   list_add(&entry->bucket_link, &device->bo_cache_buckets[bucket]);
+   list_add(&entry->lru_link, &device->bo_cache_lru);
+   device->bo_cache_held_B += entry->size_B;
+   device->bo_cache_entry_count++;
+   nouveau_horizon_bo_cache_evict_locked(device, &evicted);
+   simple_mtx_unlock(&device->bo_cache_mutex);
+
+   nouveau_horizon_bo_cache_free_list(&evicted);
+   return true;
+}
+
+void
+nouveau_horizon_device_bo_cache_init(struct nouveau_horizon_device *device)
+{
+   simple_mtx_init(&device->bo_cache_mutex, mtx_plain);
+   for (unsigned i = 0; i < NOUVEAU_HORIZON_BO_CACHE_BUCKETS; i++)
+      list_inithead(&device->bo_cache_buckets[i]);
+   list_inithead(&device->bo_cache_lru);
+
+   const int64_t cap_MB =
+      debug_get_num_option("NOUVEAU_HORIZON_BO_CACHE_MB",
+                           NOUVEAU_HORIZON_BO_CACHE_DEFAULT_MB);
+   device->bo_cache_cap_B = cap_MB > 0 ? (uint64_t)cap_MB << 20 : 0;
+}
+
+void
+nouveau_horizon_device_bo_cache_trim(struct nouveau_horizon_device *device)
+{
+   struct list_head evicted;
+   list_inithead(&evicted);
+
+   simple_mtx_lock(&device->bo_cache_mutex);
+   list_for_each_entry_safe(struct nouveau_horizon_bo_cache_entry, entry,
+                            &device->bo_cache_lru, lru_link) {
+      list_del(&entry->bucket_link);
+      list_del(&entry->lru_link);
+      device->bo_cache_evictions++;
+      list_addtail(&entry->lru_link, &evicted);
+   }
+   device->bo_cache_held_B = 0;
+   device->bo_cache_entry_count = 0;
+   simple_mtx_unlock(&device->bo_cache_mutex);
+
+   nouveau_horizon_bo_cache_free_list(&evicted);
+}
+
+void
+nouveau_horizon_device_bo_cache_finish(struct nouveau_horizon_device *device)
+{
+   nouveau_horizon_device_bo_cache_trim(device);
+   simple_mtx_destroy(&device->bo_cache_mutex);
 }
 
 static struct nouveau_horizon_memory *
@@ -285,51 +504,80 @@ nouveau_horizon_memory_create(
       return NOUVEAU_HORIZON_ERROR_OUT_OF_HOST_MEMORY;
    }
 
-   identity->cpu_addr = memalign((size_t)align_B, (size_t)size_B);
-   if (identity->cpu_addr == NULL) {
-      nouveau_horizon_memory_record_create_failure(device);
-      FREE(identity);
-      return NOUVEAU_HORIZON_ERROR_OUT_OF_HOST_MEMORY;
+   const bool cpu_cacheable =
+      (create_info->flags & NOUVEAU_HORIZON_MEMORY_CPU_CACHED) != 0;
+
+   struct nouveau_horizon_bo_cache_entry *recycled =
+      nouveau_horizon_bo_cache_take(device, size_B, align_B,
+                                    create_info->backing_kind, cpu_cacheable);
+   if (recycled != NULL) {
+      identity->cpu_addr = recycled->cpu_addr;
+      identity->map = recycled->map;
+      FREE(recycled);
+   } else {
+      /* One trimmed retry per failure point: a populated cache must never
+       * turn recoverable pressure into a hard failure, whether the backing
+       * store or the kernel NvMap handle is what ran out.
+       */
+      for (unsigned attempt = 0;; attempt++) {
+         identity->cpu_addr = memalign((size_t)align_B, (size_t)size_B);
+         if (identity->cpu_addr == NULL) {
+            if (attempt == 0) {
+               nouveau_horizon_device_bo_cache_trim(device);
+               continue;
+            }
+            nouveau_horizon_memory_record_create_failure(device);
+            FREE(identity);
+            return NOUVEAU_HORIZON_ERROR_OUT_OF_HOST_MEMORY;
+         }
+
+         Result rc = nvMapCreate(&identity->map, identity->cpu_addr,
+                                 (uint32_t)size_B, (uint32_t)align_B,
+                                 (NvKind)create_info->backing_kind,
+                                 cpu_cacheable);
+         if (R_SUCCEEDED(rc))
+            break;
+
+         free(identity->cpu_addr);
+         identity->cpu_addr = NULL;
+         if (attempt == 0) {
+            nouveau_horizon_device_bo_cache_trim(device);
+            continue;
+         }
+
+         nouveau_horizon_memory_record_create_failure(device);
+         struct nouveau_horizon_device_debug_stats stats = {0};
+         nouveau_horizon_device_get_debug_stats(device, &stats);
+         nouveau_horizon_log(device, NOUVEAU_HORIZON_LOG_ERROR,
+                              "nvMapCreate(size=0x%llx, align=0x%llx) failed: "
+                              "0x%x (mem=%llu/%llu wrappers=%llu/%llu "
+                              "VA=%llu/%llu mappings=%llu/%llu failures=%llu)",
+                              (unsigned long long)size_B,
+                              (unsigned long long)align_B, R_VALUE(rc),
+                              (unsigned long long)stats.native_memories_live,
+                              (unsigned long long)stats.native_memories_peak,
+                              (unsigned long long)stats.memory_wrappers_live,
+                              (unsigned long long)stats.memory_wrappers_peak,
+                              (unsigned long long)stats.vas_live,
+                              (unsigned long long)stats.vas_peak,
+                              (unsigned long long)stats.mappings_live,
+                              (unsigned long long)stats.mappings_peak,
+                              (unsigned long long)
+                                 stats.memory_create_failures);
+         FREE(identity);
+         return nouveau_horizon_status_from_result(
+            rc, NOUVEAU_HORIZON_ERROR_OUT_OF_DEVICE_MEMORY);
+      }
    }
 
    /* NvMap allocations may be exposed to another process or device object.
     * Always clear them, even when ZERO is not requested, to avoid exposing
     * uninitialized application memory and to provide deterministic command
-    * storage.
+    * storage.  Recycled blocks are cleared for the same reason.  Uncached
+    * mappings take the stores directly; cached ones are cleaned so the GPU
+    * observes the zeros.
     */
    memset(identity->cpu_addr, 0, (size_t)size_B);
-
-   const bool cpu_cacheable =
-      (create_info->flags & NOUVEAU_HORIZON_MEMORY_CPU_CACHED) != 0;
-   Result rc = nvMapCreate(&identity->map, identity->cpu_addr,
-                           (uint32_t)size_B, (uint32_t)align_B,
-                           (NvKind)create_info->backing_kind,
-                           cpu_cacheable);
-   if (R_FAILED(rc)) {
-      nouveau_horizon_memory_record_create_failure(device);
-      struct nouveau_horizon_device_debug_stats stats = {0};
-      nouveau_horizon_device_get_debug_stats(device, &stats);
-      nouveau_horizon_log(device, NOUVEAU_HORIZON_LOG_ERROR,
-                           "nvMapCreate(size=0x%llx, align=0x%llx) failed: "
-                           "0x%x (mem=%llu/%llu wrappers=%llu/%llu "
-                           "VA=%llu/%llu mappings=%llu/%llu failures=%llu)",
-                           (unsigned long long)size_B,
-                           (unsigned long long)align_B, R_VALUE(rc),
-                           (unsigned long long)stats.native_memories_live,
-                           (unsigned long long)stats.native_memories_peak,
-                           (unsigned long long)stats.memory_wrappers_live,
-                           (unsigned long long)stats.memory_wrappers_peak,
-                           (unsigned long long)stats.vas_live,
-                           (unsigned long long)stats.vas_peak,
-                           (unsigned long long)stats.mappings_live,
-                           (unsigned long long)stats.mappings_peak,
-                           (unsigned long long)stats.memory_create_failures);
-      free(identity->cpu_addr);
-      FREE(identity);
-      return nouveau_horizon_status_from_result(
-         rc, NOUVEAU_HORIZON_ERROR_OUT_OF_DEVICE_MEMORY);
-   }
-
    if (cpu_cacheable)
       armDCacheClean(identity->cpu_addr, (size_t)size_B);
 
@@ -341,6 +589,7 @@ nouveau_horizon_memory_create(
       create_info->flags & NOUVEAU_HORIZON_MEMORY_IDENTITY_FLAGS;
    identity->backing_kind = create_info->backing_kind;
    identity->layout = create_info->layout;
+   identity->cpu_cacheable = cpu_cacheable;
    identity->nvmap_id = nvMapGetId(&identity->map);
    identity->accounting_device = nouveau_horizon_device_ref(device);
 

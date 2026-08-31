@@ -412,6 +412,18 @@ struct nouveau_horizon_device_debug_stats {
    uint64_t zbc_refresh_calls;
    uint64_t zbc_programs;
    uint64_t zbc_add_failures;
+
+   /* Backing-store cache activity.  Recycling is what keeps the process heap
+    * from shattering: every native allocation is memalign()ed to the 64 KiB
+    * bind granularity, and dlmalloc splits a free chunk on both sides of such
+    * a request, so create/free churn otherwise grows the free list without
+    * bound and eventually starves both the driver and its host application.
+    */
+   uint64_t bo_cache_hits;
+   uint64_t bo_cache_misses;
+   uint64_t bo_cache_evictions;
+   uint64_t bo_cache_held_B;
+   uint64_t bo_cache_entries;
 };
 
 /* The runtime is a process-wide, reference-counted libnx service guard. */

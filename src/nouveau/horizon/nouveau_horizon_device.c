@@ -235,6 +235,7 @@ nouveau_horizon_device_create(
    simple_mtx_init(&device->submit_mutex, mtx_plain);
    simple_mtx_init(&device->channel_mutex, mtx_plain);
    list_inithead(&device->channels);
+   nouveau_horizon_device_bo_cache_init(device);
 
    enum nouveau_horizon_status status =
       nouveau_horizon_device_init_va_heap(device);
@@ -256,18 +257,20 @@ nouveau_horizon_device_create(
       device, NOUVEAU_HORIZON_LOG_INFO,
       "GM20B device ready: page=0x%x bind=0x%x VA=[0x%" PRIx64
       ",0x%" PRIx64 ") total-order=%s timing=%s UMA=%" PRIu64
-      " MiB available=%" PRIu64 " MiB",
+      " MiB available=%" PRIu64 " MiB bo-cache=%" PRIu64 " MiB",
       device->page_size_B, device->bind_align_B,
       device->va_start, device->va_end,
       device->total_order_channels ? "on" : "off",
       device->enable_timing ? "on" : "off",
       total_B >> 20,
-      available_B >> 20);
+      available_B >> 20,
+      device->bo_cache_cap_B >> 20);
 
    *device_out = device;
    return NOUVEAU_HORIZON_SUCCESS;
 
 fail_heap:
+   nouveau_horizon_device_bo_cache_finish(device);
    simple_mtx_destroy(&device->channel_mutex);
    simple_mtx_destroy(&device->submit_mutex);
    simple_mtx_destroy(&device->debug_stats_mutex);
@@ -329,6 +332,19 @@ nouveau_horizon_device_put(struct nouveau_horizon_device *device)
          (unsigned long long)(stats.cache_from_gpu_ns / 1000),
          (unsigned long long)(stats.cache_from_gpu_max_ns / 1000));
    }
+   simple_mtx_lock(&device->bo_cache_mutex);
+   const uint64_t bo_hits = device->bo_cache_hits;
+   const uint64_t bo_misses = device->bo_cache_misses;
+   const uint64_t bo_evictions = device->bo_cache_evictions;
+   simple_mtx_unlock(&device->bo_cache_mutex);
+   if (bo_hits + bo_misses > 0) {
+      nouveau_horizon_log(
+         device, NOUVEAU_HORIZON_LOG_INFO,
+         "bo-cache: %" PRIu64 " hits, %" PRIu64 " misses, %" PRIu64
+         " evictions",
+         bo_hits, bo_misses, bo_evictions);
+   }
+   nouveau_horizon_device_bo_cache_finish(device);
    util_vma_heap_finish(&device->va_heap);
    simple_mtx_destroy(&device->channel_mutex);
    simple_mtx_destroy(&device->submit_mutex);
@@ -397,6 +413,14 @@ nouveau_horizon_device_get_debug_stats(
    simple_mtx_lock(&device->debug_stats_mutex);
    *stats_out = device->debug_stats;
    simple_mtx_unlock(&device->debug_stats_mutex);
+
+   simple_mtx_lock(&device->bo_cache_mutex);
+   stats_out->bo_cache_hits = device->bo_cache_hits;
+   stats_out->bo_cache_misses = device->bo_cache_misses;
+   stats_out->bo_cache_evictions = device->bo_cache_evictions;
+   stats_out->bo_cache_held_B = device->bo_cache_held_B;
+   stats_out->bo_cache_entries = device->bo_cache_entry_count;
+   simple_mtx_unlock(&device->bo_cache_mutex);
 
    struct nouveau_horizon_runtime *runtime = device->runtime;
    struct nouveau_horizon_zbc_state zbc;

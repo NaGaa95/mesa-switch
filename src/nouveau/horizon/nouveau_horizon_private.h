@@ -38,6 +38,16 @@
 #define NOUVEAU_HORIZON_RESOURCE_RECOVERY_TIMEOUT_NS UINT64_C(10000000000)
 #define NOUVEAU_HORIZON_SVC_INVALIDATE_PROCESS_DATA_CACHE 0x5d
 
+/* Buckets cover the bind-aligned sizes 64 KiB << 0 .. 64 KiB << 9; anything
+ * larger is allocated and freed directly.  Both caps bound what the cache can
+ * pin: bytes against the shared process heap, entries against kernel NvMap
+ * handles.
+ */
+#define NOUVEAU_HORIZON_BO_CACHE_BUCKETS 10u
+#define NOUVEAU_HORIZON_BO_CACHE_MAX_ENTRY_B (32ull << 20)
+#define NOUVEAU_HORIZON_BO_CACHE_DEFAULT_MB 128
+#define NOUVEAU_HORIZON_BO_CACHE_MAX_ENTRIES 256u
+
 struct nouveau_horizon_runtime {
    uint32_t refcnt;
    bool initialized;
@@ -70,6 +80,8 @@ struct nouveau_horizon_memory_identity {
    uint32_t flags;
    uint8_t backing_kind;
    struct nouveau_horizon_memory_layout layout;
+   /* Part of the physical NvMap contract, so part of the recycling key. */
+   bool cpu_cacheable;
    bool imported;
    bool registered;
 
@@ -101,6 +113,16 @@ struct nouveau_horizon_device {
    simple_mtx_t debug_stats_mutex;
    struct nouveau_horizon_device_debug_stats debug_stats;
    bool enable_timing;
+
+   simple_mtx_t bo_cache_mutex;
+   struct list_head bo_cache_buckets[NOUVEAU_HORIZON_BO_CACHE_BUCKETS];
+   struct list_head bo_cache_lru;
+   uint64_t bo_cache_cap_B;
+   uint64_t bo_cache_held_B;
+   uint32_t bo_cache_entry_count;
+   uint64_t bo_cache_hits;
+   uint64_t bo_cache_misses;
+   uint64_t bo_cache_evictions;
 
    simple_mtx_t submit_mutex;
    simple_mtx_t channel_mutex;
@@ -265,6 +287,22 @@ nouveau_horizon_memory_is_gpu_cacheable(
 
 uint32_t
 nouveau_horizon_device_bind_align(
+   struct nouveau_horizon_device *device);
+
+void
+nouveau_horizon_device_bo_cache_init(
+   struct nouveau_horizon_device *device);
+
+/* Drops every cached backing store.  Called on allocation failure so a
+ * populated cache can never turn a recoverable allocation into an OOM, and
+ * before device teardown.
+ */
+void
+nouveau_horizon_device_bo_cache_trim(
+   struct nouveau_horizon_device *device);
+
+void
+nouveau_horizon_device_bo_cache_finish(
    struct nouveau_horizon_device *device);
 
 void
