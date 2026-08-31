@@ -856,6 +856,144 @@ nvkmd_switch_dev_alloc_tiled_mem(struct nvkmd_dev *_dev,
                                            flags, mem_out);
 }
 
+/* Imported host memory is GPU-mapped once at a kernel-chosen small-page VA;
+ * nothing rebinds it.
+ */
+struct nvkmd_switch_foreign_va {
+   struct nvkmd_va base;
+   struct nouveau_horizon_memory *memory;
+};
+
+static void
+nvkmd_switch_foreign_va_free(struct nvkmd_va *_va)
+{
+   struct nvkmd_switch_foreign_va *va =
+      (struct nvkmd_switch_foreign_va *)_va;
+   if (nouveau_horizon_memory_unmap_gpu_small(va->memory, va->base.addr) !=
+       NOUVEAU_HORIZON_SUCCESS) {
+      /* Keep the backing reference so the NvMap is never closed while the
+       * GPU address space may still reach it.
+       */
+      return;
+   }
+   nouveau_horizon_memory_put(va->memory);
+   FREE(va);
+}
+
+static VkResult
+nvkmd_switch_foreign_va_bind_mem(struct nvkmd_va *_va,
+                                 struct vk_object_base *log_obj,
+                                 uint64_t va_offset_B,
+                                 struct nvkmd_mem *_mem,
+                                 uint64_t mem_offset_B, uint64_t range_B)
+{
+   return vk_errorf(log_obj, VK_ERROR_UNKNOWN,
+                    "nvkmd-switch: imported host memory VAs are immutable");
+}
+
+static VkResult
+nvkmd_switch_foreign_va_unbind(struct nvkmd_va *_va,
+                               struct vk_object_base *log_obj,
+                               uint64_t va_offset_B, uint64_t range_B)
+{
+   return vk_errorf(log_obj, VK_ERROR_UNKNOWN,
+                    "nvkmd-switch: imported host memory VAs are immutable");
+}
+
+static const struct nvkmd_va_ops nvkmd_switch_foreign_va_ops = {
+   .free = nvkmd_switch_foreign_va_free,
+   .bind_mem = nvkmd_switch_foreign_va_bind_mem,
+   .unbind = nvkmd_switch_foreign_va_unbind,
+};
+
+static VkResult
+nvkmd_switch_dev_import_host_ptr(struct nvkmd_dev *_dev,
+                                 struct vk_object_base *log_obj,
+                                 void *host_ptr, uint64_t size_B,
+                                 enum nvkmd_mem_flags flags,
+                                 struct nvkmd_mem **mem_out)
+{
+   struct nvkmd_switch_dev *dev = nvkmd_switch_dev(_dev);
+
+   if (host_ptr == NULL || size_B == 0 ||
+       ((uintptr_t)host_ptr & 0xFFFu) != 0 || (size_B & 0xFFFu) != 0) {
+      return vk_errorf(log_obj, VK_ERROR_INVALID_EXTERNAL_HANDLE,
+                       "nvkmd-switch: host imports need a 4 KiB aligned "
+                       "pointer and size");
+   }
+
+   struct nvkmd_switch_mem *mem = CALLOC_STRUCT(nvkmd_switch_mem);
+   if (mem == NULL)
+      return vk_error(log_obj, VK_ERROR_OUT_OF_HOST_MEMORY);
+
+   /* Imported host pages are ordinary cacheable RAM; clients drive explicit
+    * flush/invalidate.
+    */
+   uint32_t horizon_flags = NOUVEAU_HORIZON_MEMORY_CPU_VISIBLE |
+                            NOUVEAU_HORIZON_MEMORY_CPU_CACHED;
+   if (!(flags & NVKMD_MEM_GPU_UNCACHED))
+      horizon_flags |= NOUVEAU_HORIZON_MEMORY_GPU_CACHED;
+
+   const struct nouveau_horizon_memory_create_info create_info = {
+      .size_B = size_B,
+      .align_B = 0x1000,
+      .backing_kind = NvKind_Pitch,
+      .flags = horizon_flags,
+      .import_host_ptr = host_ptr,
+   };
+   enum nouveau_horizon_status status = nouveau_horizon_memory_create(
+      dev->horizon, &create_info, &mem->memory);
+   if (status != NOUVEAU_HORIZON_SUCCESS) {
+      FREE(mem);
+      return nvkmd_switch_status_result(log_obj, status,
+                                        VK_ERROR_INVALID_EXTERNAL_HANDLE,
+                                        "import host memory");
+   }
+
+   status = nouveau_horizon_memory_map(mem->memory, &mem->cpu_addr);
+   if (status != NOUVEAU_HORIZON_SUCCESS) {
+      nouveau_horizon_memory_put(mem->memory);
+      FREE(mem);
+      return nvkmd_switch_status_result(log_obj, status,
+                                        VK_ERROR_MEMORY_MAP_FAILED,
+                                        "map imported host memory");
+   }
+
+   uint64_t gpu_addr = 0;
+   status = nouveau_horizon_memory_map_gpu_small(mem->memory, &gpu_addr);
+   if (status != NOUVEAU_HORIZON_SUCCESS) {
+      nouveau_horizon_memory_put(mem->memory);
+      FREE(mem);
+      return nvkmd_switch_status_result(log_obj, status,
+                                        VK_ERROR_INVALID_EXTERNAL_HANDLE,
+                                        "GPU-map imported host memory");
+   }
+
+   struct nvkmd_switch_foreign_va *va =
+      CALLOC_STRUCT(nvkmd_switch_foreign_va);
+   if (va == NULL) {
+      nouveau_horizon_memory_unmap_gpu_small(mem->memory, gpu_addr);
+      nouveau_horizon_memory_put(mem->memory);
+      FREE(mem);
+      return vk_error(log_obj, VK_ERROR_OUT_OF_HOST_MEMORY);
+   }
+
+   va->base.ops = &nvkmd_switch_foreign_va_ops;
+   va->base.dev = _dev;
+   va->base.flags = 0;
+   va->base.pte_kind = 0;
+   va->base.addr = gpu_addr;
+   va->base.size_B = size_B;
+   va->memory = nouveau_horizon_memory_ref(mem->memory);
+
+   nvkmd_mem_init(&dev->base, &mem->base, &nvkmd_switch_mem_ops,
+                  flags, size_B, 0x1000 /* pinned 4 KiB sysmem */);
+   mem->base.va = &va->base;
+
+   *mem_out = &mem->base;
+   return VK_SUCCESS;
+}
+
 static VkResult
 nvkmd_switch_dev_import_dma_buf(struct nvkmd_dev *_dev,
                                 struct vk_object_base *log_obj,
@@ -911,6 +1049,7 @@ static const struct nvkmd_dev_ops nvkmd_switch_dev_ops = {
    .alloc_mem = nvkmd_switch_dev_alloc_mem,
    .alloc_tiled_mem = nvkmd_switch_dev_alloc_tiled_mem,
    .import_dma_buf = nvkmd_switch_dev_import_dma_buf,
+   .import_host_ptr = nvkmd_switch_dev_import_host_ptr,
    .alloc_va = nvkmd_switch_dev_alloc_va,
    .create_ctx = nvkmd_switch_dev_create_ctx,
 };

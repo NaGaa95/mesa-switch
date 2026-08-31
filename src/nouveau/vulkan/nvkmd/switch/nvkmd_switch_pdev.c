@@ -767,6 +767,8 @@ nvkmd_switch_try_create_pdev(struct vk_object_base *log_obj,
 
    pdev->base.kmd_info = (struct nvkmd_info) {
       .has_dma_buf = false,
+      /* nvMapCreate accepts a caller-supplied page-aligned pointer. */
+      .has_host_ptr_import = true,
       .has_get_vram_used = false,
       /* This currently gates EXT_image_drm_format_modifier exposure, not
        * whether the KMD has an internal tiled NvMap allocation path.

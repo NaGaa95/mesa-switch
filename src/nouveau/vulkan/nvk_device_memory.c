@@ -242,6 +242,7 @@ nvk_AllocateMemory(VkDevice device,
       align64(pAllocateInfo->allocationSize, alignment);
 
    const bool is_import = fd_info && fd_info->handleType;
+   const bool is_host_import = mem->vk.host_ptr != NULL;
    if (is_import) {
       assert(fd_info->handleType ==
                VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT ||
@@ -257,6 +258,17 @@ nvk_AllocateMemory(VkDevice device,
        * in from some other device.
        */
       assert(!(flags & ~mem->mem->flags & ~NVKMD_MEM_PLACEMENT_FLAGS));
+   } else if (is_host_import) {
+      assert(mem->vk.import_handle_type ==
+             VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT);
+      /* The imported range is exact; the usual bind-alignment rounding would
+       * reach past it.
+       */
+      result = nvkmd_dev_import_host_ptr(dev->nvkmd, &dev->vk.base,
+                                         mem->vk.host_ptr, mem->vk.size,
+                                         flags, &mem->mem);
+      if (result != VK_SUCCESS)
+         goto fail_alloc;
    } else if (pte_kind != 0 || tile_mode != 0) {
       result = nvkmd_dev_alloc_tiled_mem(dev->nvkmd, &dev->vk.base,
                                          aligned_size, alignment,
@@ -273,7 +285,7 @@ nvk_AllocateMemory(VkDevice device,
    }
 
    enum nvk_memory_init init;
-   if (is_import) {
+   if (is_import || is_host_import) {
       /* From the Vulkan 1.4.315 spec:
        *
        *    VUID-VkMemoryAllocateFlagsInfo-flags-10760
@@ -450,6 +462,36 @@ nvk_UnmapMemory2KHR(VkDevice device,
       nvkmd_mem_unmap(mem->mem, NVKMD_MEM_MAP_CLIENT);
       return VK_SUCCESS;
    }
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL
+nvk_GetMemoryHostPointerPropertiesEXT(
+   VkDevice device,
+   VkExternalMemoryHandleTypeFlagBits handleType,
+   const void *pHostPointer,
+   VkMemoryHostPointerPropertiesEXT *pMemoryHostPointerProperties)
+{
+   VK_FROM_HANDLE(nvk_device, dev, device);
+   const struct nvk_physical_device *pdev = nvk_device_physical(dev);
+
+   if (handleType != VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT)
+      return vk_error(dev, VK_ERROR_INVALID_EXTERNAL_HANDLE);
+
+   /* Imported host pages are cacheable RAM: expose only the host-visible,
+    * host-cached types.
+    */
+   uint32_t memory_types = 0;
+   for (uint32_t i = 0; i < pdev->mem_type_count; i++) {
+      const VkMemoryPropertyFlags props = pdev->mem_types[i].propertyFlags;
+      if ((props & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) &&
+          (props & VK_MEMORY_PROPERTY_HOST_CACHED_BIT))
+         memory_types |= 1u << i;
+   }
+   if (memory_types == 0)
+      return vk_error(dev, VK_ERROR_INVALID_EXTERNAL_HANDLE);
+
+   pMemoryHostPointerProperties->memoryTypeBits = memory_types;
+   return VK_SUCCESS;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL

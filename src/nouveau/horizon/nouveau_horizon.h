@@ -177,6 +177,12 @@ struct nouveau_horizon_memory_create_info {
     * valid false.
     */
    struct nouveau_horizon_memory_layout layout;
+
+   /* When set, wrap this caller-owned range instead of allocating.  Pointer
+    * and size_B must be 4 KiB aligned and outlive the identity; the range is
+    * never freed, recycled or cleared.
+    */
+   void *import_host_ptr;
 };
 
 struct nouveau_horizon_memory_import_info {
@@ -531,6 +537,17 @@ nouveau_horizon_memory_put(struct nouveau_horizon_memory *memory);
 enum nouveau_horizon_status
 nouveau_horizon_memory_map(struct nouveau_horizon_memory *memory,
                            void **map_out);
+
+/* Map the whole allocation at a kernel-chosen GPU VA with 4 KiB pages, in
+ * the small-page VA region disjoint from the fixed big-page heap.
+ */
+enum nouveau_horizon_status
+nouveau_horizon_memory_map_gpu_small(struct nouveau_horizon_memory *memory,
+                                     uint64_t *gpu_addr_out);
+
+enum nouveau_horizon_status
+nouveau_horizon_memory_unmap_gpu_small(struct nouveau_horizon_memory *memory,
+                                       uint64_t gpu_addr);
 
 void
 nouveau_horizon_memory_sync_to_gpu(

@@ -483,18 +483,36 @@ nouveau_horizon_memory_create(
    nouveau_horizon_memory_record_create_call(device);
 
    *memory_out = NULL;
-   const uint32_t bind_align_B = nouveau_horizon_device_bind_align(device);
-   uint64_t align_B = MAX2(create_info->align_B, (uint64_t)bind_align_B);
-   if (!util_is_power_of_two_nonzero64(align_B)) {
-      nouveau_horizon_memory_record_create_failure(device);
-      return NOUVEAU_HORIZON_ERROR_INVALID_ARGUMENT;
-   }
+   const bool is_host_import = create_info->import_host_ptr != NULL;
+   uint64_t align_B, size_B;
+   if (is_host_import) {
+      /* Wrap the range exactly: rounding up to the bind alignment would pin
+       * pages beyond it.
+       */
+      if (((uintptr_t)create_info->import_host_ptr & 0xFFFu) != 0 ||
+          (create_info->size_B & 0xFFFu) != 0) {
+         nouveau_horizon_memory_record_create_failure(device);
+         return NOUVEAU_HORIZON_ERROR_INVALID_ARGUMENT;
+      }
+      align_B = 0x1000;
+      size_B = create_info->size_B;
+      if (size_B > UINT32_MAX) {
+         nouveau_horizon_memory_record_create_failure(device);
+         return NOUVEAU_HORIZON_ERROR_OUT_OF_DEVICE_MEMORY;
+      }
+   } else {
+      const uint32_t bind_align_B = nouveau_horizon_device_bind_align(device);
+      align_B = MAX2(create_info->align_B, (uint64_t)bind_align_B);
+      if (!util_is_power_of_two_nonzero64(align_B)) {
+         nouveau_horizon_memory_record_create_failure(device);
+         return NOUVEAU_HORIZON_ERROR_INVALID_ARGUMENT;
+      }
 
-   const uint64_t size_B =
-      nouveau_horizon_align_u64(create_info->size_B, bind_align_B);
-   if (size_B == 0 || size_B > UINT32_MAX || align_B > UINT32_MAX) {
-      nouveau_horizon_memory_record_create_failure(device);
-      return NOUVEAU_HORIZON_ERROR_OUT_OF_DEVICE_MEMORY;
+      size_B = nouveau_horizon_align_u64(create_info->size_B, bind_align_B);
+      if (size_B == 0 || size_B > UINT32_MAX || align_B > UINT32_MAX) {
+         nouveau_horizon_memory_record_create_failure(device);
+         return NOUVEAU_HORIZON_ERROR_OUT_OF_DEVICE_MEMORY;
+      }
    }
 
    struct nouveau_horizon_memory_identity *identity =
@@ -504,13 +522,38 @@ nouveau_horizon_memory_create(
       return NOUVEAU_HORIZON_ERROR_OUT_OF_HOST_MEMORY;
    }
 
-   const bool cpu_cacheable =
+   const bool cpu_cacheable = is_host_import ||
       (create_info->flags & NOUVEAU_HORIZON_MEMORY_CPU_CACHED) != 0;
 
-   struct nouveau_horizon_bo_cache_entry *recycled =
+   struct nouveau_horizon_bo_cache_entry *recycled = is_host_import ?
+      NULL :
       nouveau_horizon_bo_cache_take(device, size_B, align_B,
                                     create_info->backing_kind, cpu_cacheable);
-   if (recycled != NULL) {
+   if (is_host_import) {
+      identity->cpu_addr = create_info->import_host_ptr;
+      /* Trim the cache once and retry, as the allocation path below does. */
+      Result rc = 0;
+      for (unsigned attempt = 0;; attempt++) {
+         rc = nvMapCreate(&identity->map, identity->cpu_addr,
+                          (uint32_t)size_B, (uint32_t)align_B,
+                          (NvKind)create_info->backing_kind,
+                          cpu_cacheable);
+         if (R_SUCCEEDED(rc))
+            break;
+         if (attempt == 0) {
+            nouveau_horizon_device_bo_cache_trim(device);
+            continue;
+         }
+         nouveau_horizon_memory_record_create_failure(device);
+         nouveau_horizon_log(device, NOUVEAU_HORIZON_LOG_ERROR,
+                             "nvMapCreate(import=%p, size=0x%llx) failed: 0x%x",
+                             identity->cpu_addr,
+                             (unsigned long long)size_B, R_VALUE(rc));
+         FREE(identity);
+         return nouveau_horizon_status_from_result(
+            rc, NOUVEAU_HORIZON_ERROR_OUT_OF_DEVICE_MEMORY);
+      }
+   } else if (recycled != NULL) {
       identity->cpu_addr = recycled->cpu_addr;
       identity->map = recycled->map;
       FREE(recycled);
@@ -577,9 +620,16 @@ nouveau_horizon_memory_create(
     * mappings take the stores directly; cached ones are cleaned so the GPU
     * observes the zeros.
     */
-   memset(identity->cpu_addr, 0, (size_t)size_B);
-   if (cpu_cacheable)
+   if (is_host_import) {
+      /* Imported memory keeps its contents; clean so the GPU's first read
+       * observes them.
+       */
       armDCacheClean(identity->cpu_addr, (size_t)size_B);
+   } else {
+      memset(identity->cpu_addr, 0, (size_t)size_B);
+      if (cpu_cacheable)
+         armDCacheClean(identity->cpu_addr, (size_t)size_B);
+   }
 
    identity->runtime = device->runtime;
    identity->refcnt = 1;
@@ -590,19 +640,27 @@ nouveau_horizon_memory_create(
    identity->backing_kind = create_info->backing_kind;
    identity->layout = create_info->layout;
    identity->cpu_cacheable = cpu_cacheable;
+   /* Imported identities never free or recycle the caller's pages and stay
+    * out of the heap accounting.
+    */
+   identity->imported = is_host_import;
    identity->nvmap_id = nvMapGetId(&identity->map);
-   identity->accounting_device = nouveau_horizon_device_ref(device);
+   identity->accounting_device =
+      is_host_import ? NULL : nouveau_horizon_device_ref(device);
 
    if (identity->nvmap_id == 0) {
       nouveau_horizon_memory_record_create_failure(device);
       nvMapClose(&identity->map);
-      free(identity->cpu_addr);
-      nouveau_horizon_device_put(identity->accounting_device);
+      if (!identity->imported)
+         free(identity->cpu_addr);
+      if (identity->accounting_device != NULL)
+         nouveau_horizon_device_put(identity->accounting_device);
       FREE(identity);
       return NOUVEAU_HORIZON_ERROR_SYSTEM;
    }
 
-   nouveau_horizon_device_account_alloc(device, size_B);
+   if (!is_host_import)
+      nouveau_horizon_device_account_alloc(device, size_B);
    struct nouveau_horizon_memory *memory =
       nouveau_horizon_memory_wrapper_create(device, identity,
                                              create_info->flags, false);
@@ -1037,6 +1095,71 @@ nouveau_horizon_memory_release_mapping(
       assert(identity->layout.pte_kind == pte_kind);
    identity->mapping_count--;
    simple_mtx_unlock(&runtime->memory_identity_mutex);
+}
+
+enum nouveau_horizon_status
+nouveau_horizon_memory_map_gpu_small(struct nouveau_horizon_memory *memory,
+                                     uint64_t *gpu_addr_out)
+{
+   if (memory == NULL || gpu_addr_out == NULL)
+      return NOUVEAU_HORIZON_ERROR_INVALID_ARGUMENT;
+
+   struct nouveau_horizon_device *device = memory->device;
+   struct nouveau_horizon_memory_identity *identity = memory->identity;
+
+   enum nouveau_horizon_status status =
+      nouveau_horizon_memory_acquire_mapping(memory, identity->backing_kind);
+   if (status != NOUVEAU_HORIZON_SUCCESS)
+      return status;
+
+   /* Kernel-chosen VA with 4 KiB pages, from the small-page region disjoint
+    * from the fixed big-page heap.
+    */
+   u64 gpu_addr = 0;
+   simple_mtx_lock(&device->va_mutex);
+   Result rc = nvioctlNvhostAsGpu_MapBufferEx(
+      device->addr_space.fd,
+      nouveau_horizon_memory_is_gpu_cacheable(memory) ?
+         NvMapBufferFlags_IsCacheable : 0,
+      identity->backing_kind, nvMapGetHandle(&identity->map),
+      0x1000, 0, 0, 0, &gpu_addr);
+   simple_mtx_unlock(&device->va_mutex);
+   if (R_FAILED(rc)) {
+      nouveau_horizon_memory_release_mapping(memory, identity->backing_kind);
+      nouveau_horizon_log(device, NOUVEAU_HORIZON_LOG_ERROR,
+                          "small-page GPU map of NvMap %u (size=0x%llx) "
+                          "failed: 0x%x",
+                          identity->nvmap_id,
+                          (unsigned long long)identity->size_B, R_VALUE(rc));
+      return nouveau_horizon_status_from_result(
+         rc, NOUVEAU_HORIZON_ERROR_OUT_OF_DEVICE_MEMORY);
+   }
+
+   *gpu_addr_out = gpu_addr;
+   return NOUVEAU_HORIZON_SUCCESS;
+}
+
+enum nouveau_horizon_status
+nouveau_horizon_memory_unmap_gpu_small(struct nouveau_horizon_memory *memory,
+                                       uint64_t gpu_addr)
+{
+   if (memory == NULL)
+      return NOUVEAU_HORIZON_ERROR_INVALID_ARGUMENT;
+
+   struct nouveau_horizon_device *device = memory->device;
+   simple_mtx_lock(&device->va_mutex);
+   const Result rc = nvAddressSpaceUnmap(&device->addr_space, gpu_addr);
+   simple_mtx_unlock(&device->va_mutex);
+   if (R_FAILED(rc)) {
+      nouveau_horizon_log(device, NOUVEAU_HORIZON_LOG_ERROR,
+                          "small-page GPU unmap at 0x%llx failed: 0x%x",
+                          (unsigned long long)gpu_addr, R_VALUE(rc));
+      return nouveau_horizon_status_from_result(
+         rc, NOUVEAU_HORIZON_ERROR_SYSTEM);
+   }
+   nouveau_horizon_memory_release_mapping(memory,
+                                          memory->identity->backing_kind);
+   return NOUVEAU_HORIZON_SUCCESS;
 }
 
 NvMap *

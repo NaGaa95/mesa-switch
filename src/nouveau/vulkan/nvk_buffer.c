@@ -236,14 +236,23 @@ nvk_GetPhysicalDeviceExternalBufferProperties(
    if (pExternalBufferInfo->flags)
       goto unsupported;
 
-   if (!pdev->nvkmd->kmd_info.has_dma_buf)
-      goto unsupported;
-
    switch (pExternalBufferInfo->handleType) {
    case VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT:
    case VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT:
+      if (!pdev->nvkmd->kmd_info.has_dma_buf)
+         goto unsupported;
       pExternalBufferProperties->externalMemoryProperties =
          nvk_dma_buf_mem_props;
+      return;
+   case VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT:
+      if (!pdev->nvkmd->kmd_info.has_host_ptr_import)
+         goto unsupported;
+      pExternalBufferProperties->externalMemoryProperties =
+         (VkExternalMemoryProperties) {
+            .externalMemoryFeatures = VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT,
+            .compatibleHandleTypes =
+               VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
+         };
       return;
    default:
       goto unsupported;

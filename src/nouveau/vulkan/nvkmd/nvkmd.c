@@ -181,6 +181,24 @@ nvkmd_dev_import_dma_buf(struct nvkmd_dev *dev,
 }
 
 VkResult MUST_CHECK
+nvkmd_dev_import_host_ptr(struct nvkmd_dev *dev,
+                          struct vk_object_base *log_obj,
+                          void *host_ptr, uint64_t size_B,
+                          enum nvkmd_mem_flags flags,
+                          struct nvkmd_mem **mem_out)
+{
+   if (dev->ops->import_host_ptr == NULL)
+      return VK_ERROR_INVALID_EXTERNAL_HANDLE;
+
+   VkResult result = dev->ops->import_host_ptr(dev, log_obj, host_ptr,
+                                               size_B, flags, mem_out);
+   if (result == VK_SUCCESS)
+      nvkmd_dev_add_mem(dev, *mem_out);
+
+   return result;
+}
+
+VkResult MUST_CHECK
 nvkmd_dev_alloc_va(struct nvkmd_dev *dev,
                    struct vk_object_base *log_obj,
                    enum nvkmd_va_flags flags, uint8_t pte_kind,

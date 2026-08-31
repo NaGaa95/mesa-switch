@@ -124,6 +124,7 @@ enum nvkmd_bind_op {
 
 struct nvkmd_info {
    bool has_dma_buf;
+   bool has_host_ptr_import;
    bool has_get_vram_used;
    bool has_alloc_tiled;
    bool has_map_fixed;
@@ -190,6 +191,15 @@ struct nvkmd_dev_ops {
    VkResult (*import_dma_buf)(struct nvkmd_dev *dev,
                               struct vk_object_base *log_obj,
                               int fd, struct nvkmd_mem **mem_out);
+
+   /* Optional (may be NULL): wrap caller-owned page-aligned host memory in a
+    * GPU-mapped nvkmd_mem.  Backs VK_EXT_external_memory_host.
+    */
+   VkResult (*import_host_ptr)(struct nvkmd_dev *dev,
+                               struct vk_object_base *log_obj,
+                               void *host_ptr, uint64_t size_B,
+                               enum nvkmd_mem_flags flags,
+                               struct nvkmd_mem **mem_out);
 
    VkResult (*alloc_va)(struct nvkmd_dev *dev,
                         struct vk_object_base *log_obj,
@@ -478,6 +488,13 @@ VkResult MUST_CHECK
 nvkmd_dev_import_dma_buf(struct nvkmd_dev *dev,
                          struct vk_object_base *log_obj,
                          int fd, struct nvkmd_mem **mem_out);
+
+VkResult MUST_CHECK
+nvkmd_dev_import_host_ptr(struct nvkmd_dev *dev,
+                          struct vk_object_base *log_obj,
+                          void *host_ptr, uint64_t size_B,
+                          enum nvkmd_mem_flags flags,
+                          struct nvkmd_mem **mem_out);
 
 struct nvkmd_mem *
 nvkmd_dev_lookup_mem_by_va(struct nvkmd_dev *dev,
