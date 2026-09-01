@@ -74,9 +74,30 @@ fn init_info_from_nir(
             }),
             MESA_SHADER_FRAGMENT => {
                 let info_fs = unsafe { &nir.info.__bindgen_anon_1.fs };
+                let interlock = match (
+                    info_fs.pixel_interlock_ordered(),
+                    info_fs.pixel_interlock_unordered(),
+                    info_fs.sample_interlock_ordered(),
+                    info_fs.sample_interlock_unordered(),
+                ) {
+                    (false, false, false, false) => FragmentInterlock::None,
+                    (true, false, false, false) => {
+                        FragmentInterlock::PixelOrdered
+                    }
+                    (false, true, false, false) => {
+                        FragmentInterlock::PixelUnordered
+                    }
+                    (false, false, true, false) => {
+                        FragmentInterlock::SampleOrdered
+                    }
+                    (false, false, false, true) => {
+                        FragmentInterlock::SampleUnordered
+                    }
+                    _ => panic!("Multiple fragment interlock modes"),
+                };
                 ShaderStageInfo::Fragment(FragmentShaderInfo {
                     uses_kill: false,
-                    does_interlock: false,
+                    interlock,
                     post_depth_coverage: info_fs.post_depth_coverage(),
                     early_fragment_tests: info_fs.early_fragment_tests(),
                     uses_sample_shading: info_fs.uses_sample_shading(),
@@ -3623,6 +3644,10 @@ impl<'a> ShaderFromNir<'a> {
                     src: handle.clone().into(),
                     dst: handle.into(),
                 });
+            }
+            nir_intrinsic_begin_invocation_interlock
+            | nir_intrinsic_end_invocation_interlock => {
+                // The hardware interlock covers the full fragment invocation.
             }
             nir_intrinsic_barrier => {
                 let modes = intrin.memory_modes();

@@ -774,8 +774,11 @@ nvk_max_shader_push_dw(const struct nvk_physical_device *pdev,
    if (stage == MESA_SHADER_TESS_CTRL || stage == MESA_SHADER_TESS_EVAL)
       max_dw_count += 2;
 
-   if (stage == MESA_SHADER_FRAGMENT)
+   if (stage == MESA_SHADER_FRAGMENT) {
       max_dw_count += 13;
+      if (pdev->info.cls_eng3d >= MAXWELL_B)
+         max_dw_count += 2;
+   }
 
    if (stage == MESA_SHADER_TASK)
       max_dw_count += 2;
@@ -958,8 +961,49 @@ nvk_shader_fill_push(struct nvk_device *dev,
       if (pdev->info.cls_eng3d >= MAXWELL_B) {
          P_IMMD(p, NVB197, SET_POST_Z_PS_IMASK,
                 shader->info.fs.post_depth_coverage);
+
+         uint32_t interlock_mode =
+            NVB197_SET_PIXEL_SHADER_INTERLOCK_CONTROL_TILE_COALESCER_MODE_NO_CONFLICT_DETECT;
+         uint32_t interlock_order =
+            NVB197_SET_PIXEL_SHADER_INTERLOCK_CONTROL_TILE_COALESCER_FRAGMENT_ORDER_TC_FRAGMENT_ORDERED;
+
+         switch (shader->info.fs.interlock) {
+         case NAK_FS_INTERLOCK_NONE:
+            break;
+         case NAK_FS_INTERLOCK_PIXEL_ORDERED:
+            interlock_mode =
+               NVB197_SET_PIXEL_SHADER_INTERLOCK_CONTROL_TILE_COALESCER_MODE_CONFLICT_DETECT_PIXEL;
+            break;
+         case NAK_FS_INTERLOCK_PIXEL_UNORDERED:
+            interlock_mode =
+               NVB197_SET_PIXEL_SHADER_INTERLOCK_CONTROL_TILE_COALESCER_MODE_CONFLICT_DETECT_PIXEL;
+            interlock_order =
+               NVB197_SET_PIXEL_SHADER_INTERLOCK_CONTROL_TILE_COALESCER_FRAGMENT_ORDER_TC_FRAGMENT_UNORDERED;
+            break;
+         case NAK_FS_INTERLOCK_SAMPLE_ORDERED:
+            interlock_mode =
+               NVB197_SET_PIXEL_SHADER_INTERLOCK_CONTROL_TILE_COALESCER_MODE_CONFLICT_DETECT_SAMPLE;
+            break;
+         case NAK_FS_INTERLOCK_SAMPLE_UNORDERED:
+            interlock_mode =
+               NVB197_SET_PIXEL_SHADER_INTERLOCK_CONTROL_TILE_COALESCER_MODE_CONFLICT_DETECT_SAMPLE;
+            interlock_order =
+               NVB197_SET_PIXEL_SHADER_INTERLOCK_CONTROL_TILE_COALESCER_FRAGMENT_ORDER_TC_FRAGMENT_UNORDERED;
+            break;
+         default:
+            UNREACHABLE("Invalid fragment interlock mode");
+         }
+
+         max_dw_count += 2;
+         P_IMMD(p, NVB197, SET_PIXEL_SHADER_INTERLOCK_CONTROL, {
+            .tile_coalescer_mode = interlock_mode,
+            .tile_coalescer_tile_size =
+               TILE_COALESCER_TILE_SIZE_TC_TILE_SIZE_16X16,
+            .tile_coalescer_fragment_order = interlock_order,
+         });
       } else {
          assert(!shader->info.fs.post_depth_coverage);
+         assert(shader->info.fs.interlock == NAK_FS_INTERLOCK_NONE);
       }
 
       P_IMMD(p, NV9097, SET_ZCULL_BOUNDS, {

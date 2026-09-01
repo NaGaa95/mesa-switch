@@ -9320,10 +9320,20 @@ pub struct VertexShaderInfo {
     pub isbe_space_sharing_enable: bool,
 }
 
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FragmentInterlock {
+    None = NAK_FS_INTERLOCK_NONE,
+    PixelOrdered = NAK_FS_INTERLOCK_PIXEL_ORDERED,
+    PixelUnordered = NAK_FS_INTERLOCK_PIXEL_UNORDERED,
+    SampleOrdered = NAK_FS_INTERLOCK_SAMPLE_ORDERED,
+    SampleUnordered = NAK_FS_INTERLOCK_SAMPLE_UNORDERED,
+}
+
 #[derive(Debug)]
 pub struct FragmentShaderInfo {
     pub uses_kill: bool,
-    pub does_interlock: bool,
+    pub interlock: FragmentInterlock,
     pub post_depth_coverage: bool,
     pub early_fragment_tests: bool,
     pub uses_sample_shading: bool,

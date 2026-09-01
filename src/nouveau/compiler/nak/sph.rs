@@ -5,8 +5,8 @@ extern crate bitview;
 extern crate nvidia_headers;
 
 use crate::ir::{
-    MeshShaderInfo, ShaderInfo, ShaderIoInfo, ShaderModel, ShaderModelInfo,
-    ShaderStageInfo, VtgIoInfo,
+    FragmentInterlock, MeshShaderInfo, ShaderInfo, ShaderIoInfo, ShaderModel,
+    ShaderModelInfo, ShaderStageInfo, VtgIoInfo,
 };
 use bitview::{
     BitMutView, BitMutViewable, BitView, BitViewable, SetBit, SetField,
@@ -562,7 +562,7 @@ pub fn encode_header(
         ShaderStageInfo::Fragment(stage) => {
             let zs_self_dep = fs_key.is_some_and(|key| key.zs_self_dep);
             sph.set_kills_pixels(stage.uses_kill || zs_self_dep);
-            sph.set_does_interlock(stage.does_interlock);
+            sph.set_does_interlock(stage.interlock != FragmentInterlock::None);
         }
         ShaderStageInfo::Geometry(stage) => {
             sph.set_gs_passthrough_enable(stage.passthrough_enable);

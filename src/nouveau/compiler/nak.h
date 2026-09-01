@@ -132,6 +132,14 @@ enum PACKED nak_mesh_topology {
    NAK_MESH_TOPOLOGY_TRIANGLES = 4,
 };
 
+enum ENUM_PACKED nak_fs_interlock {
+   NAK_FS_INTERLOCK_NONE = 0,
+   NAK_FS_INTERLOCK_PIXEL_ORDERED = 1,
+   NAK_FS_INTERLOCK_PIXEL_UNORDERED = 2,
+   NAK_FS_INTERLOCK_SAMPLE_ORDERED = 3,
+   NAK_FS_INTERLOCK_SAMPLE_UNORDERED = 4,
+};
+
 struct nak_xfb_info {
    uint32_t stride[4];
    uint8_t stream[4];
@@ -208,8 +216,9 @@ struct nak_shader_info {
          bool post_depth_coverage;
          bool uses_sample_shading;
          bool early_fragment_tests;
+         enum nak_fs_interlock interlock;
 
-         uint8_t _pad[135];
+         uint8_t _pad[134];
       } fs;
 
       struct {
