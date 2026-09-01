@@ -87,6 +87,9 @@ nvk_get_image_plane_format_features(const struct nvk_physical_device *pdev,
          return 0;
 
       features |= VK_FORMAT_FEATURE_2_DEPTH_STENCIL_ATTACHMENT_BIT;
+#ifdef __SWITCH__
+      features |= VK_FORMAT_FEATURE_2_BLIT_DST_BIT;
+#endif
    }
 
    if (nvk_format_supports_storage(pdev, p_format)) {
