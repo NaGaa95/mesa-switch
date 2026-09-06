@@ -257,18 +257,13 @@ util_queue_thread_func(void *input)
    }
 
 #if defined(__SWITCH__)
-   /* No HOS as threads herdam a core mask da thread criadora (a game loop,
-    * tipicamente no core 0), por isso todas as workers do Mesa acabam
-    * empilhadas no core 0. Espalhamos as workers pelos cores 1 e 2,
-    * deixando o core 0 livre para a game loop e o submit do nvdrv.
-    * (O core 3 é reservado ao sistema no perfil normal de aplicação.)
-    *
-    * Feito a partir da própria worker via CUR_THREAD_HANDLE, por isso
-    * não é preciso converter pthread_t->Handle. A affinity mask cobre
-    * 1+2 para o scheduler do HOS poder migrar se o core preferido estiver
-    * ocupado; o preferido alterna por worker para distribuir a carga. */
+   /* HOS workers inherit their creator's affinity. Allow cores 1 and 2,
+    * alternating the preferred core, to leave core 0 for
+    * rendering/submission and core 3 for the OS. Set affinity from the
+    * worker using CUR_THREAD_HANDLE.
+    */
    {
-      const u64 hos_affinity = (1u << 1) | (1u << 2); /* cores 1 e 2 */
+      const u64 hos_affinity = (1u << 1) | (1u << 2);
       const int pref_core    = 1 + (thread_index & 1);
       svcSetThreadCoreMask(CUR_THREAD_HANDLE, pref_core, hos_affinity);
    }

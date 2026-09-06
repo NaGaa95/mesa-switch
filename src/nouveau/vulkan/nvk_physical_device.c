@@ -344,10 +344,9 @@ static bool
 nvk_sparse_binding_supported(const struct nv_device_info *info)
 {
 #ifdef __SWITCH__
-   /* The Switch nvkmd backend has no VM-bind (ctx_bind) implementation, so
-    * vkQueueBindSparse cannot be honored.  Advertise no sparse support at
-    * all rather than letting apps create sparse resources that can never be
-    * bound. */
+   /* Switch has no ctx_bind implementation; disable sparse features until
+    * vkQueueBindSparse can be supported.
+    */
    (void)info;
    return false;
 #else

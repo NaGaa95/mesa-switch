@@ -1,10 +1,5 @@
-/**
- * @file switch_mman.h
- * @brief POSIX mmap/munmap compatibility shim for Nintendo Switch (libnx)
- *
- * On Switch there is no kernel-level mmap. For Mesa's gallium usage
- * (anonymous MAP_PRIVATE allocations for buffer management), we use
- * aligned_alloc / free as a simple substitute.
+/** @file switch_mman.h
+ * Heap-backed anonymous allocation shim for Switch/libnx.
  */
 
 #ifndef _SWITCH_MMAN_H_
@@ -35,12 +30,8 @@ extern "C" {
 
 #define MAP_FAILED ((void *)-1)
 
-/**
- * mmap substitute for Switch.
- *
- * Only supports MAP_ANONYMOUS | MAP_PRIVATE allocations, which is what
- * Mesa's gallium layer uses (os_mmap in nouveau, etc.).
- * File-backed mappings (fd != -1) are not supported and will return MAP_FAILED.
+/** Heap-backed anonymous mapping. File descriptors, protection, and
+ * fixed-address semantics are unsupported.
  */
 static inline void *mmap(void *addr, size_t length, int prot, int flags,
                          int fd, off_t offset)

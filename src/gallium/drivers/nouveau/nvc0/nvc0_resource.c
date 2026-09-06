@@ -227,10 +227,10 @@ void
 nvc0_init_resource_functions(struct pipe_context *pcontext)
 {
 #ifdef __SWITCH__
-   /* Buffer and texture transfers can append M2MF/P2MF methods and their BO
-    * waits are allowed to force a kickoff.  The Horizon screen owns one
-    * pushbuf, so keep each callback (but not the returned CPU mapping's
-    * lifetime) as one recursively locked, context-bound transaction. */
+   /* Transfer callbacks can emit commands or force kickoff on the shared
+    * Horizon pushbuf. Lock and bind each callback, not the returned CPU
+    * mapping's lifetime.
+    */
    pcontext->buffer_map = nvc0_switch_buffer_transfer_map;
    pcontext->texture_map = nvc0_switch_miptree_transfer_map;
    pcontext->transfer_flush_region = nvc0_switch_transfer_flush_region;

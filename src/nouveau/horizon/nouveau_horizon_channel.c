@@ -344,9 +344,8 @@ nouveau_horizon_fence_wait_locked(
       return NOUVEAU_HORIZON_SUCCESS;
    }
 
-   /* The syncpoint command precedes SET_REPORT_SEMAPHORE, so a native fence
-    * may signal just before the mapped word changes.  Never retire its ledger
-    * slot (and therefore never reuse its command slice) until both agree.
+   /* The native syncpoint precedes the mapped report. Wait for both before
+    * retiring the ledger slot or reusing its command slice.
     */
    if (timing)
       channel->stats.mapped_completion_report_lag_events++;
@@ -577,11 +576,9 @@ nouveau_horizon_channel_poll_native_prefix_locked(
    assert(retired_out != NULL);
    *retired_out = false;
 
-   /* A zero-timeout nvFenceWait is not a userspace-only query on Horizon: it
-    * allocates/looks up a libnx event slot and performs the native event-wait
-    * ioctl.  Probe only the last fence in the exact prefix required by the
-    * watermarks.  Channel ordering then proves the whole prefix complete and
-    * avoids a periodic burst of one ioctl per ledger entry.
+   /* nvFenceWait(0) uses a libnx event/ioctl. Poll only the last fence in
+    * the required prefix; channel ordering proves the earlier entries
+    * complete.
     */
    const uint32_t wait_index =
       (channel->inflight_head + retire_count - 1) %
@@ -675,10 +672,9 @@ nouveau_horizon_channel_throttle_inflight_locked(
    if (!submit_trigger && !entry_trigger && !byte_trigger)
       return NOUVEAU_HORIZON_SUCCESS;
 
-   /* Once a high watermark is crossed, reclaim only as much oldest work as
-    * is needed to place the accepted set plus this batch at the corresponding
-    * low watermark.  A single oversized batch is allowed through after all
-    * older work retires, so a diagnostic cap can never deadlock submission.
+   /* Reclaim the oldest work down to the triggered low watermarks. Allow
+    * one oversized batch after draining older work so limits cannot
+    * deadlock submission.
     */
    const uint64_t submit_target = submit_trigger ?
       MAX2((uint64_t)channel->inflight_submit_low_watermark,
@@ -753,9 +749,8 @@ nouveau_horizon_channel_throttle_inflight_locked(
             channel, retire_count, &retired_by_poll);
       }
 
-      /* Completion fences are monotonically ordered on this channel.  Wait
-       * once on the last fence in the exact oldest prefix needed to reach the
-       * low targets, then reclaim that prefix without per-fence syscalls.
+      /* One wait on the prefix's last fence covers all earlier entries on
+       * this channel.
        */
       if (status == NOUVEAU_HORIZON_SUCCESS && !retired_by_poll) {
          const uint32_t wait_index =
@@ -812,10 +807,8 @@ nouveau_horizon_channel_append_locked(
    uint64_t addr, uint32_t command_count, uint32_t flags,
    uint32_t tail_entries, bool consume_reserved)
 {
-   /* Appending an entry is a hot path.  Native error ioctls belong at failed
-    * native operations, waits and explicit status-query boundaries, not once
-    * per GPFIFO entry.  Sticky channel/device state is sufficient to reject
-    * already-lost work here.
+   /* Check latched loss per entry. Reserve native error ioctls for
+    * failures, waits, and explicit status queries.
     */
    if (channel->error.status != NOUVEAU_HORIZON_SUCCESS)
       return channel->error.status;
@@ -1078,11 +1071,9 @@ nouveau_horizon_channel_kickoff_locked(
             (unsigned long long)channel->inflight_command_bytes);
       }
 
-      /* A failed libnx kickoff retains num_entries and fence_incr.  The raw
-       * channel fence may describe much newer accepted work than is necessary
-       * to regain one credit, while nvGpuChannelGetFence() would incorrectly
-       * include the unsent batch's increments.  Wait only the oldest tracked
-       * accepted fence and retry immediately after reclaiming that one batch.
+      /* Failed kickoff retains unsent fence increments, so
+       * nvGpuChannelGetFence() is unsuitable for recovery. Reclaim the
+       * oldest accepted batch and retry.
        */
       if (channel->inflight_count > 0) {
          for (;;) {
@@ -1213,12 +1204,9 @@ nouveau_horizon_channel_submit_locked(
 
    if (device->total_order_channels && device->global_fence_valid &&
        device->global_channel_id != channel->id) {
-      /* Only cross-channel ordering can inherit an unsignalled completion
-       * from another producer.  Poll native error events here, immediately
-       * before consuming that producer fence.  A single-channel workload
-       * therefore pays no successful eventWait syscall on every submission;
-       * failed kickoffs, fence waits and explicit status queries still poll
-       * the native notifier and retain the same device-loss semantics.
+      /* Check producer errors before inheriting a cross-channel fence.
+       * Single-channel submissions rely on error polling at kickoff
+       * failures, waits, and status queries.
        */
       status = nouveau_horizon_device_scan_channel_errors(
          device, NOUVEAU_HORIZON_INVALID_FENCE_ID, channel);
@@ -1252,10 +1240,8 @@ nouveau_horizon_channel_submit_locked(
          (uint64_t)NOUVEAU_HORIZON_GM20B_REPORT_WORDS *
             sizeof(uint32_t) : 0);
 
-   /* Reserve the complete physical tail and reclaim ledger capacity before
-    * selecting or modifying a report slice.  With one slice per ledger slot,
-    * this guarantees a pending submission can never overwrite GPU-fetchable
-    * commands from an older accepted submission, even at the 512-slot limit.
+   /* Reserve the full tail and reclaim a ledger slot before writing its
+    * report slice. Older accepted work may still fetch that storage.
     */
    status = nouveau_horizon_channel_reserve_entries_locked(
       channel, tail_entries, 0);
@@ -1324,11 +1310,9 @@ nouveau_horizon_channel_submit_locked(
    channel->last_fence_cpu_visible =
       channel->last_fence_valid &&
       completion_mode == NOUVEAU_HORIZON_COMPLETION_CPU;
-   /* Every accepted physical batch needs a trustworthy completion before an
-    * adapter may publish resource ownership or recycle command storage.  The
-    * native fence is therefore mandatory even when mapped progress reports
-    * are disabled; accepting an invalid fence would turn a successful submit
-    * into unknown completion.
+   /* Require a valid native completion for every accepted batch, even
+    * without mapped reports, before publishing ownership or recycling
+    * command storage.
     */
    if (!channel->last_fence_valid) {
       status = nouveau_horizon_channel_latch_error(
@@ -1799,9 +1783,8 @@ static enum nouveau_horizon_status
 nouveau_horizon_channel_full_barrier_locked(
    struct nouveau_horizon_channel *channel)
 {
-   /* Keep SET_REFERENCE and the following 3D no-op in distinct GPFIFO
-    * entries.  This is the key host-WFI property of deko3D's full barrier;
-    * putting both packets in one command list is not equivalent.
+   /* GM20B host-WFI requires separate GPFIFO entries for SET_REFERENCE and
+    * the following 3D no-op, as in deko3D's full barrier.
     */
    enum nouveau_horizon_status status =
       nouveau_horizon_channel_reserve_entries_locked(channel, 3, 0);
@@ -1982,21 +1965,18 @@ nouveau_horizon_channel_exec_submit(
 
    enum nouveau_horizon_status status = NOUVEAU_HORIZON_SUCCESS;
    uint64_t exec_done_ns = locked_ns;
-   /* Preflight the complete adapter transaction before appending its first
-    * entry.  In particular, exec_locked's own reservation cannot predict the
-    * optional three-entry barrier which follows it; without this combined
-    * reservation a full queue could accept the exec prefix and then reject
-    * the barrier, leaving the caller unable to account that partial batch.
+   /* Reserve execs and the optional three-entry barrier together.
+    * Otherwise capacity failure could leave an accepted prefix without its
+    * ordering barrier.
     */
    const uint32_t acquire_entries =
       exec_count > 0 && !channel->cache_acquire_emitted ? 2 : 0;
    const uint32_t barrier_entries = full_barrier ? 3 : 0;
    const uint32_t completion_entries =
       channel->mapped_completion_enabled ? 2 : 1;
-   /* reserve_entries_locked already budgets the possible implicit total-order
-    * wait. submit_locked reserves the completion tail independently after it
-    * may append that wait, so budget one additional slot here to keep that
-    * second reservation from rejecting an already-appended prefix.
+   /* Reserve an extra slot for submit_locked's tail check after its
+    * possible total-order wait; it must not reject an already-appended
+    * prefix.
     */
    const uint32_t second_order_reservation =
       channel->device->total_order_channels ? 1 : 0;

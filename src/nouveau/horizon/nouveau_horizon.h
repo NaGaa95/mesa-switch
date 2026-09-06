@@ -23,18 +23,15 @@ struct nouveau_horizon_va;
 
 /* Ownership and threading:
  *
- * - Every successful get/create/import returns one strong reference; ref()
- *   adds one and put() releases one.
- * - Devices retain the runtime.  Memory, VA and channel objects retain their
- *   device.  Each active VA binding retains its memory object.
- * - Reference-count operations are thread-safe.  Operations on a single
- *   device, VA or channel are internally serialized, but callers must still
- *   keep an object reference alive for the whole call.
- * - Normal channel destruction submits pending work and waits for its final
- *   fence before releasing command storage.  If completion cannot be proven,
- *   the native channel and every backend-owned GPU-visible object are
- *   quarantined instead of being closed, unmapped or reused.  Destroying a VA
- *   unmaps all bindings before releasing the retained memory objects.
+ * Successful get/create/import returns one strong reference; ref/put
+ * adjusts it. Devices retain the runtime; memory, VA and channels retain
+ * their device; bindings retain memory. Refcounts are thread-safe and
+ * device/VA/channel operations are serialized. Callers must retain objects
+ * throughout each call.
+ *
+ * Channel teardown submits and waits before freeing command storage, or
+ * quarantines the channel and GPU-visible storage if completion is
+ * unknown. VA teardown unmaps bindings before releasing memory.
  */
 
 enum nouveau_horizon_status {
@@ -97,10 +94,8 @@ nouveau_horizon_fence_is_valid(const struct nouveau_horizon_fence *fence)
 }
 
 struct nouveau_horizon_device_create_info {
-   /* Serialize independent physical channel submissions by inserting a GPU
-    * wait on the previous successful device submission.  This is intended as
-    * a correctness bridge for clients which do not yet track per-resource
-    * cross-channel dependencies.
+   /* Insert a GPU wait on the device's previous successful submission for
+    * clients without per-resource cross-channel dependencies.
     */
    bool total_order_channels;
 
@@ -129,12 +124,9 @@ struct nouveau_horizon_memory_info {
    uint64_t peak_allocated_B;
 };
 
-/* GM20B exposes one libnx ZBC active-slot mask for the process-wide GPU
- * table.  The 3D class consumes the inverse mask (disabled slots) through
- * both its color and depth methods.  active_slot_mask is therefore a union,
- * not independently inferred color/depth state, and slot_disable_mask must
- * be programmed into both methods.  A disabled snapshot deliberately masks
- * every hardware slot so ordinary, uncompressed clears remain correct.
+/* GM20B has one process-wide ZBC active-slot mask. Program its inverse
+ * into both color and depth methods. A disabled snapshot masks all slots
+ * for ordinary uncompressed clears.
  */
 #define NOUVEAU_HORIZON_ZBC_SLOT_COUNT 15u
 
@@ -170,11 +162,9 @@ struct nouveau_horizon_memory_create_info {
    uint8_t backing_kind;
    uint32_t flags;
 
-   /* Optional immutable interpretation of this allocation.  Exportable
-    * allocations must provide it so another logical Horizon device cannot
-    * reinterpret the same NvMap with a different PTE kind or tile layout.
-    * Private command/data allocations which are never exported may leave
-    * valid false.
+   /* Immutable layout required for exportable allocations: other devices
+    * must not reinterpret the NvMap's PTE kind or tiling. Private
+    * allocations may leave valid false.
     */
    struct nouveau_horizon_memory_layout layout;
 
@@ -188,18 +178,13 @@ struct nouveau_horizon_memory_create_info {
 struct nouveau_horizon_memory_import_info {
    uint32_t nvmap_id;
 
-   /* With require_existing, imports are restricted to an NvMap already
-    * registered by this process-wide Horizon runtime.  The canonical
-    * metadata is reused and no caller-supplied interpretation is needed.
-    * This is the safe choice for legacy handle APIs which carry an ID but no
-    * complete cache/layout descriptor.
+   /* Restrict legacy ID-only imports to identities registered in this
+    * runtime, reusing their canonical metadata.
     */
    bool require_existing;
 
-   /* Set has_metadata only when the producer contract supplies every field
-    * below.  It is required when require_existing is false.  expected_size_B
-    * may be zero when the kernel-reported allocation size is authoritative;
-    * all other fields are exact and are checked against an existing identity.
+   /* Required unless require_existing is set. Supply all metadata exactly;
+    * expected_size_B may be zero to accept the kernel-reported size.
     */
    bool has_metadata;
    uint64_t expected_size_B;
@@ -249,20 +234,17 @@ enum nouveau_horizon_mapped_completion_mode {
 struct nouveau_horizon_channel_create_info {
    enum nouveau_horizon_channel_priority priority;
 
-   /* Enable a GPU-written, CPU-uncached physical completion timeline for
-    * this channel.  It removes steady-state zero-timeout native fence ioctls,
-    * while native syncpoints remain authoritative for blocking waits and
-    * fault detection.  Adapters may enable it only for a validated GM20B 3D
-    * channel whose class is bound on subchannel zero; other engine layouts
-    * must select DISABLED.
+   /* Mapped progress avoids native polling ioctls; blocking waits and
+    * fault detection still use syncpoints. Enable only for a validated
+    * GM20B 3D channel bound on subchannel zero. Other layouts must use
+    * DISABLED.
     */
    enum nouveau_horizon_mapped_completion_mode mapped_completion_mode;
 
-   /* Bound kernel-accepted work independently of the userspace GPFIFO.
-    * Zero selects the backend default (256 high / 128 low) for submissions.
-    * Entry and command-byte limits are disabled when their high watermark is
-    * zero, but their current and peak occupancy is still tracked.  A zero low
-    * watermark derives half of its corresponding nonzero high watermark.
+   /* Limits on kernel-accepted work. Zero selects submission defaults (256
+    * high/128 low). Zero entry/byte high watermarks disable those limits,
+    * not occupancy tracking. A zero low watermark defaults to half its
+    * nonzero high watermark.
     */
    uint32_t inflight_submit_high_watermark;
    uint32_t inflight_submit_low_watermark;
@@ -271,10 +253,8 @@ struct nouveau_horizon_channel_create_info {
    uint64_t inflight_command_byte_high_watermark;
    uint64_t inflight_command_byte_low_watermark;
 
-   /* Slice used while native resource pressure is waiting for the oldest
-    * accepted fence.  Zero selects the backend default (5 ms).  Every slice
-    * polls native channel errors and the overall recovery watchdog remains in
-    * force; this is not a busy-wait interval.
+   /* Wait slice under native resource pressure; zero selects 5 ms. Each
+    * slice checks channel errors within the overall recovery watchdog.
     */
    uint64_t resource_wait_slice_ns;
 };
@@ -402,10 +382,9 @@ struct nouveau_horizon_device_debug_stats {
    uint64_t cache_from_gpu_ns;
    uint64_t cache_from_gpu_max_ns;
 
-   /* Process-wide ZBC state plus per-device adapter activity.  Query errors
-    * disable every ZBC slot and are diagnostic only; they never imply device
-    * loss.  Registration is intentionally not attempted until its public
-    * value/format contract is independently established.
+   /* Process-wide ZBC state and per-device activity. Query errors disable
+    * all slots without marking device loss. Registration requires a
+    * validated value/format contract.
     */
    uint32_t zbc_active_slot_mask;
    uint32_t zbc_slot_disable_mask;
@@ -419,11 +398,8 @@ struct nouveau_horizon_device_debug_stats {
    uint64_t zbc_programs;
    uint64_t zbc_add_failures;
 
-   /* Backing-store cache activity.  Recycling is what keeps the process heap
-    * from shattering: every native allocation is memalign()ed to the 64 KiB
-    * bind granularity, and dlmalloc splits a free chunk on both sides of such
-    * a request, so create/free churn otherwise grows the free list without
-    * bound and eventually starves both the driver and its host application.
+   /* Backing-store cache statistics. Reusing 64 KiB-aligned allocations
+    * reduces shared-heap fragmentation and NvMap churn.
     */
    uint64_t bo_cache_hits;
    uint64_t bo_cache_misses;
@@ -515,12 +491,10 @@ nouveau_horizon_memory_create(
    const struct nouveau_horizon_memory_create_info *create_info,
    struct nouveau_horizon_memory **memory_out);
 
-/* Import an NvMap ID owned by another Horizon object.  A new import wrapper is
- * not CPU mappable; same-device canonical reuse may return the producer's
- * existing CPU-mappable wrapper.  NvMap ownership and physical/cache/PTE/tile
- * metadata are canonical process-wide, while each logical device keeps its
- * own lightweight wrapper for VA binding.  An unknown ID is accepted only with
- * a complete explicit descriptor; otherwise require_existing rejects it.
+/* Import using process-wide canonical NvMap ownership/cache/layout
+ * metadata and a per-device VA wrapper. New wrappers are not CPU-mappable;
+ * same-device reuse may return a mapped producer wrapper. Unknown IDs
+ * require complete metadata and are rejected by require_existing.
  */
 enum nouveau_horizon_status
 nouveau_horizon_memory_import(
@@ -559,19 +533,15 @@ nouveau_horizon_memory_sync_from_gpu(
    struct nouveau_horizon_memory *memory,
    uint64_t offset_B, uint64_t range_B);
 
-/* Cached memory synchronization contract:
+/* Cached-memory synchronization:
  *
- * - each requested range is expanded outwards to the device's non-coherent
- *   atom size (128 bytes on GM20B), which also covers CPU cache-line rounding;
- * - callers own the whole expanded atom range: sync_to_gpu must be called
- *   after CPU writes and before any GPU access, and no CPU thread may access
- *   any byte in those atoms while GPU work is in flight;
- * - after GPU writes complete, sync_from_gpu makes them CPU-visible.
+ * Ranges expand to whole non-coherent atoms (128 bytes on GM20B). Callers
+ * own those atoms: sync_to_gpu follows CPU writes and precedes GPU access;
+ * no CPU thread may access them while GPU work is pending. After GPU
+ * writes complete, call sync_from_gpu.
  *
- * This ordering also guarantees that the conservative cache-flush fallback
- * used on Horizon systems without the invalidate-cache SVC cannot write stale
- * dirty CPU lines over completed GPU results.  Coherently mapped clients
- * should allocate CPU-uncached memory instead.
+ * This prevents stale CPU writeback when invalidation falls back to
+ * flushing. Coherent clients should use CPU-uncached memory.
  */
 
 uint64_t
@@ -637,12 +607,10 @@ nouveau_horizon_channel_create(
    const struct nouveau_horizon_channel_create_info *create_info,
    struct nouveau_horizon_channel **channel_out);
 
-/* A channel reference may own work which still reads adapter-managed command
- * or residency storage.  Callers releasing that storage must only do so after
- * PUT_COMPLETE.  PUT_RETAINED means another channel reference remains and its
- * completion is not established by this call.  PUT_QUARANTINED means final
- * native teardown could not prove completion; the backend intentionally leaks
- * the channel and its own GPU-visible storage and marks the device lost.
+/* Release adapter-owned command/residency storage only after PUT_COMPLETE.
+ * PUT_RETAINED leaves another reference and does not prove completion.
+ * PUT_QUARANTINED marks device loss and retains the native channel and
+ * backend storage because final completion is unknown.
  */
 enum nouveau_horizon_channel_put_result {
    NOUVEAU_HORIZON_CHANNEL_PUT_COMPLETE,
@@ -666,12 +634,9 @@ nouveau_horizon_channel_enqueue_waits(
    uint32_t wait_count,
    const struct nouveau_horizon_fence *waits);
 
-/* Enqueue a GM20B full engine barrier.  This is the expensive host-WFI path
- * used at rare cross-engine visibility boundaries: GPFIFO SET_REFERENCE is
- * isolated in its own entry, a 3D no-op begins the following entry, and the
- * shared L2/shader/descriptor acquire sequence is signed off with
- * NO_PREFETCH.  All commands already queued on this channel are ordered
- * before commands enqueued after this call.
+/* Order queued work before subsequent work with a GM20B host-WFI barrier:
+ * isolated SET_REFERENCE entry, a following 3D no-op, then
+ * L2/shader/descriptor acquire ending at a NO_PREFETCH boundary.
  */
 enum nouveau_horizon_status
 nouveau_horizon_channel_full_barrier(
@@ -683,11 +648,9 @@ nouveau_horizon_channel_exec(
    uint32_t exec_count,
    const struct nouveau_horizon_exec *execs);
 
-/* Append all execs, optionally append a full engine barrier, and submit the
- * resulting batch while holding the channel mutex continuously.  This is the
- * transaction-safe form for adapters which must prevent another producer on
- * the shared channel from inserting or submitting work between their command
- * entries and completion fence.
+/* Append execs, the optional full barrier, and completion under one
+ * channel lock. Other producers cannot insert or submit work within this
+ * transaction.
  */
 enum nouveau_horizon_status
 nouveau_horizon_channel_exec_submit(
@@ -717,9 +680,8 @@ enum nouveau_horizon_status
 nouveau_horizon_channel_wait_idle(
    struct nouveau_horizon_channel *channel, uint64_t timeout_ns);
 
-/* Wait for a fence with channel-local mapped-completion acceleration when
- * the fence belongs to this channel.  Foreign or untracked fences fall back
- * to the native syncpoint path.  A zero timeout is a nonblocking poll.
+/* Use mapped completion for this channel's tracked fences; otherwise use
+ * native syncpoints. A zero timeout polls without blocking.
  */
 enum nouveau_horizon_status
 nouveau_horizon_channel_fence_wait(

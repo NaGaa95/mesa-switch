@@ -266,12 +266,8 @@ nouveau_horizon_memory_identity_put(
 }
 
 
-/* Backing stores are recycled whole.  dlmalloc satisfies a 64 KiB-aligned
- * request by splitting a free chunk on both sides of the returned block, so
- * plain create/free churn manufactures two persistent free-list entries per
- * allocation and the process heap degrades until neither the driver nor its
- * host application can find contiguous space.  Reuse also keeps the NvMap
- * handle and the kernel cache-attribute transition out of the steady state.
+/* Recycle whole backing stores to reduce 64 KiB alignment fragmentation,
+ * NvMap handle churn, and kernel cache-attribute transitions.
  */
 struct nouveau_horizon_bo_cache_entry {
    struct list_head bucket_link;
@@ -558,9 +554,8 @@ nouveau_horizon_memory_create(
       identity->map = recycled->map;
       FREE(recycled);
    } else {
-      /* One trimmed retry per failure point: a populated cache must never
-       * turn recoverable pressure into a hard failure, whether the backing
-       * store or the kernel NvMap handle is what ran out.
+      /* Trim and retry once for backing or NvMap allocation failure so
+       * cached storage cannot prevent recovery.
        */
       for (unsigned attempt = 0;; attempt++) {
          identity->cpu_addr = memalign((size_t)align_B, (size_t)size_B);
@@ -613,12 +608,9 @@ nouveau_horizon_memory_create(
       }
    }
 
-   /* NvMap allocations may be exposed to another process or device object.
-    * Always clear them, even when ZERO is not requested, to avoid exposing
-    * uninitialized application memory and to provide deterministic command
-    * storage.  Recycled blocks are cleared for the same reason.  Uncached
-    * mappings take the stores directly; cached ones are cleaned so the GPU
-    * observes the zeros.
+   /* Zero new and recycled backing, even without ZERO, before possible
+    * export. Clean cached mappings so the GPU sees the zeros; uncached
+    * stores need no clean.
     */
    if (is_host_import) {
       /* Imported memory keeps its contents; clean so the GPU's first read

@@ -38,10 +38,8 @@
 #define NOUVEAU_HORIZON_RESOURCE_RECOVERY_TIMEOUT_NS UINT64_C(10000000000)
 #define NOUVEAU_HORIZON_SVC_INVALIDATE_PROCESS_DATA_CACHE 0x5d
 
-/* Buckets cover the bind-aligned sizes 64 KiB << 0 .. 64 KiB << 9; anything
- * larger is allocated and freed directly.  Both caps bound what the cache can
- * pin: bytes against the shared process heap, entries against kernel NvMap
- * handles.
+/* Cache 64 KiB through 32 MiB size buckets; free larger allocations
+ * directly. Byte and entry caps bound shared-heap and NvMap-handle usage.
  */
 #define NOUVEAU_HORIZON_BO_CACHE_BUCKETS 10u
 #define NOUVEAU_HORIZON_BO_CACHE_MAX_ENTRY_B (32ull << 20)
@@ -52,9 +50,8 @@ struct nouveau_horizon_runtime {
    uint32_t refcnt;
    bool initialized;
 
-   /* The kernel ZBC table is shared by every logical GL/Vulkan device in the
-    * process.  Keep its canonical snapshot here, next to the process-wide
-    * libnx service lifetime, rather than copying ownership into a device.
+   /* Keep the shared GL/Vulkan ZBC snapshot with the process-wide libnx
+    * runtime.
     */
    simple_mtx_t zbc_mutex;
    uint32_t zbc_sequence;
@@ -206,10 +203,9 @@ struct nouveau_horizon_channel {
    uint32_t cpu_fence_offset_words;
    uint32_t cpu_fence_words;
 
-   /* The builtin allocation is CPU-visible but neither CPU- nor GPU-cached.
-    * Each accepted submission owns the report slice with the same ring index
-    * until its mapped value has been observed.  The one-to-one capacity is a
-    * deliberate fetch-lifetime invariant, not a best-effort cache.
+   /* CPU/GPU-uncached report storage. Each accepted submission retains its
+    * matching ring slice until the mapped completion is observed; never
+    * reuse it earlier.
     */
    bool mapped_completion_enabled;
    uint32_t report_offset_words;

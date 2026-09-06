@@ -183,11 +183,10 @@ nvk_device_get_timestamp(struct vk_device *vk_dev, uint64_t *timestamp)
    return result;
 }
 
-/* The Switch links NVK directly and relies on these common implementations
- * being present in nvk_device_entrypoints: the generated entrypoint table
- * uses weak symbols, and vk_common_device_entrypoints does not carry
- * CreateFramebuffer / CreatePipelineLayout, so without these explicit
- * wrappers vkGetDeviceProcAddr("vkCreateFramebuffer") returns NULL. */
+/* Static Switch linking needs explicit wrappers for weak entrypoints
+ * absent from vk_common_device_entrypoints, including CreateFramebuffer
+ * and CreatePipelineLayout.
+ */
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
 nvk_GetDeviceProcAddr(VkDevice device, const char *pName)
 {
@@ -285,10 +284,8 @@ init_dispatch_tables(struct nvk_device *dev)
 static void
 nvk_device_init_cpu_write_mem_policy(struct nvk_device *dev)
 {
-   /* CPU-written command and transient stream allocations are write-only
-    * from the host and benefit from avoiding explicit cache publication on
-    * Horizon.  Keep GPU caching enabled; either policy can be disabled for
-    * compatibility through its environment option.
+   /* Default Horizon command/transient storage to CPU-uncached, GPU-cached
+    * memory. Environment options permit cached-CPU comparisons.
     */
    dev->cmd_mem_cpu_uncached =
       debug_get_bool_option("NVK_SWITCH_CMD_MEM_CPU_UNCACHED", true);

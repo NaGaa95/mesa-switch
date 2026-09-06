@@ -25,14 +25,9 @@ nvk_wsi_proc_addr(VkPhysicalDevice physicalDevice, const char *pName)
 {
    VK_FROM_HANDLE(nvk_physical_device, pdev, physicalDevice);
 #ifdef __SWITCH__
-   /* WSI is internal driver machinery, so it must not be gated by the
-    * application's requested Vulkan version or enabled instance extensions.
-    * Use the unchecked runtime resolver first so Vulkan 1.0 apps can still
-    * enumerate devices on Switch even though WSI itself relies on newer
-    * helper entrypoints during physical-device bring-up.
-    *
-    * Keep the public loaderless path as a fallback for any symbol that only
-    * exists there.
+   /* Internal WSI helpers must bypass the application's Vulkan
+    * version/extension gates. Try the unchecked runtime resolver, then the
+    * public loaderless resolver for remaining symbols.
     */
    PFN_vkVoidFunction func =
       vk_instance_get_proc_addr_unchecked(pdev->vk.instance, pName);

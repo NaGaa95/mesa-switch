@@ -91,11 +91,9 @@ nvc0_switch_query_arena_release(struct nvc0_context *nvc0,
    hq->mm = NULL;
    hq->switch_arena_slots = 0;
 
-   /* READY means either no GPU write was issued or the query sequence/fence
-    * has already completed.  Every non-ready standard Switch query records
-    * the exact current fence after its begin/end writes below.  The current
-    * context fence is only a conservative fallback for partially-created
-    * query objects.
+   /* READY queries need no retirement wait. Other Switch queries retain
+    * their write fence; partially initialized queries fall back to the
+    * current context fence.
     */
    if (hq->state == NVC0_HW_QUERY_STATE_READY &&
        (!retire_fence || nouveau_fence_signalled(retire_fence))) {
@@ -157,10 +155,10 @@ nvc0_switch_query_dedicated_release(struct nvc0_context *nvc0,
    struct nouveau_bo *bo = hq->bo;
    struct nouveau_fence *retire_fence = hq->fence;
 
-   /* Transfer the query's reference either to exact-fence work or to a safe
-    * quarantine.  Dedicated fallback BOs have no mman token to keep their
-    * storage alive, unlike arena slices, so dropping this reference while a
-    * result write is pending would unmap memory still owned by the GPU. */
+   /* Dedicated BOs have no mman token retaining their storage. Transfer
+    * the query reference to fence work or quarantine until the GPU result
+    * write completes.
+    */
    hq->bo = NULL;
    if (hq->state == NVC0_HW_QUERY_STATE_READY &&
        (!retire_fence || nouveau_fence_signalled(retire_fence))) {
@@ -212,10 +210,8 @@ nvc0_hw_query_allocate(struct nvc0_context *nvc0, struct nvc0_query *q,
          nvc0_switch_query_arena_release(nvc0, hq);
       else if (hq->switch_query_dedicated)
          nvc0_switch_query_dedicated_release(nvc0, hq);
-      /* Deferred arena retirement owns an mman allocation which keeps its
-       * parent BO referenced until the exact query fence signals.  Drop the
-       * query object's BO reference after queuing that retirement.  The
-       * dedicated path transfers its reference directly to fence work above.
+      /* The deferred mman allocation retains the arena BO until the query
+       * fence signals. The query can now drop its own BO reference.
        */
       if (hq->bo)
          nouveau_bo_ref(NULL, &hq->bo);
@@ -236,11 +232,10 @@ nvc0_hw_query_allocate(struct nvc0_context *nvc0, struct nvc0_query *q,
    }
    if (size) {
 #ifdef __SWITCH__
-      /* Query storage is persistently accessed by both the CPU and GPU: the
-       * CPU initializes sequence words, the GPU writes results, and fast
-       * availability checks read them without a blocking BO_WAIT.  The arena
-       * is CPU/GPU uncached and uses whole 128-byte-or-larger slots so neither
-       * cache maintenance nor false sharing can hide the sequence update.
+      /* CPU initialization and nonblocking availability reads share
+       * storage with GPU result writes. Use CPU/GPU-uncached slots of at
+       * least 128 bytes to avoid hidden sequence updates and false
+       * sharing.
        */
       const unsigned arena_size =
          util_next_power_of_two(MAX2(size, NVC0_SWITCH_QUERY_SLOT_SIZE));
@@ -565,9 +560,8 @@ nvc0_hw_end_query(struct nvc0_context *nvc0, struct nvc0_query *q)
    default:
       break;
    }
-   /* On Switch every standard query allocation can be an arena slice, so all
-    * GPU-written queries need a precise retirement fence, not only the
-    * 64-bit queries that use a fence for availability on other platforms.
+   /* All Switch query allocations may share an arena, so every GPU-written
+    * query needs a retirement fence, including non-64-bit queries.
     */
 #ifdef __SWITCH__
    if (hq->state != NVC0_HW_QUERY_STATE_READY)

@@ -162,9 +162,6 @@ nvk_AllocateMemory(VkDevice device,
 
    const bool not_shared = handle_types == 0;
    bool pinned_to_vram = false;
-#ifdef HAVE_SWITCH_PLATFORM
-   bool compressed_mapping = false;
-#endif
 
    /* Align to os page size (typically 4K) as a start as this works for
     * everything, and then depending on placement and size, we either keep
@@ -179,14 +176,9 @@ nvk_AllocateMemory(VkDevice device,
       mem->dedicated_image = image;
 
 #ifdef __SWITCH__
-      /* Switch (GM20B): no DRM format modifiers and no discrete VRAM.  Any
-       * dedicated block-linear image is bound with NIL's pte_kind/tile_mode
-       * so the GPU MMU is programmed correctly; WSI scanout images carry the
-       * uncompressed pte_kind (can_compress is false for them).  When the
-       * image is compressible, NIL's compressed_pte_kind selects the
-       * compressed mapping kind and lets nvgpu track the backing compression
-       * metadata.  struct vk_image also has no drm_format_mod field on this
-       * platform.
+      /* Use NIL kinds for dedicated Switch block-linear images.
+       * Compressible private images use compressed_pte_kind; scanout stays
+       * uncompressed. Horizon has no discrete VRAM or DRM modifiers.
        */
       if (image->vk.tiling == VK_IMAGE_TILING_OPTIMAL &&
           image->plane_count == 1 &&
@@ -195,9 +187,6 @@ nvk_AllocateMemory(VkDevice device,
          tile_mode = image->planes[0].nil.tile_mode;
          if (image->can_compress && not_shared) {
             pte_kind = image->planes[0].nil.compressed_pte_kind;
-#ifdef HAVE_SWITCH_PLATFORM
-            compressed_mapping = true;
-#endif
          } else {
             pte_kind = image->planes[0].nil.pte_kind;
          }

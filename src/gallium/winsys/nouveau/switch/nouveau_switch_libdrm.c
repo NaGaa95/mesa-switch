@@ -50,15 +50,11 @@ enum nouveau_switch_completion_source_state {
    NOUVEAU_SWITCH_COMPLETION_SOURCE_FAILED,
 };
 
-/* BOs retain this small adapter object, never the native channel itself.
- * While ACTIVE, its lock pins the borrowed producer and device across a
- * CPU-fence upgrade.  Upgrades run on an independent completion-only channel:
- * the Gallium render channel therefore has exactly one submit owner and an
- * upgrade can never consume its pending exec vector or fence marker.  The
- * Horizon device is created with total_order_channels=true; that ordering is
- * required so later render use waits after a BO record is replaced by the
- * sync-channel completion.  Pushbuf teardown first waits the producer idle,
- * then retires the source under this lock before releasing the producer.
+/* BOs retain this adapter, which borrows the producer channel. Its lock
+ * protects CPU-fence upgrades on a separate completion channel.
+ * total_order_channels must stay enabled so later rendering waits for
+ * replacement completions. Teardown waits the producer idle, then retires
+ * this source under its lock before releasing the channel.
  */
 struct nouveau_switch_completion_source {
    int refcnt;
@@ -185,11 +181,9 @@ nouveau_switch_completion_source_upgrade_cpu_fence(
       }
    }
 
-   /* A physical render batch commonly owns many BO records.  Reuse the one
-    * completion-only fence for exact duplicate producer completions instead
-    * of adding one cross-channel wait/submit per BO.  Equality deliberately
-    * avoids threshold arithmetic on BO records which may survive wraparound
-    * for an unbounded time.
+   /* Reuse completion upgrades only for equal producer fences. BO records
+    * may outlive syncpoint wraparound, making threshold comparisons unsafe
+    * here.
     */
    if (source->cached_cpu_fence_valid &&
        source->cached_producer_fence.id == physical_fence->id &&
@@ -1198,9 +1192,8 @@ nouveau_bo_name_ref(struct nouveau_device *device, uint32_t name,
 {
    const struct nouveau_horizon_memory_import_info import_info = {
       .nvmap_id = name,
-      /* The legacy API carries no cache or modifier descriptor.  Only reuse
-       * an identity whose complete metadata was registered by a producer in
-       * this process; unknown external names require the explicit entrypoint.
+      /* Legacy imports require metadata registered in this process.
+       * Unknown external NvMap IDs need the explicit import API.
        */
       .require_existing = true,
    };
@@ -1285,13 +1278,9 @@ bo_wait_fence(struct nouveau_switch_bo *bo, uint32_t access)
             return -EIO;
          }
 
-         /* Preserve NOUVEAU_BO_NOBLOCK semantics across the lightweight
-          * GPU-fence to CPU-visible-fence upgrade.  The upgrade is an ordered
-          * channel submission and may otherwise wait behind unfinished work
-          * (or native submission pressure) before the zero-timeout check
-          * below gets a chance to run.  Poll the exact producer fence first;
-          * only an already-complete producer is eligible for the tiny cache-
-          * clean completion upgrade on a nonblocking access.
+         /* For NOUVEAU_BO_NOBLOCK, poll the producer before upgrading to
+          * CPU-visible completion. Submitting the upgrade first could
+          * block behind unfinished GPU work or native resource pressure.
           */
          if (access & NOUVEAU_BO_NOBLOCK) {
             if ((int32_t)fence.id < 0) {
@@ -1541,11 +1530,8 @@ nouveau_switch_bo_sync_to_gpu(struct nouveau_bo *bo)
       const unsigned calls = cached && device->perf_enabled ?
          (unsigned)p_atomic_inc_return(&switch_bo->cache_to_gpu_calls) : 0;
 
-      /* A cached parent BO can contain many Gallium suballocations.  A
-       * write to one slice currently dirties the public parent BO, so a hot
-       * large allocation is both a useful correctness clue and a major
-       * performance cost.  Log only exponentially spaced samples to keep
-       * long game traces bounded.
+      /* Dirtying a suballocation flushes its cached parent BO. Sample
+       * exponentially to bound diagnostic output.
        */
       if (cached && device->perf_enabled && bo->size >= (1u << 20) &&
           calls >= 8 &&

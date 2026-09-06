@@ -138,9 +138,8 @@ nvk_queue_state_update(struct nvk_queue *queue,
    if (!dirty)
       return VK_SUCCESS;
 
-   /* Worst case is 12 dwords each for image and sampler pools, 17 for SLM,
-    * and 4 for the two Switch ZBC packets: 45 total.  Keep explicit growth
-    * headroom instead of consuming the old 64-dword budget implicitly.
+   /* Worst case: image/sampler pools (12 dwords each), SLM (17), Switch
+    * ZBC (4): 45 total, plus growth headroom.
     */
    uint32_t push_data[80];
    static_assert(ARRAY_SIZE(push_data) >= 45,
@@ -751,10 +750,9 @@ nvk_queue_try_destroy(struct nvk_device *dev, struct nvk_queue *queue)
       return true;
    }
 
-   /* This timeline signal is ordered after every prior submission on the
-    * execution channel.  Nothing owned by the queue may be released until it
-    * is observed, because push_stream embeds both command BO ownership and
-    * the recycle-list links needed to keep those BOs alive.
+   /* Wait for this signal after all prior submissions before releasing
+    * queue resources. push_stream owns command BOs and the recycle-list
+    * links retaining them.
     */
    VkResult result =
       nvk_mem_stream_sync(dev, &queue->push_stream, queue->exec_ctx);
@@ -777,10 +775,9 @@ nvk_queue_try_destroy(struct nvk_device *dev, struct nvk_queue *queue)
       }
    }
 
-   /* Put the native channel while all adapter-owned command storage is still
-    * alive.  Horizon may quarantine a zero-reference channel when its final
-    * completion cannot be established; propagate that result to the logical
-    * device instead of freeing the queue around a leaked native channel.
+   /* Keep command storage alive through the checked channel put. If
+    * completion is unknown, retain the queue and quarantine the containing
+    * device.
     */
    if (queue->exec_ctx != NULL &&
        !nvkmd_switch_ctx_try_destroy(queue->exec_ctx, &queue->vk.base)) {

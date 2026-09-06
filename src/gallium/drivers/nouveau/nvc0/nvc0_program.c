@@ -1130,12 +1130,10 @@ nvc0_program_upload(struct nvc0_context *nvc0, struct nvc0_program *prog)
          IMMED_NVC0(nvc0->base.pushbuf, NVC0_3D(SERIALIZE), 0);
 #endif
 
-         /* Free every shader allocation while retaining the builtin library.
-          * A priv-less in-use block is a previously quarantined shader range;
-          * the successful barrier above now makes it safe to recover too.
-          * Mark every bound stage dirty before making this destructive: any
-          * later allocation failure must force a complete retry rather than
-          * leave a previously-clean stage pointing at reclaimed text.
+         /* After the barrier, reclaim all shader ranges, including
+          * quarantined blocks without priv, while retaining the builtin
+          * library. Dirty all bound stages first so allocation failure
+          * forces a complete upload retry.
           */
          nvc0->dirty_3d |= NVC0_NEW_3D_VERTPROG |
                            NVC0_NEW_3D_TCTLPROG |

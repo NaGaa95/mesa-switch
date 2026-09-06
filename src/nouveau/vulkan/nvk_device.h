@@ -48,10 +48,9 @@ struct nvk_device {
 
    struct nvkmd_dev *nvkmd;
 
-   /* Horizon A/B policy for CPU-written, GPU-read internal allocations.
-    * These remain false on non-Switch platforms.  COHERENT on Horizon means
-    * a CPU-uncached mapping; GPU caching remains enabled unless the separate
-    * NVKMD_MEM_GPU_UNCACHED bit is present.
+   /* Horizon-only CPU mapping policy. COHERENT selects CPU-uncached
+    * memory; GPU caching is controlled separately by
+    * NVKMD_MEM_GPU_UNCACHED.
     */
    bool cmd_mem_cpu_uncached;
    bool mem_stream_cpu_uncached;

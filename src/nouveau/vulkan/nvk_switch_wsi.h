@@ -22,12 +22,8 @@
 extern "C" {
 #endif
 
-/* Layout information needed to hand a VkImage/VkDeviceMemory pair to the
- * Horizon compositor via NvGraphicBuffer.
- *
- * For now we only support the GM20B scanout-compatible configuration:
- * a single-plane, non-disjoint, block-linear image whose dedicated
- * VkDeviceMemory is backed by a libnx NvMap.
+/* Horizon scanout layout: a single-plane, non-disjoint, block-linear image
+ * with dedicated NvMap-backed memory.
  */
 struct nvk_switch_scanout_layout {
    /* Numeric NvMap ID owning the pixels.  The memory object retains the
@@ -59,35 +55,23 @@ struct nvk_switch_scanout_layout {
    uint8_t pte_kind;
 };
 
-/* Populate scanout layout for a bound (image, memory) pair.
- *
- * Preconditions:
- *   - `image` and `memory` belong to the same VkDevice.
- *   - `image` is single-plane, non-disjoint, tiled (pte_kind != 0), and
- *     was allocated with a dedicated VkMemoryDedicatedAllocateInfo.
- *   - `memory` is backed by the Switch nvkmd backend.
- *
- * Returns VK_ERROR_FEATURE_NOT_PRESENT if any precondition is violated,
- * so the WSI can cleanly fall back to the CPU-blit path.
+/* Requires a bound image/memory pair from the same device: single-plane,
+ * non-disjoint, tiled image with dedicated Switch memory. Returns
+ * VK_ERROR_FEATURE_NOT_PRESENT for unsupported pairs.
  */
 VkResult nvk_switch_get_scanout_layout(VkImage image,
                                        VkDeviceMemory memory,
                                        struct nvk_switch_scanout_layout *out);
 
-/* Extract the libnx native fence payload currently installed on a VkFence.
- * Returns true iff the fence has a real GPU-side payload attached
- * (post-submit or copied from another native sync); false if the fence is
- * unsignaled / CPU-only, in which case the caller should fall back to
- * waiting on the VkFence host-side before presenting.
+/* Export an installed native VkFence payload. If absent or CPU-only,
+ * return false; presentation must wait on the Vulkan fence instead.
  */
 bool nvk_switch_fence_peek_nvmultifence(VkFence fence, NvMultiFence *out);
 bool nvk_switch_fence_peek_nvfence(VkFence fence, NvFence *out);
 
-/* Install a libnx release fence as a temporary Vulkan acquire payload.
- *
- * Returns VK_ERROR_FEATURE_NOT_PRESENT if the fence cannot be represented by
- * the Switch-native sync type, allowing the caller to fall back to a CPU wait
- * plus dummy sync.
+/* Import a native release fence as a temporary Vulkan acquire payload.
+ * VK_ERROR_FEATURE_NOT_PRESENT requires a CPU wait and dummy sync
+ * fallback.
  */
 VkResult nvk_switch_semaphore_import_nvfence(VkDevice device,
                                              VkSemaphore semaphore,

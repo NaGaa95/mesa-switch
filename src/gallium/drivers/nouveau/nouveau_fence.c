@@ -80,11 +80,10 @@ nouveau_fence_quarantine_work(struct nouveau_fence *fence)
 
    struct nouveau_fence_work *work, *tmp;
 
-   /* Ownership of work->data was transferred to the callback when work was
-    * queued.  If physical completion is unknown, deliberately retain that
-    * ownership graph: invoking an unref/free callback could recycle storage
-    * still touched by the GPU.  The callback nodes themselves carry no GPU
-    * ownership and may be discarded. */
+   /* Retain work->data until GPU completion is known: callbacks may free
+    * live storage. The callback nodes own no GPU storage and can be
+    * discarded.
+    */
    LIST_FOR_EACH_ENTRY_SAFE(work, tmp, &fence->work, list) {
       list_del(&work->list);
       FREE(work);
@@ -181,11 +180,9 @@ nouveau_fence_cleanup(struct nouveau_context *nv)
    struct nouveau_fence *candidate = NULL;
    bool completed = true;
 
-   /* _nouveau_fence_next() emits the old fence, drops nv->fence and then
-    * allocates its replacement.  Replacement OOM therefore legitimately
-    * leaves nv->fence NULL while the emitted, list-owned fence still retains
-    * nv as its context.  Cleanup must be driven by both ownership locations,
-    * not gated solely on the current-fence pointer.
+   /* Replacement-fence OOM can leave nv->fence NULL while an emitted,
+    * list-owned fence still references nv. Detach fences from both
+    * ownership locations.
     */
    nouveau_screen_submission_lock(nv->screen);
    simple_mtx_lock(&fence_list->lock);
@@ -208,13 +205,10 @@ nouveau_fence_cleanup(struct nouveau_context *nv)
    if (drain)
       completed = _nouveau_fence_wait(drain, NULL, UINT64_MAX);
 
-   /* A Gallium fence handle may legally outlive its pipe context.  Switch
-    * uses a screen-owned pushbuf, so emitted fences can still be polled or
-    * waited through that stable object after context destruction.  Detach
-    * every unsignalled list entry owned by this context before it is freed;
-    * otherwise a later fence_finish would dereference stale context state.
-    * The local reference also covers a fence which completed and left the
-    * screen list during the wait, or one whose emission failed early.
+   /* Fences can outlive their context through the screen-owned Switch
+    * pushbuf. Detach unsignaled entries before freeing the context. Keep a
+    * local reference across waits and failed emission, which may remove
+    * the fence from the screen list.
     */
    for (struct nouveau_fence *fence = fence_list->head;
         fence; fence = fence->next) {
@@ -223,11 +217,10 @@ nouveau_fence_cleanup(struct nouveau_context *nv)
    }
    if (drain && drain->context == nv)
       drain->context = NULL;
-   /* A successful wait normally creates a fresh, un-emitted nv->fence via
-    * _nouveau_fence_next().  It is not on fence_list yet, so detach it
-    * explicitly before dropping the context's reference as well.  No
-    * externally retained fence can therefore preserve a stale nv pointer,
-    * even if teardown is raced by an otherwise-invalid client. */
+   /* A successful wait can leave a new, un-emitted nv->fence outside
+    * fence_list. Detach it before dropping the context reference to avoid
+    * a stale nv pointer.
+    */
    if (nv->fence && nv->fence->context == nv)
       nv->fence->context = NULL;
    if (!completed) {
@@ -334,10 +327,10 @@ nouveau_fence_kick(struct nouveau_fence *fence)
    simple_mtx_assert_locked(&fence_list->lock);
 
 #ifdef __SWITCH__
-   /* Public waits can kick a fence owned by a context other than the one that
-    * last recorded into the screen-owned pushbuf.  The caller holds the
-    * recursive submission lock before fence.lock, so rebind before either
-    * fence emission or a physical kickoff can invoke kick_notify. */
+   /* Rebind the fence's context before emission or kickoff can invoke
+    * kick_notify. The caller holds the recursive submission lock before
+    * fence.lock.
+    */
    if (context)
       nouveau_pushbuf_bind_context(push, context);
 #endif
@@ -360,10 +353,9 @@ nouveau_fence_kick(struct nouveau_fence *fence)
    }
 
 #ifdef __SWITCH__
-   /* A deferred Switch submission is marked FLUSHED once it enters the
-    * software batch.  If no physical-batch completion has been associated
-    * yet, force the native GPFIFO kickoff.  Successful physical kickoffs
-    * attach their exact completion to every Gallium fence in that batch.
+   /* FLUSHED may mean only software-batched on Switch. Kick off work
+    * without a physical completion so each logical fence receives its
+    * batch's native fence.
     */
    if (fence->state < NOUVEAU_FENCE_STATE_SIGNALLED &&
        !fence->native_fence_valid) {
@@ -424,11 +416,9 @@ _nouveau_fence_wait(struct nouveau_fence *fence,
       return false;
 
 #ifdef __SWITCH__
-   /* Keep nonblocking progress checks on the coherent shared sequence word.
-    * This avoids allocating a libnx fence event for query/status polling,
-    * while blocking waits use the exact native completion associated with
-    * this physical GPFIFO batch.  It preserves upstream's removal of the old
-    * unbounded shared-word spin loop.
+   /* Poll the coherent sequence word without allocating libnx events.
+    * Blocking waits use the batch's native fence, never an unbounded
+    * shared-word spin.
     */
    for (uint32_t poll = 0; poll < 32; poll++) {
       _nouveau_fence_update(screen, false);
@@ -476,11 +466,9 @@ _nouveau_fence_wait(struct nouveau_fence *fence,
       return false;
    }
 
-   /* Native completion orders the query write, so the sequence word is due
-    * momentarily.  Give it a bounded settle window rather than a fixed
-    * number of scheduler yields: a false failure here propagates to
-    * glFinish/glClientWaitSync as an error and quarantine-leaks the screen
-    * at teardown, which is far worse than a short wait.
+   /* Allow a bounded interval for the sequence write to become visible
+    * after native completion; a premature failure would propagate to GL
+    * waits and retain the screen at teardown.
     */
    const int64_t settle_deadline_ns =
       os_time_get_nano() + 10 * 1000 * 1000;
@@ -539,10 +527,9 @@ _nouveau_fence_next(struct nouveau_context *nv)
 
    simple_mtx_assert_locked(&fence_list->lock);
 
-   /* Replacement allocation failure deliberately leaves nv->fence NULL.
-    * Later forced kickoffs must propagate that dead-context state instead of
-    * dereferencing it; Switch cleanup will drain the last list-owned fence if
-    * possible and quarantine the ownership graph otherwise. */
+   /* Allocation failure leaves nv->fence NULL. Propagate the failure;
+    * teardown drains the remaining work or quarantines its resources.
+    */
    if (!nv->fence)
       return false;
 

@@ -114,11 +114,9 @@ nvk_descriptor_table_map_locked(struct nvk_descriptor_table *table,
                                               table->desc_size);
 }
 
-/* Descriptor tables are written by the CPU and only ever read by the GPU.
- * On non-coherent memory, publish each slot as soon as it changes rather
- * than only at the next submit: the GPU may still be reading a slot that is
- * being cleared or reused, and a deferred clean would leave the previous
- * descriptor, and the image address it carries, visible to that work.
+/* Publish CPU-written descriptor slots immediately on non-coherent memory,
+ * so cleared or reused entries do not retain stale image addresses until
+ * the next submission.
  */
 static void
 nvk_descriptor_table_publish_locked(struct nvk_descriptor_table *table,

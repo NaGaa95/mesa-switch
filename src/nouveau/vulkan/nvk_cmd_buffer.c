@@ -233,11 +233,9 @@ nvk_cmd_buffer_flush_push_flags(struct nvk_cmd_buffer *cmd,
          if (cmd->pushes.size >= sizeof(struct nvk_cmd_push)) {
             struct nvk_cmd_push *last =
                util_dynarray_top_ptr(&cmd->pushes, struct nvk_cmd_push);
-            /* A SYNC/no-prefetch bit belongs to the beginning of a GPFIFO
-             * entry.  Extending an existing SYNC entry with following
-             * contiguous commands is safe because the combined entry still
-             * cannot be fetched early.  A new SYNC segment must remain a
-             * boundary and therefore may not be folded backward.
+            /* SYNC/no-prefetch applies at entry start. An existing SYNC
+             * entry can absorb following contiguous commands, but a new
+             * SYNC segment must retain its start boundary.
              */
             if (!push.no_prefetch &&
                 last->map != NULL &&
@@ -475,13 +473,10 @@ nvk_cmd_buffer_switch_sync_host(struct nvk_cmd_buffer *cmd)
 
    cmd->switch_mme_sync_pending = false;
 
-   /* Re-arm the semaphore word from the host on every execution.  The word
-    * lives in this command buffer's upload stream, so the record-time zero
-    * above covers only the first submission; on a re-submitted command
-    * buffer the word still holds 1 from the previous pass and the acquire
-    * below would complete before the engine release retires.  RELEASE_WFI
-    * is disabled so this stays a plain in-order PBDMA store, not a channel
-    * wait-for-idle.
+   /* Reset the semaphore on every execution; record-time initialization
+    * leaves a stale 1 on resubmission, allowing an early acquire. Disable
+    * RELEASE_WFI for an in-order PBDMA store without waiting for channel
+    * idle.
     */
    struct nv_push *p = nvk_cmd_buffer_push(cmd, 5);
    __push_mthd(p, SUBC_NV9097, NV906F_SEMAPHOREA);
@@ -584,10 +579,8 @@ nvk_BeginCommandBuffer(VkCommandBuffer commandBuffer,
       cmd->state.inherited_pipeline_statistics =
          pBeginInfo->pInheritanceInfo->pipelineStatistics;
 
-   /* Start with a nop so we have at least something to submit.  Prefer a
-    * subchannel whose object/context state is already initialized on the
-    * queue; using the copy engine here trips Switch bring-up because an
-    * otherwise empty graphics command buffer would touch NV90B5 first.
+   /* Give empty command buffers a NOP on an initialized subchannel.
+    * Touching the copy engine first can fault on Switch.
     */
    struct nv_push *p = nvk_cmd_buffer_push(cmd, 2);
    if (queue_flags & VK_QUEUE_GRAPHICS_BIT) {
@@ -735,10 +728,8 @@ enum nvk_switch_barrier_resource {
    NVK_SWITCH_BARRIER_IMAGE,
 };
 
-/* Generic MEMORY_READ expands according to the destination stages.  That can
- * legally produce buffer-only access bits for a generic memory barrier, but
- * those bits are impossible for images and impossible for buffers lacking
- * the corresponding usage.  Filter only those provably impossible cases.
+/* MEMORY_READ expansion can include buffer-only accesses. Filter accesses
+ * incompatible with the resource type or buffer usage.
  */
 static VkAccessFlags2
 nvk_switch_filter_mme_dst_access(VkPipelineStageFlags2 stages,

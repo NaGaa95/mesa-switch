@@ -283,9 +283,9 @@ enum switch_release_status {
     SWITCH_RELEASE_GPU_ERROR,
 };
 
-/* Finish any rendering which may reference the currently dequeued image and
- * return a compositor-safe release fence.  When Nouveau cannot expose a
- * native syncpoint, wait on the CPU before returning an empty multifence. */
+/* Flush the dequeued image and export its release fence. If native fences
+ * are unavailable, wait on the CPU before returning an empty multifence.
+ */
 static enum switch_release_status
 switch_prepare_release_fence(struct st_context *st,
                              struct switch_egl_surface *surface,
@@ -313,9 +313,8 @@ switch_prepare_release_fence(struct st_context *st,
         return SWITCH_RELEASE_SAFE;
     }
 
-    /* ENODATA means this context has never produced native work; an empty
-     * release fence is exact in that case.  Other failures are durable GPU
-     * errors, not a reason to export a stale resource last-use fence.
+    /* ENODATA means no native work was submitted. Other errors must not
+     * fall back to a stale last-use fence.
      */
     if (fence_ret == -ENODATA)
         return SWITCH_RELEASE_SAFE;
@@ -340,10 +339,9 @@ switch_window_buffer_set_create(struct switch_framebuffer *fb,
                                 struct switch_window_buffer_set *set)
 {
     struct pipe_screen *screen = fb->base.fscreen->screen;
-    /* fb->template is scratch state for state-tracker attachment validation:
-     * requesting depth/stencil or accum permanently changes its format/bind.
-     * Presentation images must therefore be described independently of the
-     * last attachment which happened to be validated. */
+    /* Attachment validation mutates fb->template's format and bind flags.
+     * Describe presentation images independently.
+     */
     struct pipe_resource templ = {
         .target = PIPE_TEXTURE_RECT,
         .format = fb->base.visual->color_format,
@@ -792,10 +790,10 @@ switch_egl_surface_cleanup(struct switch_egl_surface *surface)
                 switch_prepare_release_fence(context ? context->st : NULL,
                                              surface, &release_fence);
             if (release_status == SWITCH_RELEASE_GPU_ERROR) {
-                /* A stale fence would let the compositor or allocator reuse
-                 * memory which the failed channel may still reference.  No
-                 * Horizon API can safely revoke that work, so quarantine the
-                 * complete drawable until process teardown instead. */
+                /* A failed channel may still reference this memory.
+                 * Quarantine the drawable until process teardown instead
+                 * of exporting a stale fence.
+                 */
                 mesa_loge("egl-switch present: retaining lost surface slot "
                           "%d and its resources after GPU error %d",
                           surface->cur_slot, surface->submission_error);
@@ -1446,10 +1444,9 @@ switch_initialize(_EGLDisplay *dpy)
     dpy->Extensions.KHR_create_context_no_error = EGL_TRUE;
     dpy->Extensions.KHR_surfaceless_context = EGL_TRUE;
     dpy->Extensions.MESA_horizon_surface_resize = EGL_TRUE;
-    /* Release-behavior NONE can leave shared-channel rendering without a
-     * durable native fence when its window surface is destroyed.  Until the
-     * backend can retain and retire such work per context, don't accept an
-     * EGL attribute whose teardown semantics we cannot honor safely. */
+    /* Reject release-behavior NONE until pending shared-channel work can
+     * be retained and retired safely during surface destruction.
+     */
     dpy->Extensions.KHR_context_flush_control = EGL_FALSE;
 
     /* The frontend does not plumb driconf into st_config_options. */
@@ -1550,12 +1547,8 @@ switch_create_context(_EGLDisplay *dpy, _EGLConfig *conf,
         case EGL_OPENGL_API:
             switch (context->base.Profile) {
                 case EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT_KHR:
-                    /* There are no profiles before OpenGL 3.2.  The
-                     * EGL_KHR_create_context spec says:
-                     *
-                     *     "If the requested OpenGL version is less than 3.2,
-                     *      EGL_CONTEXT_OPENGL_PROFILE_MASK_KHR is ignored and the functionality
-                     *      of the context is determined solely by the requested version.."
+                    /* EGL_KHR_create_context ignores the profile mask
+                     * before OpenGL 3.2.
                      */
 
                     if (attribs.major > 3 || (attribs.major == 3 && attribs.minor >= 2)) {
@@ -1598,7 +1591,7 @@ switch_create_context(_EGLDisplay *dpy, _EGLConfig *conf,
         attribs.flags |= ST_CONTEXT_FLAG_FORWARD_COMPATIBLE;
     if (context->base.Flags & EGL_CONTEXT_OPENGL_ROBUST_ACCESS_BIT_KHR)
         attribs.context_flags |= PIPE_CONTEXT_ROBUST_BUFFER_ACCESS;
-    if (context->base.Flags & EGL_CONTEXT_OPENGL_NO_ERROR_KHR || context->base.NoError)
+    if (context->base.NoError)
         attribs.flags |= ST_CONTEXT_FLAG_NO_ERROR;
 
     if (context->base.ResetNotificationStrategy != EGL_NO_RESET_NOTIFICATION_KHR)
@@ -1730,9 +1723,9 @@ switch_make_current(_EGLDisplay* dpy, _EGLSurface *dsurf,
         _mesa_glthread_finish(cont->st->ctx);
     }
 
-    /* The state tracker only flushes automatically when changing contexts.
-     * Rebinding the same context to a different drawable would otherwise let
-     * the old NWindow surface reach teardown before it owns a durable fence. */
+    /* The state tracker does not flush when rebinding the same context.
+     * Fence the old drawable before it can be destroyed.
+     */
     struct switch_egl_surface *releasing_draw =
         old_dsurf != dsurf ? switch_egl_surface(old_dsurf) : NULL;
     struct switch_egl_surface *releasing_read =
@@ -2104,12 +2097,10 @@ switch_resize_surface(_EGLDisplay *dpy, _EGLSurface *surf,
                          "switch_resize_surface: NWindow reconfiguration failed");
     }
 
-    /* NWindow now owns only replacement registrations.  Move their Gallium
-     * references into the surface before dropping the old set.  Releasing a
-     * Gallium resource cannot race the GPU release fence used for cancellation:
-     * the Switch BO destructor waits its last native read/write fence before
-     * releasing the NvMap, VA and storage, and quarantines them if that wait
-     * cannot prove completion. */
+    /* Transfer replacement registrations before releasing the old
+     * resources. BO destruction waits for native reads/writes and
+     * quarantines storage if completion is unknown.
+     */
     switch_surface_invalidate_window_attachments(surface, context->st, true);
     for (unsigned i = 0; i < NUM_BUFFERS; i++) {
         pipe_resource_reference(&surface->buffers[i], NULL);
@@ -2272,10 +2263,9 @@ switch_swap_buffers(_EGLDisplay *dpy, _EGLSurface *surf)
    surface->attachments[ST_ATTACHMENT_FRONT_LEFT] = old_back;
    p_atomic_inc(&surface->drawable->stamp);
 
-   /* Invalidate framebuffer state so the state tracker re-validates
-    * attachments on the next draw call (lightweight flag set, matching
-    * the DRI frontend pattern — NOT st_manager_validate_framebuffers
-    * which would eagerly call nwindowDequeueBuffer). */
+   /* Defer attachment validation to the next draw; eager validation would
+    * dequeue an NWindow buffer here.
+    */
    st_context_invalidate_state(context->st, ST_INVALIDATE_FB_STATE);
 
    return EGL_TRUE;
@@ -2290,10 +2280,8 @@ switch_get_proc_address(const char *procname)
     return _mesa_glapi_get_proc_address(procname);
 }
 
-/* eglWaitClient / eglWaitGL: finish all client API rendering for the
- * current context.  eglapi.c calls this hook unconditionally after
- * validation, so it must exist even though native rendering never overlaps
- * EGL surfaces on Horizon.
+/* Required eglWaitClient/eglWaitGL hook: finish rendering for the current
+ * context.
  */
 static EGLBoolean
 switch_wait_client(_EGLDisplay *disp, _EGLContext *ctx)

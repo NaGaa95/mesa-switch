@@ -41,10 +41,9 @@
 #include "nouveau_switch_libdrm.h"
 #include "nouveau_switch_public.h"
 
-/* Maximum backend-only overhead beyond Gallium's local exec vector: initial
- * cache acquire (2), full barrier (3), mapped completion tail (2), Horizon's
- * final native skid (4), and a possible total-order wait (1).  Client acquire
- * waits already queued directly in Horizon are tracked separately below.
+/* Backend entry budget: cache acquire (2), full barrier (3), mapped report
+ * (2), native skid (4), total-order wait (1). Track client acquire waits
+ * separately.
  */
 #define NOUVEAU_SWITCH_GPFIFO_SKID 12u
 #define NOUVEAU_SWITCH_DEFAULT_BATCH_SUBMITS 128u
@@ -80,12 +79,9 @@ struct nouveau_switch_pending_ref {
 
 struct nouveau_pushbuf_priv {
    struct nouveau_pushbuf base;
-   /*
-    * Mesa 26.2 makes kick notification fallible, while the public Nouveau
-    * compatibility prefix still exposes the historical void callback.  Keep
-    * the fallible callback in our Mesa-owned private tail; no external object
-    * layout is involved.
-   */
+   /* Keep Mesa's fallible kick callback in the private tail; the public
+    * compatibility prefix retains its void callback ABI.
+    */
    bool (*kick_notify)(struct nouveau_pushbuf *);
    uint32_t (*native_kick_notify)(struct nouveau_pushbuf *,
                                   const NvFence *, bool cpu_visible);
@@ -469,12 +465,10 @@ pushbuf_kref(struct nouveau_pushbuf *push, struct nouveau_bo *bo,
    return kref;
 }
 
-/* Closing a logical record transfers its command-BO hold to pending_refs, but
- * the CPU allocator intentionally keeps the unused tail of that BO current.
- * Arm a new, non-owning recording epoch after the old krec is completely
- * reset.  The first range (or space validation) in that epoch materializes
- * exactly one kref/hold.  This makes a missing kref an intentional state, not
- * something inferred and repaired after commands have already been written.
+/* Closing a record transfers its command-BO hold to pending_refs but
+ * retains the unused tail for recording. Start the new epoch without a
+ * hold; its first range or space validation acquires exactly one kref
+ * after resetting the old record.
  */
 static void
 pushbuf_arm_current_command_record(struct nouveau_pushbuf_priv *nvpb)
@@ -624,10 +618,8 @@ pushbuf_try_merge_exec(struct nouveau_horizon_exec *last,
                        uint64_t address, uint32_t size_B,
                        bool no_prefetch)
 {
-   /* Follow NVK's proven merge constraints, with the additional explicit
-    * rule that a NO_PREFETCH sign-off remains an entry boundary on both
-    * sides.  Gallium does not currently create incomplete chains, but keep
-    * that boundary immutable if it gains such a producer later.
+   /* Never merge across NO_PREFETCH or incomplete-chain boundaries,
+    * including either side of a NO_PREFETCH entry.
     */
    if (last->no_prefetch || no_prefetch || last->incomplete ||
        last->addr > UINT64_MAX - last->size_B ||
@@ -1159,10 +1151,9 @@ pushbuf_native_kick_impl(struct nouveau_pushbuf *push)
       nvpb->last_native_fence_valid &&
       !nvpb->last_native_fence_cpu_visible &&
       !nvpb->pending_submits && !nvpb->full_barrier_pending;
-   /* This marker was published only after its complete logical command record
-    * joined the pending physical batch.  Capture it before submission so a
-    * callback can never associate a fence emitted by a record which is still
-    * being converted (for example, across an ensure_gpfifo_space() kickoff).
+   /* Capture the last fully published record before submitting. Capacity
+    * kickoffs during conversion must not associate the unfinished record's
+    * fence.
     */
    const bool submitted_fence_marker_valid =
       nvpb->pending_fence_marker_valid;
@@ -1224,10 +1215,9 @@ pushbuf_native_kick_impl(struct nouveau_pushbuf *push)
       if (nvpb->diagnostics_enabled)
          nvpb->stats.gallium_fences_assigned += assigned;
       if (assigned == 0) {
-         /* The batch has been accepted, but without its opaque Gallium
-          * boundary no logical fence may claim that completion.  Retain all
-          * pending BO/command ownership and fail the pushbuf permanently;
-          * teardown may release it only after proving the channel idle.
+         /* Without a Gallium batch marker, accepted work has no logical
+          * completion. Retain its BOs, fail the pushbuf, and release only
+          * after teardown proves the channel idle.
           */
          pushbuf_mark_fatal_native(
             nvpb, "Gallium physical-batch association", 0);
@@ -1251,9 +1241,8 @@ pushbuf_native_kick_impl(struct nouveau_pushbuf *push)
    nvpb->pending_fence_cookie = 0;
    nvpb->full_barrier_pending = false;
 
-   /* This adapter is now the sole submit owner of the render channel.  The
-    * shared backend transaction has consumed exactly the local exec vector;
-    * any residual local work here would make BO/fence publication ambiguous.
+   /* This adapter exclusively submits the render channel. Residual local
+    * work after submission would make fence/BO publication ambiguous.
     */
    assert(nvpb->pending_exec_count == 0);
    assert(nvpb->queued_entries == 0);
@@ -1509,10 +1498,9 @@ pushbuf_submit_logical_impl(struct nouveau_pushbuf *push,
       for (int i = 0; i < krec->nr_buffer; i++, kref++)
          pending_ref_add(push, kref, logical_fence_ptr);
 
-      /* pending_ref_add transfers every kref hold and client-map ownership to
-       * pending_refs.  Publish that ownership change immediately, before a
-       * fallible cache-tail append or physical/batch-limit kick can return;
-       * error teardown must never see the same hold in both containers.
+      /* Publish the transfer to pending_refs before any fallible append or
+       * kickoff. Error cleanup must not see the same hold in both
+       * containers.
        */
       krec->nr_buffer = 0;
 
@@ -1527,9 +1515,8 @@ pushbuf_submit_logical_impl(struct nouveau_pushbuf *push,
       krec = krec->next;
    }
 
-   /* Publish only after every command entry in this logical record has joined
-    * the pending physical batch.  Any space/residency kickoff taken inside the
-    * loop above therefore sees only the previous, already-published boundary.
+   /* Publish after the entire record joins the batch. Capacity kickoffs
+    * above must see only the previous complete record.
     */
    if (logical_fence_valid && appended_logical_work) {
       nvpb->pending_fence_cookie = logical_fence_cookie;
@@ -1790,11 +1777,8 @@ nouveau_pushbuf_new(struct nouveau_client *client, struct nouveau_object *chan,
    push->client = client;
    push->channel = immediate ? chan : NULL;
    push->flags = NOUVEAU_BO_RD | NOUVEAU_BO_GART | NOUVEAU_BO_MAP;
-   /* Command streams are written continuously and consumed once.  Keep the
-    * command ring CPU/GPU uncached, matching the original Switch nouveau
-    * implementation and deko3d.  Cached 512 KiB command BOs otherwise force
-    * a whole-BO cache clean at every logical submission, which is especially
-    * expensive in CPU-bound GL workloads.
+   /* Keep command BOs CPU/GPU-uncached to avoid whole-BO cache cleans at
+    * each logical submission.
     */
    nvpb->type = NOUVEAU_BO_GART | NOUVEAU_BO_COHERENT;
    nvpb->batch_enabled = env_bool("NOUVEAU_SWITCH_BATCH", true);
@@ -1953,10 +1937,8 @@ nouveau_pushbuf_del(struct nouveau_pushbuf **out_push)
       pushbuf_log_perf(nvpb, "final");
    }
 
-   /* A failed native kickoff may have consumed some or all queued entries
-    * even when no trustworthy completion fence was returned.  Keep every
-    * referenced BO alive and mapped until channel teardown proves completion;
-    * only then is it safe to release the pending residency set.
+   /* Failed kickoff may still consume entries. Retain referenced BOs and
+    * mappings until channel teardown proves completion.
     */
    if (nvpb->channel_ready) {
       const enum nouveau_horizon_status idle_status =
@@ -1964,11 +1946,9 @@ nouveau_pushbuf_del(struct nouveau_pushbuf **out_push)
       const bool idle_complete =
          idle_status == NOUVEAU_HORIZON_SUCCESS;
 
-      /* Completion sources contain a borrowed channel pointer.  Retire the
-       * source while the channel is still alive; this waits for any concurrent
-       * BO upgrade holding the source lock and makes all surviving BO records
-       * permanently complete (or permanently failed) without a channel/BO
-       * reference cycle.
+      /* Retire the source before releasing its borrowed channel. Its lock
+       * drains concurrent BO upgrades and leaves surviving records
+       * permanently complete or failed without a reference cycle.
        */
       nouveau_switch_completion_source_retire(
          nvpb->completion_source, idle_complete);
@@ -1980,12 +1960,10 @@ nouveau_pushbuf_del(struct nouveau_pushbuf **out_push)
 
       if (!idle_complete ||
           put_result != NOUVEAU_HORIZON_CHANNEL_PUT_COMPLETE) {
-         /* The native channel may still fetch any GPFIFO command or touch any
-          * resource in its submitted residency set.  Keep this entire object
-          * alive: pending_refs, validation krefs, command BOs, z-cull context,
-          * and their client ownership links collectively pin all such storage.
-          * Detach the public channel so a later BO lookup cannot submit through
-          * this deliberately leaked pushbuf after its owner has gone away.
+         /* Unknown completion requires retaining all command/resource
+          * storage and ownership links, including the Z-cull context.
+          * Detach the public channel to prevent submission through this
+          * quarantined pushbuf.
           */
          nvpb->base.channel = NULL;
          _debug_printf(
@@ -2317,10 +2295,8 @@ nouveau_switch_pushbuf_kick_full_barrier(
    if (ret)
       return pushbuf_latch_error(nvpb, ret);
 
-   /* Keep the barrier local with the complete exec vector.  The shared
-    * backend appends both and submits them under one channel lock, so neither
-    * another producer nor a completion-only fence upgrade can split this
-    * ordering boundary.
+   /* Submit the barrier and exec vector under one Horizon channel lock so
+    * no other producer can split their ordering.
     */
    nvpb->tail_queued = true;
    nvpb->full_barrier_pending = true;
@@ -2433,10 +2409,8 @@ nouveau_switch_pushbuf_get_cpu_fence(struct nouveau_pushbuf *push,
    nvpb->cpu_completion_requested = true;
    int ret = pushbuf_flush_logical(push);
    if (!ret) {
-      /* Logical flushing may have crossed a capacity/batch boundary and
-       * consumed the pre-armed CPU request in an intermediate native kick.
-       * Re-arm it so the final physical tail returned to the caller is always
-       * CPU-visible as well.
+      /* An intermediate kickoff may consume the CPU-completion request.
+       * Re-arm it for the final tail returned to the caller.
        */
       nvpb->cpu_completion_requested = true;
       ret = pushbuf_native_kick(push);
@@ -2470,10 +2444,8 @@ nouveau_switch_pushbuf_upgrade_physical_cpu_fence(
        nvpb->last_native_fence.id != physical_fence->id)
       return -ENODATA;
 
-   /* A newer CPU-visible completion on this channel also dominates the
-    * already-associated physical fence.  Reuse it without another native
-    * submission.  The caller only enters this path for a fence which was
-    * originally associated as GPU-only, so count the resolved upgrade.
+   /* Reuse a newer CPU-visible completion that covers this GPU-only fence,
+    * and count the resolved upgrade.
     */
    if (nvpb->last_native_fence_cpu_visible &&
        nvpb->last_native_fence.value == physical_fence->value) {
@@ -2493,10 +2465,9 @@ nouveau_switch_pushbuf_upgrade_physical_cpu_fence(
       return pushbuf_invalid_state(
          nvpb, "active render channel returned no CPU completion fence");
 
-   /* The completion-only channel waits on the exact render fence and performs
-    * the cache-clean CPU completion without consuming any queued render exec,
-    * Gallium marker, or BO ownership.  last_native_fence remains the render
-    * channel tail; callers replace only their exact observed logical/BO fence.
+   /* Upgrade the observed fence on the completion channel without
+    * consuming render commands or ownership. Keep last_native_fence as the
+    * render tail.
     */
    if (nvpb->diagnostics_enabled)
       nvpb->stats.cpu_completion_upgrades++;
@@ -2555,10 +2526,9 @@ nouveau_switch_pushbuf_wait_fence_required(struct nouveau_pushbuf *push,
    if (ret != -ETIMEDOUT)
       return ret;
 
-   /* A timeout from a public GL sync is not necessarily fatal, but an
-    * internal dependency which must complete before command generation can
-    * proceed has no safe recovery path.  Poison the channel immediately so
-    * callers cannot keep queueing work behind an unsatisfied dependency.
+   /* An unsatisfied internal dependency prevents safe command generation.
+    * Poison the channel; unlike a public GL wait timeout, it cannot be
+    * retried by the application.
     */
    pushbuf_mark_fatal_native(nvpb, reason, 0);
    return pushbuf_latch_error_at(nvpb, -EIO,

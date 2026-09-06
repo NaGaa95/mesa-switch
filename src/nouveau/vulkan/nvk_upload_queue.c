@@ -73,10 +73,9 @@ nvk_upload_queue_try_finish(struct nvk_device *dev,
       return false;
    }
 
-   /* Keep the stream BOs alive until channel_put() has independently proven
-    * final native completion.  The checked put consumes the channel reference
-    * even when Horizon must quarantine it, so failure is terminal and the
-    * containing device has to remain allocated.
+   /* Retain stream BOs until checked channel teardown proves completion.
+    * Failure still consumes the channel reference and requires
+    * quarantining the containing device.
     */
    if (!nvkmd_switch_ctx_try_destroy(queue->ctx, &dev->vk.base)) {
       vk_loge(VK_LOG_OBJS(&dev->vk.base),

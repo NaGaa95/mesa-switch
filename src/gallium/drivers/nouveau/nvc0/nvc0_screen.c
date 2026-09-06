@@ -85,10 +85,7 @@ nvc0_switch_zbc_update(struct nvc0_screen *screen,
                     NVB197_SET_COLOR_ZERO_BANDWIDTH_CLEAR + 4,
                  "GM20B color/depth ZBC methods must be consecutive");
 
-   /* GM20B binds the Maxwell B 3D class (0xb197); the NVB197_* ZBC methods
-    * below belong to it.  Gating on the Maxwell A class made this whole
-    * update path unreachable on the only supported chip.
-    */
+   /* GM20B uses Maxwell B (0xb197), matching the NVB197 ZBC methods below. */
    if (screen == NULL || push == NULL || generation == NULL ||
        screen->eng3d == NULL ||
        screen->eng3d->oclass != GM200_3D_CLASS)
@@ -675,11 +672,9 @@ nvc0_switch_text_bo_fini(struct nvc0_screen *screen)
                             &screen->switch_text_bo_retirements, head) {
       list_del(&retired->head);
 
-      /* Context teardown normally drains the channel before screen teardown,
-       * but use the stored exact completion as the authority.  This wait is
-       * intentionally outside state_lock.  If completion cannot be proven,
-       * leak the retained BO reference as a teardown-only quarantine rather
-       * than letting bo_destroy wait, free, or reuse live GPU storage.
+      /* Wait on the stored completion outside state_lock. If it fails,
+       * retain the BO reference at teardown because the GPU may still use
+       * the storage.
        */
       const int ret = nouveau_switch_pushbuf_wait_fence_required(
          screen->base.pushbuf, &retired->fence, UINT64_MAX,
@@ -739,11 +734,10 @@ nvc0_screen_destroy(struct pipe_screen *pscreen)
       return;
 
 #ifdef __SWITCH__
-   /* Fence callbacks can own dedicated query BOs, shader/text allocations and
-    * other GPU-visible objects which are not all represented by query-arena
-    * live_slots.  If a context's exact infinite drain failed, no teardown
-    * order can prove those objects idle.  Preserve the full device ownership
-    * graph rather than unmapping storage which the GPU may still access. */
+   /* A failed context drain leaves query BOs, shader allocations, and
+    * other fence-owned resources potentially in use. Retain the full
+    * device ownership graph; live_slots alone cannot track them all.
+    */
    if (screen->base.fence_teardown_quarantined) {
       _debug_printf("nouveau/switch: retaining screen/device after failed "
                     "context fence drain\n");
@@ -805,10 +799,9 @@ nvc0_screen_destroy(struct pipe_screen *pscreen)
    }
    simple_mtx_unlock(&stats->lock);
 
-   /* Context teardown drains its current fence before reaching screen
-    * destruction, so all fence_work slot retirements must have run.  Never
-    * tear down a live allocator if that invariant is violated: deferred work
-    * still owns its screen/stats pointer and safe quarantine beats UAF/reuse.
+   /* Context teardown should retire all slots. Keep the allocator alive if
+    * any remain, since deferred work still references the screen and its
+    * stats.
     */
    if (stats->live_slots == 0 && screen->switch_query_mm) {
       nouveau_mm_destroy(screen->switch_query_mm);
@@ -818,10 +811,8 @@ nvc0_screen_destroy(struct pipe_screen *pscreen)
       _debug_printf("nouveau/switch: query arena still has %u live slots "
                     "after context drain; quarantining screen/allocator\n",
                     stats->live_slots);
-      /* Do not destroy the mutex or allocator: a late completion callback
-       * may still own both.  Keep the enclosing screen/device alive as well,
-       * because the callback deliberately stores their stable stats address.
-       * This is an abnormal teardown-only leak and is safer than UAF/reuse.
+      /* Late callbacks may still reference the mutex, allocator, and
+       * screen/device stats. Retain them all on this teardown failure.
        */
       return;
    } else {
@@ -1098,12 +1089,10 @@ nvc0_screen_resize_text_area(struct nvc0_screen *screen, struct nouveau_pushbuf 
 
       simple_mtx_assert_locked(&screen->state_lock);
 
-      /* A successful full-barrier kick invalidates pushbuf residency and its
-       * final validation may immediately seed a reference-only record for
-       * the still-current text BO.  Remove that persistent binding, then
-       * drain the reference before transferring screen ownership.  Otherwise
-       * a later batch could attach a newer GPU-only fence and make its final
-       * kref release enter bo_destroy under the fence lock.
+      /* Post-barrier validation can retain the old text BO in a
+       * reference-only record. Remove its binding and drain that reference
+       * before transferring ownership, so later work cannot trigger BO
+       * destruction under fence.lock.
        */
       if (push->bufctx)
          nouveau_bufctx_reset(push->bufctx, NVC0_BIND_3D_TEXT);
@@ -1131,10 +1120,9 @@ nvc0_screen_resize_text_area(struct nvc0_screen *screen, struct nouveau_pushbuf 
          return -EBUSY;
       }
 
-      /* Runtime growth is entered only after a successful GPU-only full
-       * barrier.  Refuse the resize if that exact physical completion is not
-       * available: guessing at an older/newer fence would make BO reuse
-       * unsound.  The initial allocation has no old text BO and skips this.
+      /* Require the exact completion from the full GPU barrier before
+       * replacing an existing text BO. Initial allocation has no old BO to
+       * retire.
        */
       simple_mtx_lock(&screen->base.fence.lock);
       const bool have_fence =

@@ -1974,10 +1974,9 @@ resource_create(struct pipe_screen *pscreen,
    return &res->base.b;
 
 fail_obj:
-   /* resource_object_create() succeeded, so obj owns a live image/bo and a
-    * surface cache; obj->bo may be a slab-interior pointer that must never
-    * see a raw FREE.  Tear the object down properly (both users reach here
-    * with obj->dt == NULL).
+   /* The object owns an image/BO and surface cache. obj->bo may point
+    * inside a slab; use the object destructor. Both failure paths have
+    * obj->dt == NULL.
     */
    zink_destroy_resource_object(screen, res->obj);
 fail:

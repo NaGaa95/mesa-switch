@@ -355,9 +355,8 @@ nvc0_resource_validate(struct nvc0_context *nvc0, struct nv04_resource *res, uin
 /* nvc0_context.c */
 struct pipe_context *nvc0_create(struct pipe_screen *, void *, unsigned flags);
 
-/* Serialize access to the screen-owned Switch channel.  The implementation is
- * recursive only for the current thread/screen so generic fence waits called
- * from an already-locked draw path preserve state_lock -> fence.lock order.
+/* Recursive per-thread/screen locking preserves state_lock -> fence.lock
+ * order when a Switch draw path waits on a fence.
  */
 void nvc0_screen_state_lock(struct nvc0_screen *);
 void nvc0_screen_state_unlock(struct nvc0_screen *);

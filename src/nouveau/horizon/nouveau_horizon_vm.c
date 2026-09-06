@@ -397,10 +397,8 @@ nouveau_horizon_va_bind(struct nouveau_horizon_va *va,
       const Result cleanup_rc =
          nvAddressSpaceUnmap(&device->addr_space, mapped_addr);
       if (R_FAILED(cleanup_rc)) {
-         /* The kernel accepted a mapping outside the fixed reservation and
-          * then refused to remove it.  Preserve both the backing reference
-          * and its PTE-kind reservation: releasing either would allow live
-          * GPU address-space state to alias recycled storage.
+         /* Failed unmapping leaves a live GPU mapping. Retain its backing
+          * and PTE-kind reservation to prevent aliasing recycled storage.
           */
          mapping->addr = mapped_addr;
          mapping->range_B = range_B;

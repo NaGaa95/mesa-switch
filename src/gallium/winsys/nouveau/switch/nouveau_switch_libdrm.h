@@ -30,13 +30,9 @@ struct nv_device_info;
 struct nouveau_switch_bo_pool;
 struct nouveau_switch_completion_source;
 
-/* Horizon cache-policy extension for NOUVEAU_BO_COHERENT allocations.
- *
- * NOUVEAU_BO_COHERENT selects CPU-uncached storage in the Switch adapter.
- * Small command and synchronization allocations are GPU-uncached as well.
- * Streaming GART data instead wants deko3D's proven default: CPU-uncached but
- * GPU-cached, with a channel cache-acquire before execution.  This private bit
- * requests that second policy without changing public libdrm_nouveau flags.
+/* NOUVEAU_BO_COHERENT selects CPU-uncached storage. This private bit keeps
+ * streaming GART data GPU-cached, with a channel acquire before execution.
+ * Command/sync allocations remain GPU-uncached.
  */
 #define NOUVEAU_BO_SWITCH_GPU_CACHED 0x08000000u
 
@@ -195,11 +191,8 @@ void nouveau_switch_device_get_pool_stats(
 int
 nouveau_switch_horizon_status_to_errno(enum nouveau_horizon_status status);
 
-/*
- * Keep the compatibility-list operations single-evaluation.  In particular,
- * callers append with an expression such as "head.prev".  Re-evaluating that
- * expression after changing head.prev makes an empty-list append self-link the
- * new node without linking it from the head, and corrupts subsequent appends.
+/* Evaluate list arguments once: expressions such as head.prev change
+ * during insertion, so evaluating them again can corrupt the list.
  */
 static inline void
 nouveau_switch_list_init(struct nouveau_list *item)

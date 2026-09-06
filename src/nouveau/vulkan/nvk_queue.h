@@ -121,9 +121,8 @@ VkResult nvk_queue_create(struct nvk_device *dev,
 void nvk_queue_destroy(struct nvk_device *dev, struct nvk_queue *queue);
 
 #ifdef HAVE_SWITCH_PLATFORM
-/* Returns false only when Switch teardown cannot prove that GPU references
- * are gone.  In that case the queue and its complete ownership graph remain
- * live and the caller must quarantine the containing device as well.
+/* False means Switch completion is unknown: retain the queue's resources
+ * and quarantine its containing device.
  */
 bool nvk_queue_try_destroy(struct nvk_device *dev, struct nvk_queue *queue);
 #endif

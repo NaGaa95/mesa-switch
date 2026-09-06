@@ -52,9 +52,8 @@ nouveau_horizon_get_gm20b_info(struct nv_device_info *info_out)
    /* GM20B is UMA.  Do not invent dedicated VRAM or a PCI BAR. */
    info_out->vram_size_B = 0;
    info_out->bar_size_B = 0;
-   /* Maxwell exposes 64 KiB per SMM, but a single workgroup can address at
-    * most 48 KiB.  Keep both values: consumers use the former for carveout
-    * selection and the latter for API limits and compiler validation.
+   /* Use 64 KiB per SMM for carveout selection and the 48 KiB
+    * per-workgroup limit for API/compiler validation.
     */
    info_out->sm_smem_sizes_kB[0] = 64;
    info_out->sm_smem_size_count = 1;

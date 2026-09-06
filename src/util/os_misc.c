@@ -82,10 +82,8 @@
 #  include <malloc.h>
 #  include <switch.h>
 
-/* libnx's default and application-provided heap initializers publish the
- * newlib heap through these globals.  svcSetHeapSize reserves that entire
- * range up front, so Horizon's process-used counter cannot describe how much
- * memory malloc can still provide after startup.
+/* libnx reserves the newlib heap up front. These globals expose allocator
+ * capacity that Horizon's process-used counter cannot measure.
  */
 extern char *fake_heap_start;
 extern char *fake_heap_end;
@@ -499,9 +497,8 @@ os_get_available_system_memory(uint64_t *size)
       return true;
    }
 
-   /* A non-newlib runtime may not publish a fake heap.  The kernel counters
-    * remain the best fallback in that case, although a normal libnx process
-    * should always take the allocator-aware path above.
+   /* Fall back to kernel counters when the runtime does not publish a
+    * newlib heap.
     */
    uint64_t total, used;
    if (R_FAILED(svcGetInfo(&total, InfoType_TotalMemorySize,

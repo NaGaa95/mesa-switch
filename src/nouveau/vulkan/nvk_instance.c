@@ -227,10 +227,10 @@ nvk_CreateInstance(const VkInstanceCreateInfo *pCreateInfo,
    STATIC_ASSERT(sizeof(instance->driver_build_sha) == BLAKE3_KEY_LEN);
    copy_build_id_to_sha1(instance->driver_build_sha, note);
 #else
-   /* No dl_iterate_phdr (e.g. Switch / static-only platforms): use a fixed
-    * pseudo build-id derived from the package version. The shader cache
-    * UUID will be stable for a given driver build but won't change between
-    * incremental rebuilds. */
+   /* Without dl_iterate_phdr, derive the build ID from the package
+    * version. Incremental rebuilds with the same version retain the cache
+    * UUID.
+    */
    STATIC_ASSERT(sizeof(instance->driver_build_sha) == BLAKE3_KEY_LEN);
    memset(instance->driver_build_sha, 0, BLAKE3_KEY_LEN);
    const char fallback_id[] = "nvk-" PACKAGE_VERSION;

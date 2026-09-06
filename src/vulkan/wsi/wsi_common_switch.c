@@ -37,12 +37,9 @@ struct wsi_switch {
    struct wsi_interface base;
 };
 
-/* DestroySwapchainKHR cannot report a failed NWindow release.  Keep a
- * process-lifetime record outside the swapchain object so destroying that
- * object cannot make uncertain compositor ownership look safe again.  This
- * path is exceptional, so a fixed registry avoids relying on allocation in
- * the failure path.  Overflow deliberately poisons every NWindow rather than
- * risk reusing storage which the compositor may still reference.
+/* Keep uncertain NWindow ownership across swapchain destruction, which
+ * cannot report errors. Use a fixed registry to avoid failure-path
+ * allocation; overflow poisons all windows.
  */
 #define WSI_SWITCH_MAX_POISONED_NWINDOWS 16
 static simple_mtx_t wsi_switch_poisoned_nwindows_lock =
@@ -138,11 +135,9 @@ wsi_switch_surface_get_capabilities(VkIcdSurfaceBase *icd_surface,
    if (nw && nwindowIsValid(nw))
       nwindowGetDimensions(nw, &width, &height);
 
-   /* libnx's NWindow holds at most one dequeued slot at a time, so this
-    * backend can only ever grant one concurrent acquire.  The spec lets an
-    * application acquire imageCount - minImageCount + 1 images without
-    * waiting for a present; the only way to make that equal 1 is to pin the
-    * image count.  Triple buffering matches libnx/deko3d defaults.
+   /* NWindow permits one dequeued slot. Pin imageCount == minImageCount ==
+    * 3 so Vulkan's imageCount - minImageCount + 1 acquire allowance is
+    * one.
     */
    caps->minImageCount = 3;
    caps->maxImageCount = 3;
@@ -327,10 +322,8 @@ struct wsi_switch_image {
    bool have_acquire_fence;
    NvMultiFence acquire_fence;
 
-   /* Dedicated memory backing this image. We do not use wsi_create_image
-    * here because we need full control over the tiling / dedicated-alloc
-    * plumbing so NVK picks block-linear + NvKind_Generic_16BX2 and the
-    * compositor can scan it out directly.
+   /* Allocate dedicated block-linear scanout memory directly so NVK and
+    * the compositor use matching tiling.
     */
    VkDeviceMemory memory;
    struct nvk_switch_scanout_layout layout;
@@ -457,10 +450,9 @@ wsi_switch_create_scanout_image(struct wsi_switch_swapchain *chain,
     * nvk_device_memory.c, the 5b.A hunk) will notice the tiling and
     * program pte_kind / tile_mode accordingly.
     */
-   /* Mark the image as a scanout target.  NVK keys can_compress off
-    * vk_image::wsi_legacy_scanout, so this keeps swapchain images
-    * uncompressed — the Horizon compositor scans out raw block-linear and
-    * cannot decode GPU compression tags. */
+   /* wsi_legacy_scanout disables compression: Horizon scanout cannot
+    * decode GPU compression tags.
+    */
    const struct wsi_image_create_info wsi_image_info = {
       .sType = VK_STRUCTURE_TYPE_WSI_IMAGE_CREATE_INFO_MESA,
       .scanout = true,
@@ -578,17 +570,9 @@ wsi_switch_create_scanout_image(struct wsi_switch_swapchain *chain,
    img->base.offsets[0] = img->layout.offset_B;
    img->base.row_pitches[0] = img->layout.row_stride_B;
 
-   /* Mirror deko3d's dk_swapchain.cpp NvGraphicBuffer layout exactly —
-    * that driver is the known-working baseline for libnx scanout on this
-    * GPU. Any field deko3d leaves at zero we also leave at zero via the
-    * aggregate initializer below. In particular: no grbuf.type, no
-    * planes[0].scan, no per-plane flags.
-    *
-    * planes[0].kind is hardcoded to NvKind_Generic_16BX2 because the
-    * Horizon compositor always decodes scanout surfaces with that kind,
-    * regardless of what NVK chose for the GPU MMU PTE. NVK's dedicated
-    * scanout alloc (nvk_device_memory.c, the 5b.A hunk) programs the
-    * matching PTE kind so the GPU and compositor agree.
+   /* Match deko3d's NvGraphicBuffer layout, leaving unused fields zero.
+    * The compositor uses NvKind_Generic_16BX2; NVK's dedicated scanout
+    * allocation must use the matching PTE kind.
     */
    NvGraphicBuffer grbuf = { 0 };
    grbuf.header.num_ints =
@@ -625,10 +609,9 @@ wsi_switch_create_scanout_image(struct wsi_switch_swapchain *chain,
 
    Result rc = nwindowConfigureBuffer(chain->nw, slot, &grbuf);
    if (R_FAILED(rc)) {
-      /* A failed Binder transaction does not prove whether the compositor
-       * accepted the registration.  Keep this image and all previously
-       * configured images alive until process teardown rather than freeing
-       * storage which NWindow may still reference. */
+      /* Failed Binder registration leaves ownership unknown. Retain this
+       * and previously registered images until process teardown.
+       */
       wsi_switch_swapchain_mark_nwindow_unknown(chain);
       return VK_ERROR_SURFACE_LOST_KHR;
    }
@@ -745,18 +728,8 @@ wsi_switch_swapchain_release_images(struct wsi_swapchain *wsi_chain,
    return VK_SUCCESS;
 }
 
-/* Timed reimplementation of libnx's nwindowDequeueBuffer().
- *
- * The stock function hard-codes eventWait(UINT64_MAX), so it cannot honor
- * VkAcquireNextImageInfoKHR::timeout — a timeout==0 poll would block, and a
- * finite timeout would be ignored.  This mirrors its logic exactly (the
- * NWindow struct fields and the bq and event calls it uses are all public
- * libnx API) but waits on the BufferQueue release event with the caller's
- * deadline instead.
- *
- * Returns VK_SUCCESS (slot/fence written), VK_NOT_READY (timeout==0, nothing
- * available), VK_TIMEOUT (deadline expired), or VK_ERROR_OUT_OF_DATE_KHR on a
- * hard dequeue failure.
+/* NWindow dequeue with timed release-event waits. The no-event fallback
+ * still blocks for positive timeouts.
  */
 static VkResult
 wsi_switch_dequeue_buffer(NWindow *nw, uint64_t timeout_ns,
@@ -769,11 +742,8 @@ wsi_switch_dequeue_buffer(NWindow *nw, uint64_t timeout_ns,
       return VK_ERROR_OUT_OF_DATE_KHR;
    }
 
-   /* NWindow tracks a single dequeued slot.  A second concurrent acquire is
-    * an application forward-progress violation with our pinned image count;
-    * report it as not-ready/timeout rather than OUT_OF_DATE, which would
-    * send well-behaved recovery paths into an endless swapchain-recreate
-    * loop.
+   /* A second acquire exceeds NWindow's single-slot allowance. Return
+    * not-ready/timeout without triggering swapchain recreation.
     */
    if (nw->cur_slot >= 0) {
       mutexUnlock(&nw->mutex);
@@ -790,10 +760,9 @@ wsi_switch_dequeue_buffer(NWindow *nw, uint64_t timeout_ns,
    bool ownership_unknown = false;
 
    if (eventActive(&nw->event)) {
-      /* Async BufferQueue: the release event is signaled whenever a buffer
-       * becomes dequeuable.  Wait on it with the remaining time, then poll
-       * the dequeue; loop on a lost race the same way nwindowDequeueBuffer
-       * does. */
+      /* Wait for a release event with the remaining timeout, then dequeue
+       * asynchronously. Retry if another consumer wins the race.
+       */
       for (;;) {
          uint64_t wait_ns = UINT64_MAX;
          if (!infinite) {
@@ -1042,14 +1011,8 @@ wsi_switch_swapchain_destroy(struct wsi_swapchain *wsi_chain,
 
    bool released = wsi_switch_swapchain_cancel_outstanding_images(chain);
 
-   /* Keep the scanout images alive until after the NWindow slots are released.
-    * Horizon may still be scanning out the most recently queued buffer when
-    * the swapchain is destroyed on app exit; freeing the backing NvMap first
-    * can expose a brief white/garbage flash during layer teardown.
-    *
-    * The old EGL Switch path does the same thing in practice:
-    * cancel/dequeue cleanup first, nwindowReleaseBuffers next, then drop the
-    * backing resources once the window side has let go of them.
+   /* Release NWindow registrations before freeing scanout backing; the
+    * compositor may still reference the last presented image.
     */
    if (released)
       released = wsi_switch_swapchain_close_nwindow_buffers(chain);
@@ -1081,11 +1044,10 @@ wsi_switch_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
 
    assert(pCreateInfo->sType == VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR);
 
-   /* A non-null oldSwapchain is retired even if creating its replacement
-    * fails.  NWindow has a single registration set, so release the old slots
-    * before configuring any replacement buffers.  The old VkImages remain
-    * alive until their swapchain is destroyed, but no longer own the NWindow
-    * registrations and cannot release the replacement set later.
+   /* Retire oldSwapchain even if replacement fails. Release its NWindow
+    * registrations before configuring new ones, while retaining its
+    * VkImages until destruction. The old chain must never release
+    * replacement registrations.
     */
    if (pCreateInfo->oldSwapchain != VK_NULL_HANDLE) {
       VK_FROM_HANDLE(wsi_switch_swapchain, old_chain,
@@ -1107,12 +1069,8 @@ wsi_switch_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
 
    const VkPresentModeKHR present_mode =
       wsi_swapchain_get_present_mode(wsi_device, pCreateInfo);
-   /* The surface capabilities pin min == max == 3 so that the spec's
-    * imageCount - minImageCount + 1 concurrent-acquire allowance equals the
-    * single slot NWindow can hold; ignore out-of-range requests instead of
-    * honoring an image count whose acquire contract we cannot serve.  A
-    * fixed count also keeps NWindow's slots stable across FIFO/IMMEDIATE
-    * transitions.
+   /* Match the advertised fixed three-image count and single concurrent
+    * acquire. Stable slots also support FIFO/IMMEDIATE transitions.
     */
    const uint32_t num_images = 3;
 
@@ -1134,10 +1092,8 @@ wsi_switch_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
       return VK_ERROR_FORMAT_NOT_SUPPORTED;
    }
 
-   /* wsi_swapchain_init still needs a wsi_base_image_params to fill in the
-    * blit/fence infrastructure; cpu_params gives us a no-blit swapchain
-    * whose cached image_info we simply never use. The real per-image
-    * allocation happens below via wsi_switch_create_scanout_image.
+   /* Use CPU image parameters for WSI initialization only; allocate
+    * scanout images directly below.
     */
    struct wsi_cpu_image_params cpu_params = {
       .base.image_type = WSI_IMAGE_TYPE_CPU,
@@ -1220,18 +1176,9 @@ wsi_switch_init_wsi(struct wsi_device *wsi_device,
 {
    struct wsi_switch *wsi;
 
-   /* We hand wsi_swapchain_init a wsi_cpu_image_params just to satisfy its
-    * API contract; the real per-image allocation happens in
-    * wsi_switch_create_scanout_image. wsi_cpu_image_needs_buffer_blit
-    * defaults to true, which would make wsi_common's queue_present submit
-    * a blit command buffer from image->blit.cmd_buffers[] before invoking
-    * our backend — but we never populate that array, so the deref faults
-    * inside vkQueuePresentKHR. Forcing wants_linear = true is the
-    * documented escape hatch: it makes the cpu-image path pick
-    * WSI_SWAPCHAIN_NO_BLIT, so wsi_common skips blit cmd_pool allocation
-    * and the blit submit path entirely. The LINEAR tiling side effect on
-    * chain->image_info is dead state for us — we never call wsi_create_image
-    * against that template.
+   /* wants_linear selects WSI_SWAPCHAIN_NO_BLIT, avoiding submission
+    * through unallocated blit command buffers. Its linear image template
+    * is unused; scanout images are allocated separately.
     */
    wsi_device->wants_linear = true;
 

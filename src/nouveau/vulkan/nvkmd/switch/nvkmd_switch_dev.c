@@ -396,11 +396,9 @@ nvkmd_switch_ctx_exec(struct nvkmd_ctx *_ctx,
       uint32_t count = MIN2(NVKMD_SWITCH_MAX_EXEC_BATCH,
                             exec_count - first);
 
-      /* A method continuation cannot cross a hardware submit boundary.  If
-       * the nominal chunk ends on an incomplete method, extend it through
-       * the first complete entry.  Extremely long chains are then rejected
-       * cleanly by the shared channel's GPFIFO-capacity check instead of
-       * looping or splitting an invalid packet sequence.
+      /* Never split an incomplete method across submissions. Extend
+       * through its final entry; the channel capacity check rejects
+       * oversized chains.
        */
       while (first + count < exec_count &&
              execs[first + count - 1].incomplete)
@@ -667,7 +665,6 @@ static void
 nvkmd_switch_dev_destroy(struct nvkmd_dev *_dev)
 {
    struct nvkmd_switch_dev *dev = nvkmd_switch_dev(_dev);
-   nvkmd_switch_sync_payload_pool_finish(dev);
    simple_mtx_destroy(&dev->base.mems_mutex);
    nouveau_horizon_device_put(dev->horizon);
    nouveau_horizon_runtime_put(dev->runtime);
@@ -1102,7 +1099,6 @@ nvkmd_switch_create_dev(struct nvkmd_pdev *pdev,
    dev->base.va_end = properties.va_end;
    pdev->bind_align_B = properties.bind_align_B;
 
-   nvkmd_switch_sync_payload_pool_init(dev);
    *dev_out = &dev->base;
    return VK_SUCCESS;
 }

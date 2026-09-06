@@ -4,13 +4,13 @@ set -e
 IMAGE_NAME="devkitpro-mesa-rust"
 CONTAINER_NAME="mesa-switch-build"
 
-# ── Step 0: Build Docker image (if needed) ──────────────────────────────
+# Build the Docker image if needed.
 if ! docker image inspect "$IMAGE_NAME" >/dev/null 2>&1; then
     echo "=== Building Docker image ==="
     docker build -f Docker.rust -t "$IMAGE_NAME" .
 fi
 
-# ── Step 1: Start container ─────────────────────────────────────────────
+# Start the build container.
 docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
 docker run -d --name "$CONTAINER_NAME" \
     -v "$(pwd):/project" --workdir "/project" \
@@ -18,11 +18,7 @@ docker run -d --name "$CONTAINER_NAME" \
 
 run() { docker exec "$CONTAINER_NAME" bash -c "$1"; }
 
-# ── Step 1.5: Set up bindgen + rustc wrappers ───────────────────────────
-# bindgen wrapper appends system include paths for cross clang invocation.
-# rustc wrapper strips meson's forced -Clinker=<devkitA64-gcc> so the rust
-# sanity link succeeds; NAK only emits staticlibs so the linker is unused
-# for the real build.
+# Install cross-build wrappers for bindgen and Rust compiler probes.
 run '
 mkdir -p /usr/local/libexec
 cp /project/bindgen-switch-wrapper.sh /usr/local/libexec/bindgen
@@ -30,10 +26,7 @@ cp /project/rustc-switch-wrapper.sh /usr/local/libexec/rustc
 chmod +x /usr/local/libexec/bindgen /usr/local/libexec/rustc
 '
 
-# ── Step 1.55: Keep a stable meson path for later Meson regenerations ──
-# Meson records the absolute path of the meson executable in build.ninja.
-# Some downstream builds invoke ninja against this build dir from a different
-# environment, so keep /usr/local/bin/meson pointing at the active meson.
+# Preserve the Meson path recorded in build.ninja for later regeneration.
 run '
 MESON_BIN="$(command -v meson || true)"
 if [ -z "$MESON_BIN" ]; then
@@ -46,33 +39,23 @@ if [ "$MESON_BIN" != "/usr/local/bin/meson" ]; then
 fi
 '
 
-# ── Step 1.6: Refresh in-tree Nouveau headers in devkitPro portlib ─────
-# Keep consumers and bindgen on the same public compatibility definitions as
-# this Mesa checkout. The Switch backend no longer consumes an external
-# libdrm-nouveau package.
+# Install this checkout's Nouveau headers for consumers and bindgen.
 run '
 cp /project/src/gallium/winsys/nouveau/drm/nouveau.h \
     /opt/devkitpro/portlibs/switch/include/
-# Keep the in-tree Mesa header authoritative for bindgen users that include
-# nv_device_info.h through nouveau_device.h during the cross build.
 cp /project/src/nouveau/headers/nv_device_info.h \
     /opt/devkitpro/portlibs/switch/include/
 '
 
-# ── Step 1.7: Make clang resource dir discoverable by mesa_clc ─────────
-# mesa_clc looks for headers under <llvm_libdir>/clang/<major>/include
-# but Debian ships them under <llvm_libdir>/clang/<full_version>/include.
-# Symlink the major-version include dir to fix opencl-c-base.h lookup.
+# Alias Debian's full-version Clang headers to the major path mesa_clc uses.
 run '
 if [ ! -d /usr/lib/llvm-15/lib/clang/15/include ]; then
     ln -sf /usr/lib/llvm-15/lib/clang/15.0.6/include /usr/lib/llvm-15/lib/clang/15/include
 fi
 '
 
-# ── Step 1.8: Create empty stub archives for POSIX libs ────────────────
-# Rust std links against -lrt -ldl -lutil which do not exist in newlib.
-# Provide empty static archives so the linker is satisfied; the actual
-# symbols those libs would provide are stubbed in rust_switch_stubs.c.
+# Rust std requires -lrt -ldl -lutil. Supply placeholder archives;
+# src/nouveau/vulkan/rust_switch_stubs.c provides compatibility symbols.
 run '
 if [ ! -f /opt/devkitpro/portlibs/switch/lib/libdl.a ]; then
     cd /tmp
@@ -85,7 +68,7 @@ if [ ! -f /opt/devkitpro/portlibs/switch/lib/libdl.a ]; then
 fi
 '
 
-# ── Step 2: Build native host tools (mesa_clc, vtn_bindgen2) ───────────
+# Build native host tools.
 echo "=== Building native host tools (mesa_clc, vtn_bindgen2) ==="
 run '
 cd /project && meson setup builddir-native --wipe \
@@ -106,7 +89,7 @@ cd /project && meson setup builddir-native --wipe \
 '
 run 'ninja -C /project/builddir-native src/compiler/clc/mesa_clc src/compiler/spirv/vtn_bindgen2'
 
-# ── Step 3: Configure cross build ──────────────────────────────────────
+# Configure the cross build.
 echo "=== Configuring cross build (Switch + nouveau + nouveau_vk) ==="
 run '
 export PATH="/usr/local/libexec:/project/builddir-native/src/compiler/clc:/project/builddir-native/src/compiler/spirv:$PATH"
@@ -134,7 +117,7 @@ cd /project && meson setup builddir-switch --wipe \
     -Dcpp_rtti=false
 '
 
-# ── Step 4: Build ──────────────────────────────────────────────────────
+# Build Switch archives.
 echo "=== Building Mesa for Switch ==="
 run '
 export PATH="/usr/local/libexec:/project/builddir-native/src/compiler/clc:/project/builddir-native/src/compiler/spirv:$PATH"

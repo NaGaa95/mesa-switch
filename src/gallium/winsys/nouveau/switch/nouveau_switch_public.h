@@ -55,12 +55,9 @@ void nouveau_switch_pushbuf_set_native_kick_notify(
    struct nouveau_pushbuf *push,
    uint32_t (*native_kick_notify)(struct nouveau_pushbuf *,
                                    const NvFence *, bool cpu_visible));
-/* Associate Gallium's logical fence list with physical Switch batches without
- * exposing either private object layout.  marker_notify snapshots the newest
- * logical fence emitted by the record currently being converted.  The winsys
- * publishes that marker only after the complete logical record has joined the
- * pending physical batch, then passes it to native_notify after that exact
- * batch is accepted by Horizon.
+/* marker_notify captures the logical fence for the current record. Publish
+ * it only after the full record joins the physical batch, then pass it to
+ * native_notify after Horizon accepts that batch.
  */
 void nouveau_switch_pushbuf_set_fence_batch_notify(
    struct nouveau_pushbuf *push,

@@ -191,9 +191,8 @@ nouveau_screen_bo_from_handle(struct pipe_screen *pscreen,
    }
 
 #ifdef __SWITCH__
-   /* A numeric NvMap name does not describe its layout.  The explicit import
-    * above registers or validates complete NWindow metadata; also require the
-    * resulting BO configuration to agree with the caller's modifier.
+   /* NvMap IDs carry no layout. Validate the imported metadata against the
+    * caller's modifier.
     */
    if (whandle->type == WINSYS_HANDLE_TYPE_SHARED) {
       bool compatible = whandle->modifier != DRM_FORMAT_MOD_INVALID;
@@ -304,10 +303,8 @@ nouveau_query_memory_info(struct pipe_screen *pscreen,
    struct nouveau_device *dev = screen->device;
 
 #ifdef __SWITCH__
-   /* GM20B has no dedicated VRAM on Switch: all GPU allocations consume the
-    * process UMA entitlement.  Report that pool once as device memory rather
-    * than double-counting it as both device and staging memory.  Refresh the
-    * free amount for every query because application allocations share it.
+   /* Report Switch UMA once as device memory. Refresh available memory on
+    * each query because application allocations share the pool.
     */
    uint64_t current_available = 0;
    uint64_t allocated = 0;
@@ -771,11 +768,9 @@ nouveau_screen_init(struct nouveau_screen *screen, struct nouveau_device *dev)
    const bool cpu_uncached_gart =
       debug_get_bool_option("NOUVEAU_SWITCH_GART_CPU_UNCACHED", true);
    if (cpu_uncached_gart) {
-      /* Match deko3D's default streaming-memory policy.  CPU-uncached GART
-       * avoids both stale partial-line writeback and cleaning an entire 4 MiB
-       * Nouveau slab for every small dynamic-buffer update.  Keep the GPU
-       * mapping cached; Horizon emits the GM20B L2 sysmem acquire before the
-       * first command entry of every native submission.
+      /* CPU-uncached streaming storage avoids partial-line writeback and
+       * whole-slab flushes. GPU caching remains enabled, with a Horizon L2
+       * acquire before execution.
        */
       gart_domain |= NOUVEAU_BO_COHERENT |
                      NOUVEAU_BO_SWITCH_GPU_CACHED;
@@ -853,10 +848,8 @@ nouveau_context_init(struct nouveau_context *context, struct nouveau_screen *scr
    context->screen = screen;
 
 #ifdef __SWITCH__
-   /* Switch: share screen's pushbuf/GPU channel (like Mesa 22.2 did).
-    * Each nouveau_pushbuf_new creates a new NvGpuChannel, but the 3D engine
-    * state was initialized on the screen's channel. Using a separate channel
-    * for draw calls would send GPU commands to an uninitialized channel.
+   /* Share the Switch screen's channel: it owns the initialized 3D engine
+    * state.
     */
    context->client = screen->client;
    context->pushbuf = screen->pushbuf;

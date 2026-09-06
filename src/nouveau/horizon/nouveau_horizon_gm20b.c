@@ -117,10 +117,8 @@ nouveau_horizon_gm20b_build_report(
 {
    uint32_t *cmd = commands;
 
-   /* This packet sequence is expressed solely with Mesa's public Maxwell
-    * class definitions.  FLUSH_PENDING_WRITES orders the preceding native
-    * syncpoint action, then SET_REPORT_SEMAPHORE releases one 32-bit progress
-    * value after all earlier writes have completed.
+   /* Flush the preceding native syncpoint action, then release the 32-bit
+    * progress value after all earlier writes complete.
     */
    *cmd++ = nouveau_horizon_gm20b_immediate_header(
       NVB197_FLUSH_PENDING_WRITES, 0);

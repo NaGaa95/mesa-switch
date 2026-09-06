@@ -49,10 +49,9 @@ struct nvc0_switch_text_retirement {
    uint32_t size;
 };
 
-/* A text-area resize follows a physical full-barrier submission.  Keep the
- * replaced BO alive against that exact GPU completion instead of handing its
- * final reference to BO destruction, where a GPU-only fence would otherwise
- * be upgraded and waited by the CPU.
+/* Retain replaced text BOs until the resize barrier's exact completion.
+ * This avoids upgrading their GPU-only fences to CPU waits during BO
+ * destruction.
  */
 struct nvc0_switch_text_bo_retirement {
    struct list_head head;

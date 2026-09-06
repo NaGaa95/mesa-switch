@@ -33,9 +33,9 @@ nouveau_horizon_runtime_get_zbc_state(
    assert(runtime != NULL);
    assert(state_out != NULL);
 
-   /* The writer is serialized by zbc_mutex and brackets its atomic member
-    * stores with an odd sequence value.  Readers take no locks on draw or
-    * submit paths and retry only across the extremely rare table refresh.
+   /* zbc_mutex serializes writers; an odd sequence brackets atomic
+    * updates. Lock-free readers retry if a refresh overlaps their
+    * snapshot.
     */
    for (;;) {
       sequence_before = p_atomic_read(&runtime->zbc_sequence);

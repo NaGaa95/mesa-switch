@@ -326,11 +326,10 @@ nvc0_clear_render_target(struct pipe_context *pipe,
    res = nv04_resource(sf->base.texture);
 
 #ifdef __SWITCH__
-   /* Horizon uses one screen-owned pushbuf.  Direct clear callbacks bypass
-    * normal state validation, so serialize and bind explicitly.  If another
-    * context owns the hardware shadow, a zero-mask validation transfers that
-    * ownership (and updates ZBC) without emitting unrelated dirty state.
-    * Otherwise only the cheap ZBC generation check is needed. */
+   /* Direct clears bypass validation: lock and bind the shared Horizon
+    * pushbuf. Transfer hardware-state ownership with zero-mask validation
+    * when necessary; otherwise check only the ZBC generation.
+    */
    nvc0_screen_state_lock(nvc0->screen);
    nouveau_pushbuf_bind_context(push, &nvc0->base);
    if (nvc0->screen->cur_ctx != nvc0 ?

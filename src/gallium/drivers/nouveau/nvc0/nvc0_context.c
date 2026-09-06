@@ -41,8 +41,6 @@ static thread_local struct nvc0_screen *nvc0_state_lock_screen;
 static thread_local unsigned nvc0_state_lock_depth;
 #endif
 
-#define nvc0_switch_context_checkpoint(phase) ((void)0)
-
 static void
 nvc0_svm_migrate(struct pipe_context *pipe, unsigned num_ptrs,
                  const void* const* ptrs, const size_t *sizes,
@@ -127,10 +125,9 @@ nvc0_flush(struct pipe_context *pipe,
    struct nvc0_context *nvc0 = nvc0_context(pipe);
 
 #ifdef __SWITCH__
-   /* The Horizon port shares one screen-owned pushbuf across contexts.  Keep
-    * the fence snapshot, context binding and physical kick in the same
-    * critical section so another context cannot replace user_priv between
-    * the logical fence emission and its native batch association. */
+   /* Keep fence capture, context binding, and kickoff under one lock:
+    * another context must not replace user_priv before batch association.
+    */
    nvc0_screen_state_lock(nvc0->screen);
 #endif
 
@@ -319,11 +316,9 @@ nvc0_get_device_reset_status(struct pipe_context *pipe)
    struct nvc0_context *nvc0 = nvc0_context(pipe);
    struct nouveau_screen *screen = nvc0->base.screen;
 
-   /* The Horizon channel is shared by all GL contexts, so a native channel
-    * fault cannot be attributed safely to one context.  Host validation and
-    * allocation errors remain ordinary submission failures.  A durable
-    * channel notification/error or terminal native kickoff/wait failure is
-    * a graphics reset.
+   /* All Switch GL contexts share the channel, so report channel faults as
+    * an unattributed graphics reset. Host validation/allocation failures
+    * are ordinary submission errors.
     */
    nvc0_screen_state_lock(nvc0->screen);
    simple_mtx_lock(&screen->fence.lock);
@@ -606,7 +601,6 @@ nvc0_create(struct pipe_screen *pscreen, void *priv, unsigned ctxflags)
    int ret;
    uint32_t flags;
 
-   nvc0_switch_context_checkpoint("begin");
    nvc0 = CALLOC_STRUCT(nvc0_context);
    if (!nvc0)
       return NULL;
@@ -614,12 +608,10 @@ nvc0_create(struct pipe_screen *pscreen, void *priv, unsigned ctxflags)
 
    if (!nvc0_blitctx_create(nvc0))
       goto out_err;
-   nvc0_switch_context_checkpoint("blit context ready");
 
    if (nouveau_context_init(&nvc0->base, &screen->base))
       goto out_err;
    base_initialized = true;
-   nvc0_switch_context_checkpoint("nouveau context ready");
    nvc0->base.kick_notify = nvc0_default_kick_notify;
    nvc0->base.pushbuf->rsvd_kick = 5;
 
@@ -632,7 +624,6 @@ nvc0_create(struct pipe_screen *pscreen, void *priv, unsigned ctxflags)
                                &nvc0->bufctx_cp);
    if (ret)
       goto out_err;
-   nvc0_switch_context_checkpoint("buffer contexts ready");
 
    nvc0->screen = screen;
    pipe->screen = pscreen;
@@ -640,7 +631,6 @@ nvc0_create(struct pipe_screen *pscreen, void *priv, unsigned ctxflags)
    pipe->stream_uploader = u_upload_create_default(pipe);
    if (!pipe->stream_uploader)
       goto out_err;
-   nvc0_switch_context_checkpoint("stream uploader ready");
    pipe->const_uploader = pipe->stream_uploader;
 
    pipe->destroy = nvc0_destroy;
@@ -685,21 +675,17 @@ nvc0_create(struct pipe_screen *pscreen, void *priv, unsigned ctxflags)
    pipe->create_video_codec = nvc0_create_decoder;
    pipe->create_video_buffer = nvc0_video_buffer_create;
 
-   nvc0_switch_context_checkpoint("creating empty tessellation program");
    nvc0_program_init_tcp_empty(nvc0);
    if (!nvc0->tcp_empty)
       goto out_err;
-   nvc0_switch_context_checkpoint("empty tessellation program ready");
 
    if (!nouveau_fence_new(&nvc0->base, &nvc0->base.fence))
       goto out_err;
-   nvc0_switch_context_checkpoint("initial Gallium fence ready");
 
    /* The builtin library and text heap are screen-global.  Serialize their
     * first upload and bind this context before push_data can trigger an
     * automatic physical submission on the shared Switch channel.
     */
-   nvc0_switch_context_checkpoint("uploading program library");
    nvc0_screen_state_lock(screen);
 #ifdef __SWITCH__
    nouveau_pushbuf_bind_context(nvc0->base.pushbuf, &nvc0->base);
@@ -711,7 +697,6 @@ nvc0_create(struct pipe_screen *pscreen, void *priv, unsigned ctxflags)
 #ifndef __SWITCH__
    nvc0_screen_state_unlock(screen);
 #endif
-   nvc0_switch_context_checkpoint("program library ready");
 
    /* set the empty tctl prog on next draw in case one is never set */
    nvc0->dirty_3d |= NVC0_NEW_3D_TCTLPROG;
@@ -724,7 +709,6 @@ nvc0_create(struct pipe_screen *pscreen, void *priv, unsigned ctxflags)
    /* now that there are no more opportunities for errors, set the current
     * context if there isn't already one.
     */
-   nvc0_switch_context_checkpoint("acquiring screen state lock");
 #ifndef __SWITCH__
    nvc0_screen_state_lock(screen);
 #endif
@@ -735,12 +719,9 @@ nvc0_create(struct pipe_screen *pscreen, void *priv, unsigned ctxflags)
 #ifndef __SWITCH__
    nvc0_screen_state_unlock(screen);
 #endif
-   nvc0_switch_context_checkpoint("screen state ownership ready");
 
    nouveau_pushbuf_bufctx(nvc0->base.pushbuf, nvc0->bufctx);
-   nvc0_switch_context_checkpoint("primary buffer context selected");
    PUSH_SPACE(nvc0->base.pushbuf, 8);
-   nvc0_switch_context_checkpoint("initial push space ready");
 
    /* add permanently resident buffers to bufctxts */
 
@@ -752,7 +733,6 @@ nvc0_create(struct pipe_screen *pscreen, void *priv, unsigned ctxflags)
       BCTX_REFN_bo(nvc0->bufctx_cp, CP_SCREEN, flags, screen->uniform_bo);
       BCTX_REFN_bo(nvc0->bufctx_cp, CP_SCREEN, flags, screen->txc);
    }
-   nvc0_switch_context_checkpoint("read-only screen residency ready");
 
    flags = NV_VRAM_DOMAIN(&screen->base) | NOUVEAU_BO_RDWR;
 
@@ -760,7 +740,6 @@ nvc0_create(struct pipe_screen *pscreen, void *priv, unsigned ctxflags)
       BCTX_REFN_bo(nvc0->bufctx_3d, 3D_SCREEN, flags, screen->poly_cache);
    if (screen->compute)
       BCTX_REFN_bo(nvc0->bufctx_cp, CP_SCREEN, flags, screen->tls);
-   nvc0_switch_context_checkpoint("read-write screen residency ready");
 
    flags = NOUVEAU_BO_GART | NOUVEAU_BO_WR;
 
@@ -768,7 +747,6 @@ nvc0_create(struct pipe_screen *pscreen, void *priv, unsigned ctxflags)
    BCTX_REFN_bo(nvc0->bufctx, FENCE, flags, screen->fence.bo);
    if (screen->compute)
       BCTX_REFN_bo(nvc0->bufctx_cp, CP_SCREEN, flags, screen->fence.bo);
-   nvc0_switch_context_checkpoint("fence residency ready");
 
    nvc0->base.scratch.bo_size = 2 << 20;
 
@@ -783,12 +761,8 @@ nvc0_create(struct pipe_screen *pscreen, void *priv, unsigned ctxflags)
    // NOTE: Preliminary testing suggests that this isn't necessary at all at
    // least on GM20x (untested on Kepler). However this is ~free, so no reason
    // not to do it.
-   nvc0_switch_context_checkpoint("checking initial TSC entry");
-   if (!screen->tsc.entries[0]) {
-      nvc0_switch_context_checkpoint("uploading initial TSC entry");
+   if (!screen->tsc.entries[0])
       nvc0_upload_tsc0(nvc0);
-   }
-   nvc0_switch_context_checkpoint("initial TSC entry ready");
 
    // On Fermi, mark samplers dirty so that the proper binding can happen
    if (screen->base.class_3d < NVE4_3D_CLASS) {
@@ -799,7 +773,6 @@ nvc0_create(struct pipe_screen *pscreen, void *priv, unsigned ctxflags)
    }
 
 #ifdef __SWITCH__
-   nvc0_switch_context_checkpoint("binding pushbuf context callback");
    nouveau_pushbuf_bind_context(nvc0->base.pushbuf, &nvc0->base);
    /* All operations above which mutate the shared pushbuf or screen-global
     * TSC state are serialized as one creation transaction.
@@ -807,12 +780,9 @@ nvc0_create(struct pipe_screen *pscreen, void *priv, unsigned ctxflags)
    nvc0_screen_state_unlock(screen);
 #endif
 
-   nvc0_switch_context_checkpoint("complete");
-
    return pipe;
 
 out_err:
-   nvc0_switch_context_checkpoint("failed; unwinding");
    if (nvc0) {
 #ifdef __SWITCH__
       if (base_initialized) {

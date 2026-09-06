@@ -351,9 +351,8 @@ static inline uint64_t
 nouveau_device_get_global_mem_size(struct nouveau_device *dev)
 {
 #ifdef __SWITCH__
-   /* On Switch, local and staging allocations use the same UMA process heap.
-    * The winsys limit already includes the process-memory safety headroom and
-    * provides a stable maximum allocation capability for the screen lifetime.
+   /* Switch local and staging memory share one UMA heap. The winsys limit
+    * includes safety headroom and stays fixed for the screen lifetime.
     */
    uint64_t size = dev->vram_size ? dev->vram_limit : dev->gart_limit;
 #else

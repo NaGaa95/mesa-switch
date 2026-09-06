@@ -458,11 +458,9 @@ nouveau_buffer_transfer_map(struct pipe_context *pipe,
 
 #ifdef __SWITCH__
    if (usage & PIPE_MAP_THREAD_SAFE) {
-      /* GLthread keeps this map alive and writes through the returned pointer
-       * without a transfer flush or unmap before every GPU use.  Cached memory
-       * cannot provide that contract because there is no later publication
-       * point at which to re-arm cache cleaning.  Promote the fresh stream
-       * buffer to a dedicated CPU-uncached allocation before exposing it.
+      /* GLthread can write through this persistent map without a later
+       * flush or unmap. Use dedicated CPU-uncached storage because cached
+       * writes have no publication point before GPU use.
        */
       const unsigned required = PIPE_MAP_WRITE | PIPE_MAP_UNSYNCHRONIZED;
       const unsigned unsupported =
@@ -1055,15 +1053,10 @@ nouveau_scratch_bo_alloc(struct nouveau_context *nv, struct nouveau_bo **pbo,
    uint32_t flags = NOUVEAU_BO_GART | NOUVEAU_BO_MAP;
 
 #ifdef __SWITCH__
-   /* Scratch BOs are CPU-written streaming storage for translated user
-    * vertices and indices.  The allocator reuses a 2 MiB ring in small
-    * pieces, so a BO-wide cached dirty bit cleaned the same 2 MiB allocation
-    * on almost every affected draw.  Besides the severe CPU cost, an early
-    * validation split could consume the dirty bit before translation had
-    * finished.  Uncached coherent storage matches the Switch command/query
-    * upload model: CPU writes are immediately GPU-visible and no cache-range
-    * publication is required.  Keep the GPU mapping cached; the GM20B L2
-    * sysmem acquire at the head of every submission covers it.
+   /* Use CPU-uncached scratch storage to avoid whole-ring flushes and
+    * dirty-bit consumption before vertex/index translation finishes. Keep
+    * GPU caching; each Horizon submission acquires system memory through
+    * L2.
     */
    flags |= NOUVEAU_BO_COHERENT | NOUVEAU_BO_SWITCH_GPU_CACHED;
 #endif
