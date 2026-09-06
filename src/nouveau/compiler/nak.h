@@ -65,6 +65,8 @@ struct nak_fs_key {
 PRAGMA_DIAGNOSTIC_POP
 static_assert(sizeof(struct nak_fs_key) == 4, "This struct has no holes");
 
+#define NAK_INTERLOCK_COUNTER_SIZE (256 * 256 * sizeof(uint32_t))
+
 struct nak_constant_offset_info {
    /**
     * The constant buffer index and offset at which the sample locations and
@@ -97,6 +99,9 @@ struct nak_constant_offset_info {
     * The offset into printf_cb for the printf buffer pointer.
     */
    uint32_t printf_buffer_offset;
+
+   uint8_t interlock_cb;
+   uint32_t interlock_buffer_offset;
 };
 const extern struct nak_constant_offset_info nak_const_offsets_base;
 const extern struct nak_constant_offset_info nak_const_offsets_turing_graphics;

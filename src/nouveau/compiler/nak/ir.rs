@@ -2505,6 +2505,10 @@ impl LdCacheOp {
                 MemOrder::Strong(MemScope::System) => {
                     LdCacheOp::CacheInvalidate
                 }
+                MemOrder::Strong(MemScope::GPU) => {
+                    // L1 is not coherent between SMs, including on Maxwell.
+                    LdCacheOp::CacheGlobal
+                }
                 _ => {
                     // From the CUDA 10.2 docs:
                     //
@@ -2525,8 +2529,8 @@ impl LdCacheOp {
                     //    Read-Only Data Cache)."
                     //
                     // We follow suit and use CacheGlobal for all global memory
-                    // access on Kepler.  On Maxwell, it appears safe to use
-                    // CacheAll for everything.
+                    // access on Kepler. Maxwell accesses that do not need
+                    // GPU scope may use L1.
                     if sm.sm() >= 50 {
                         LdCacheOp::CacheAll
                     } else {
@@ -7021,11 +7025,16 @@ impl_display_for_op!(OpCCtl);
 #[derive(SrcsAsSlice, DstsAsSlice)]
 pub struct OpMemBar {
     pub scope: MemScope,
+    pub virtual_channel: bool,
 }
 
 impl DisplayOp for OpMemBar {
     fn fmt_op(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "membar.sc.{}", self.scope)
+        if self.virtual_channel {
+            write!(f, "membar.vc")
+        } else {
+            write!(f, "membar.sc.{}", self.scope)
+        }
     }
 }
 impl_display_for_op!(OpMemBar);

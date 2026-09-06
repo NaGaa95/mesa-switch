@@ -178,6 +178,15 @@ nvk_push_draw_state_init(struct nvk_queue *queue, struct nv_push *p)
    if (pdev->info.cls_eng3d >= TURING_A && pdev->info.cls_eng3d < BLACKWELL_A)
       P_IMMD(p, NVC597, SET_MME_DATA_FIFO_CONFIG, FIFO_SIZE_SIZE_4KB);
 
+   if (dev->interlock_memory) {
+      for (uint32_t i = 0; i < 256; i++) {
+         P_IMMD(p, NVB197, SET_PIXEL_SHADER_TICKET_DISPENSER_VALUE, {
+            .ticket_dispenser_index = i,
+            .ticket_dispenser_value = 0,
+         });
+      }
+   }
+
    /* Enable FP helper invocation memory loads
     *
     * For generations with firmware support for our `SET_PRIV_REG` mme method
@@ -4424,6 +4433,16 @@ nvk_cmd_flush_gfx_cbufs(struct nvk_cmd_buffer *cmd)
 static void
 nvk_cmd_flush_gfx_state(struct nvk_cmd_buffer *cmd)
 {
+   struct nvk_device *dev = nvk_cmd_buffer_device(cmd);
+   if (dev->interlock_memory) {
+      struct nvk_descriptor_state *desc = &cmd->state.gfx.descriptors;
+      uint64_t addr;
+      nvk_descriptor_state_get_root(desc, interlock_buffer_addr, &addr);
+      if (addr != dev->interlock_memory->va->addr) {
+         nvk_descriptor_state_set_root(cmd, desc, interlock_buffer_addr,
+                                       dev->interlock_memory->va->addr);
+      }
+   }
    nvk_cmd_buffer_flush_push_descriptors(cmd, &cmd->state.gfx.descriptors);
    nvk_cmd_flush_gfx_dynamic_state(cmd);
    nvk_cmd_flush_gfx_shaders(cmd);

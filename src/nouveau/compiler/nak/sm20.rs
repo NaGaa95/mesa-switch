@@ -2723,6 +2723,7 @@ impl SM20Op for OpMemBar {
     }
 
     fn encode(&self, e: &mut SM20Encoder<'_>) {
+        assert!(!self.virtual_channel);
         e.set_opcode(SM20Unit::Mem, 0x38);
         e.set_field(
             5..7,

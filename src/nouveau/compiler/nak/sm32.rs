@@ -2971,6 +2971,7 @@ impl SM32Op for OpMemBar {
     }
 
     fn encode(&self, e: &mut SM32Encoder<'_>) {
+        assert!(!self.virtual_channel);
         e.set_opcode(0x7cc, 2);
 
         e.set_field(

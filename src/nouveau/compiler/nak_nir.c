@@ -1550,6 +1550,119 @@ nak_nir_gather_mesh_outputs(nir_shader *nir, struct lower_mesh_intrinsics_ctx *c
    return progress;
 }
 
+static nir_def *
+nak_interlock_live_mask(nir_builder *b)
+{
+   nir_def *killed = nak_nir_load_sysval(b, NAK_SV_THREAD_KILL, 0);
+   return nir_ballot(b, 1, 32, nir_ine_imm(b, killed, UINT32_MAX));
+}
+
+static void
+nak_interlock_release(nir_builder *b, nir_def *addr, nir_def *increment)
+{
+   nir_def *mask = nak_interlock_live_mask(b);
+   nir_def *lane = nak_nir_load_sysval(b, NAK_SV_LANE_ID, ACCESS_CAN_REORDER);
+   nir_push_if(b, nir_ieq(b, lane, nir_ufind_msb(b, mask)));
+   {
+      nir_end_invocation_interlock(b);
+      nir_global_atomic(b, 32, addr, increment,
+                        .atomic_op = nir_atomic_op_iadd);
+   }
+   nir_pop_if(b, NULL);
+}
+
+static bool
+nak_nir_lower_interlock(nir_shader *nir, const struct nak_compiler *nak)
+{
+   if (nir->info.stage != MESA_SHADER_FRAGMENT ||
+       !(nir->info.fs.pixel_interlock_ordered ||
+         nir->info.fs.pixel_interlock_unordered ||
+         nir->info.fs.sample_interlock_ordered ||
+         nir->info.fs.sample_interlock_unordered))
+      return false;
+
+   assert(nak->sm >= 52 && nak->sm < 70);
+   nir_lower_halt_to_return(nir);
+   nir_lower_returns(nir);
+   nir_function_impl *impl = nir_shader_get_entrypoint(nir);
+   bool has_demote = false;
+   nir_foreach_block(block, impl) {
+      nir_foreach_instr(instr, block) {
+         if (instr->type != nir_instr_type_intrinsic)
+            continue;
+         nir_intrinsic_op op = nir_instr_as_intrinsic(instr)->intrinsic;
+         has_demote |= op == nir_intrinsic_demote || op == nir_intrinsic_demote_if;
+      }
+   }
+
+   nir_intrinsic_instr *final_demote = NULL;
+   if (has_demote) {
+      /* Track helper state in software until every lane reaches the release. */
+      nir_lower_helper_writes(nir, true);
+      nir_builder end = nir_builder_at(nir_after_impl(impl));
+      final_demote = nir_demote_if(&end, nir_is_helper_invocation(&end, 1));
+      nir_lower_is_helper_invocation(nir);
+   }
+
+   nir_foreach_block(block, impl) {
+      nir_foreach_instr_safe(instr, block) {
+         if (instr->type != nir_instr_type_intrinsic)
+            continue;
+         nir_intrinsic_instr *intrin = nir_instr_as_intrinsic(instr);
+         switch (intrin->intrinsic) {
+         case nir_intrinsic_begin_invocation_interlock:
+         case nir_intrinsic_end_invocation_interlock:
+            nir_instr_remove(instr);
+            break;
+         case nir_intrinsic_demote:
+         case nir_intrinsic_demote_if:
+            if (intrin != final_demote)
+               nir_instr_remove(instr);
+            break;
+         default:
+            break;
+         }
+      }
+   }
+
+   nir_builder b = nir_builder_at(nir_before_impl(impl));
+   const struct nak_constant_offset_info *offsets = nak_const_offsets(nak, true);
+
+   nir_def *base = nir_ldc_nv(&b, 1, 64, nir_imm_int(&b, offsets->interlock_cb),
+                            nir_imm_int(&b, offsets->interlock_buffer_offset));
+   nir_def *ticket = nak_nir_load_sysval(&b, NAK_SV_ORDERING_TICKET, 0);
+   nir_def *affinity = nak_nir_load_sysval(&b, NAK_SV_AFFINITY, 0);
+   nir_def *index = nir_ior(&b, nir_ishl_imm(&b, nir_iand_imm(&b, affinity, 0xff), 8),
+                          nir_iand_imm(&b, ticket, 0xff));
+   nir_def *addr = nir_iadd(&b, base, nir_u2u64(&b, nir_ishl_imm(&b, index, 2)));
+   nir_def *expected = nir_ushr_imm(&b, ticket, 16);
+   /* Each warp retires its share of the coalesced tile. */
+   nir_def *increment = nir_iadd_imm(&b, nir_iand_imm(&b, ticket, 0xfe00), 0x200);
+
+   /* Cover early returns and discard with one interlock per invocation. */
+   nir_def *mask = nak_interlock_live_mask(&b);
+   nir_def *lane = nak_nir_load_sysval(&b, NAK_SV_LANE_ID, ACCESS_CAN_REORDER);
+   nir_push_if(&b, nir_ieq(&b, lane, nir_ufind_msb(&b, mask)));
+   {
+      nir_push_loop(&b);
+      {
+         nir_def *current = nir_load_global(&b, 1, 32, addr, .align_mul = 4,
+                                            .access = ACCESS_COHERENT | ACCESS_VOLATILE);
+         nir_break_if(&b, nir_ieq(&b, nir_ushr_imm(&b, current, 16), expected));
+      }
+      nir_pop_loop(&b, NULL);
+   }
+   nir_pop_if(&b, NULL);
+   nir_barrier(&b, .memory_scope = SCOPE_NONE,
+               .memory_semantics = NIR_MEMORY_ACQUIRE,
+               .memory_modes = nir_var_mem_global);
+
+   b.cursor = final_demote ? nir_before_instr(&final_demote->instr)
+                           : nir_after_impl(impl);
+   nak_interlock_release(&b, addr, increment);
+   return nir_progress(true, impl, nir_metadata_none);
+}
+
 void
 nak_postprocess_nir(nir_shader *nir,
                     const struct nak_compiler *nak,
@@ -1558,6 +1671,8 @@ nak_postprocess_nir(nir_shader *nir,
                     bool has_task_shader)
 {
    UNUSED bool progress = false;
+
+   OPT(nir, nak_nir_lower_interlock, nak);
 
    const bool is_mesh_stage = nir->info.stage == MESA_SHADER_TASK ||
                               nir->info.stage == MESA_SHADER_MESH;

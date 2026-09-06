@@ -382,6 +382,19 @@ nvk_CreateDevice(VkPhysicalDevice physicalDevice,
       nvkmd_mem_sync_map_to_gpu(dev->zero_page, 0, 0x1000);
       nvkmd_mem_unmap(dev->zero_page, 0);
 
+      if (dev->vk.enabled_features.fragmentShaderSampleInterlock ||
+          dev->vk.enabled_features.fragmentShaderPixelInterlock) {
+         const uint64_t size = NAK_INTERLOCK_COUNTER_SIZE;
+         result = nvkmd_dev_alloc_mapped_mem(dev->nvkmd, &pdev->vk.base,
+                                             size, 0, NVKMD_MEM_LOCAL,
+                                             NVKMD_MEM_MAP_WR, &dev->interlock_memory);
+         if (result != VK_SUCCESS)
+            goto fail_zero_page;
+         memset(dev->interlock_memory->map, 0, size);
+         nvkmd_mem_sync_map_to_gpu(dev->interlock_memory, 0, size);
+         nvkmd_mem_unmap(dev->interlock_memory, 0);
+      }
+
       result = nvk_descriptor_table_init(dev, &dev->images,
                                          sizeof(struct nil_descriptor),
                                          1024, 1024 * 1024);
@@ -560,6 +573,8 @@ fail_samplers:
 fail_images:
    nvk_descriptor_table_finish(dev, &dev->images);
 fail_zero_page:
+   if (dev->interlock_memory)
+      nvkmd_mem_unref(dev->interlock_memory);
    nvkmd_mem_unref(dev->zero_page);
 fail_upload:
 #ifdef __SWITCH__
@@ -648,6 +663,8 @@ nvk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
       nvk_edb_bview_cache_finish(dev, &dev->edb_bview_cache);
       nvk_descriptor_table_finish(dev, &dev->samplers);
       nvk_descriptor_table_finish(dev, &dev->images);
+      if (dev->interlock_memory)
+         nvkmd_mem_unref(dev->interlock_memory);
       nvkmd_mem_unref(dev->zero_page);
 #ifndef __SWITCH__
       nvk_upload_queue_finish(dev, &dev->upload);

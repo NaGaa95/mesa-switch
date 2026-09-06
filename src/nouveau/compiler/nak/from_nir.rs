@@ -3645,9 +3645,15 @@ impl<'a> ShaderFromNir<'a> {
                     dst: handle.into(),
                 });
             }
-            nir_intrinsic_begin_invocation_interlock
-            | nir_intrinsic_end_invocation_interlock => {
-                // The hardware interlock covers the full fragment invocation.
+            nir_intrinsic_begin_invocation_interlock => {
+                panic!("Fragment interlock was not lowered");
+            }
+            nir_intrinsic_end_invocation_interlock => {
+                assert!(self.sm.sm() >= 52 && self.sm.sm() < 70);
+                b.push_op(OpMemBar {
+                    scope: MemScope::GPU,
+                    virtual_channel: true,
+                });
             }
             nir_intrinsic_barrier => {
                 let modes = intrin.memory_modes();
@@ -3698,7 +3704,10 @@ impl<'a> ShaderFromNir<'a> {
                         SCOPE_QUEUE_FAMILY | SCOPE_DEVICE => MemScope::GPU,
                         _ => panic!("Unhandled memory scope"),
                     };
-                    b.push_op(OpMemBar { scope: mem_scope });
+                    b.push_op(OpMemBar {
+                        scope: mem_scope,
+                        virtual_channel: false,
+                    });
                 }
                 if (modes & nir_var_mem_global) != 0
                     && (semantics & NIR_MEMORY_ACQUIRE) != 0

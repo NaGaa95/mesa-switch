@@ -60,6 +60,7 @@ struct nvk_device {
 
    struct nvk_layer_dispatch_tables layer_dispatch;
    struct nvkmd_mem *zero_page;
+   struct nvkmd_mem *interlock_memory;
    struct nvk_descriptor_table images;
    struct nvk_descriptor_table samplers;
    struct nvk_edb_bview_cache edb_bview_cache;

@@ -2995,6 +2995,10 @@ impl SM50Op for OpMemBar {
 
     fn encode(&self, e: &mut SM50Encoder<'_>) {
         e.set_opcode(0xef98);
+        if self.virtual_channel {
+            e.set_field(8..10, 3_u8);
+            return;
+        }
 
         e.set_field(
             8..10,

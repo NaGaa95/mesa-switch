@@ -63,8 +63,10 @@ struct nvk_root_descriptor_table {
 
    uint64_t printf_buffer_addr;
 
-   /* enfore total structure alignment to 0x100 as needed pre pascal */
-   uint8_t __padding[0xa0];
+   uint64_t interlock_buffer_addr;
+
+   /* Align the following arrays to 0x100 on pre-Pascal GPUs. */
+   uint8_t __padding[0x98];
 
    /*
     * Arrays with dynamic (shader-provided) indices need to fit in a single

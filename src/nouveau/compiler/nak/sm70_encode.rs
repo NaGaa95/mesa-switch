@@ -3833,6 +3833,7 @@ impl SM70Op for OpMemBar {
     }
 
     fn encode(&self, e: &mut SM70Encoder<'_>) {
+        assert!(!self.virtual_channel);
         e.set_opcode(0x992);
 
         e.set_bit(72, false); // !.MMIO

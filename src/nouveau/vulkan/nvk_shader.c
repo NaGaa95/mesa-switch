@@ -42,6 +42,8 @@ const struct nak_constant_offset_info nak_const_offsets_base = {
    .sample_masks_offset = nvk_root_descriptor_offset(draw.sample_masks),
    .printf_cb = 0,
    .printf_buffer_offset = nvk_root_descriptor_offset(printf_buffer_addr),
+   .interlock_cb = 0,
+   .interlock_buffer_offset = nvk_root_descriptor_offset(interlock_buffer_addr),
 };
 
 const struct nak_constant_offset_info nak_const_offsets_turing_graphics = {
@@ -80,6 +82,7 @@ nvk_physical_device_compiler_flags(const struct nvk_physical_device *pdev)
    return (no_cbufs ? 1 << 12 : 0)
       | (use_edb_buffer_views ? 1 << 13 : 0)
       | (instance->drirc.misc.ssbo_align_4b ? 1 << 14 : 0)
+      | (UINT64_C(8) << 16) /* Interlock compiler ABI revision. */
       | (nak_flags << 48);
 }
 
