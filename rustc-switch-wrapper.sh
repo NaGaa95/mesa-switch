@@ -60,4 +60,17 @@ for arg in "$@"; do
     esac
 done
 
-exec "$RUSTC_BIN" -C linker=C:/msys64/ucrt64/bin/gcc.exe "${ARGS[@]}"
+# The probe only needs a host-runnable binary, so use whatever native compiler
+# this host actually has. The MSYS2 path is kept for Windows hosts; on Linux
+# (e.g. the devkitpro-mesa-rust container) it does not exist and rustc would
+# fail with "linker not found".
+FALLBACK_LINKER=C:/msys64/ucrt64/bin/gcc.exe
+if [ ! -x "$FALLBACK_LINKER" ]; then
+    FALLBACK_LINKER="$(command -v cc || command -v gcc || true)"
+fi
+
+if [ -n "$FALLBACK_LINKER" ]; then
+    exec "$RUSTC_BIN" -C linker="$FALLBACK_LINKER" "${ARGS[@]}"
+fi
+
+exec "$RUSTC_BIN" "${ARGS[@]}"

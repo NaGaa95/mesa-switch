@@ -23,6 +23,9 @@ run '
 mkdir -p /usr/local/libexec
 cp /project/bindgen-switch-wrapper.sh /usr/local/libexec/bindgen
 cp /project/rustc-switch-wrapper.sh /usr/local/libexec/rustc
+# bindgen-switch-wrapper.sh resolves the shim as $SCRIPT_DIR/bindgen-atomic-shim.h,
+# so it has to live next to the installed wrapper.
+cp /project/bindgen-atomic-shim.h /usr/local/libexec/bindgen-atomic-shim.h
 chmod +x /usr/local/libexec/bindgen /usr/local/libexec/rustc
 '
 
