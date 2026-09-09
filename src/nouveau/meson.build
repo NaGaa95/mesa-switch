@@ -17,7 +17,12 @@ if with_tools.contains('drm-shim')
 endif
 
 if with_nouveau_vk
-  subdir('cubin')
+  # nv_cubin.c/nv_fatbin.c need libelf. It only backs VK_NVX_binary_import,
+  # which is itself gated behind the DLSS experimental flag, so skip it when
+  # libelf is unavailable (e.g. the Switch cross target has no such portlib).
+  if dep_elf.found()
+    subdir('cubin')
+  endif
   subdir('mme')
   subdir('vulkan')
 endif

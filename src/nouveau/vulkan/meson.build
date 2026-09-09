@@ -16,8 +16,6 @@ nvk_files = files(
   'nvk_cmd_meta.c',
   'nvk_cmd_pool.c',
   'nvk_cmd_pool.h',
-  'nvk_cubin.c',
-  'nvk_cubin.h',
   'nvk_debug.h',
   'nvk_descriptor_set.h',
   'nvk_descriptor_set.c',
@@ -166,7 +164,6 @@ nvk_deps = [
   idep_nil,
   idep_nir,
   idep_mesautil,
-  idep_nouveau_cubin,
   idep_nouveau_mme,
   idep_nouveau_ws,
   idep_nvidia_headers,
@@ -178,6 +175,14 @@ nvk_deps = [
 
 if with_platform_switch
   nvk_deps += [idep_nouveau_horizon]
+endif
+
+# VK_NVX_binary_import support needs libelf; it is skipped entirely when that
+# is unavailable. The generated entrypoints are weak, so the NVX symbols simply
+# resolve to NULL and the extension is not advertised.
+if dep_elf.found()
+  nvk_files += files('nvk_cubin.c', 'nvk_cubin.h')
+  nvk_deps += [idep_nouveau_cubin]
 endif
 
 nvk_flags = []
