@@ -428,6 +428,26 @@ const uint32_t mme9097_set_priv_reg[] = {
 	0x00000911,
 };
 
+const uint32_t mme9097_set_priv_reg_wait[] = {
+	0x04110021,
+	0x00000041,
+	0x00000201,
+	0x00000301,
+	0x07400021,
+	0x00000041,
+	0x00001041,
+	0x00001841,
+	0x06310021,
+	0x00000841,
+	0x00100021,
+	0x03400115,
+	0x00000041,
+	0xffffc911,
+	0xffff4837,
+	0x00000991,
+	0x00000911,
+};
+
 const uint32_t mme9097_compute_counter[] = {
 /* 0x0003: iic_loop_start */
 	0x00000f11,

@@ -1700,7 +1700,11 @@ nvc0_screen_create(struct nouveau_device *dev)
       MK_MACRO(NVC0_3D_MACRO_DRAW_ELEMENTS_INDIRECT_COUNT, mme9097_draw_elts_indirect_count);
       MK_MACRO(NVC0_3D_MACRO_QUERY_BUFFER_WRITE, mme9097_query_buffer_write);
       MK_MACRO(NVC0_3D_MACRO_CONSERVATIVE_RASTER_STATE, mme9097_conservative_raster_state);
+#ifdef __SWITCH__
+      MK_MACRO(NVC0_3D_MACRO_SET_PRIV_REG, mme9097_set_priv_reg_wait);
+#else
       MK_MACRO(NVC0_3D_MACRO_SET_PRIV_REG, mme9097_set_priv_reg);
+#endif
       MK_MACRO(NVC0_3D_MACRO_COMPUTE_COUNTER, mme9097_compute_counter);
       MK_MACRO(NVC0_3D_MACRO_COMPUTE_COUNTER_TO_QUERY, mme9097_compute_counter_to_query);
 #ifdef __SWITCH__
@@ -1805,8 +1809,7 @@ nvc0_screen_create(struct nouveau_device *dev)
    BEGIN_NVC0(push, NVC0_3D(LINKED_TSC), 1);
    PUSH_DATA (push, 0);
 
-#ifndef __SWITCH__
-   /* requires Nvidia provided firmware */
+   /* Allow memory loads in fragment helper invocations. */
    if (screen->eng3d->oclass >= GM200_3D_CLASS) {
       unsigned reg = screen->eng3d->oclass >= GV100_3D_CLASS ? 0x419ba4 : 0x419f78;
       BEGIN_1IC0(push, NVC0_3D(MACRO_SET_PRIV_REG), 3);
@@ -1814,7 +1817,6 @@ nvc0_screen_create(struct nouveau_device *dev)
       PUSH_DATA (push, 0x00000000);
       PUSH_DATA (push, 0x00000008);
    }
-#endif
 
 #ifdef __SWITCH__
    /* Drain initialization before exposing the screen. */
