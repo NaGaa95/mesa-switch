@@ -664,7 +664,10 @@ CodeEmitterGM107::emitSSY()
    emitInsn(0xe2900000, false);
 
    if (!insn->srcExists(0) || insn->src(0).getFile() != FILE_MEMORY_CONST) {
-      emitField(0x14, 24, insn->target.bb->binPos - (codeSize + 8));
+      int32_t pos = insn->target.bb->binPos;
+      if (writeIssueDelays && !(pos & 0x1f))
+         pos += 8;
+      emitField(0x14, 24, pos - (codeSize + 8));
    } else {
       emitCBUF (0x24, -1, 20, 16, 0, insn->src(0));
       emitField(0x05, 1, 1);
