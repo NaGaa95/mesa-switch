@@ -367,6 +367,9 @@ st_glsl_to_nir_post_opts(struct st_context *st, struct gl_program *prog,
 
    st_set_prog_affected_state_flags(prog);
    nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
+   /* Vertex buffers use the packed input mask after optimization. */
+   if (nir->info.stage == MESA_SHADER_VERTEX)
+      NIR_PASS(_, nir, nir_recompute_io_bases, nir_var_shader_in);
    st_update_state_param_locations(st->ctx, prog, nir);
 
    if (st->screen->caps.call_finalize_nir_in_linker) {
