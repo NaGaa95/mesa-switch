@@ -867,6 +867,10 @@ Converter::setInterpolate(nv50_ir_varying *var,
                           bool centroid,
                           unsigned semantic)
 {
+   /* Fragment positions are already in window coordinates. */
+   if (semantic == TGSI_SEMANTIC_POSITION)
+      mode = INTERP_MODE_NOPERSPECTIVE;
+
    switch (mode) {
    case INTERP_MODE_FLAT:
       var->flat = 1;
@@ -874,8 +878,6 @@ Converter::setInterpolate(nv50_ir_varying *var,
    case INTERP_MODE_NONE:
       if (semantic == TGSI_SEMANTIC_COLOR)
          var->sc = 1;
-      else if (semantic == TGSI_SEMANTIC_POSITION)
-         var->linear = 1;
       break;
    case INTERP_MODE_NOPERSPECTIVE:
       var->linear = 1;
