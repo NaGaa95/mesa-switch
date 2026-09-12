@@ -4404,6 +4404,14 @@ nvk_cmd_flush_gfx_cbufs(struct nvk_cmd_buffer *cmd)
                P_INLINE_DATA(p, desc_addr >> 32);
                P_INLINE_DATA(p, desc_addr);
             } else {
+#ifdef HAVE_SWITCH_PLATFORM
+               /* flush the deferred Horizon MME sync here: left to
+                * nvk_cmd_buffer_push_indirect() it lands between the macro
+                * header below and the descriptor words the indirect push
+                * supplies, and the macro consumes the semaphore payload as
+                * its cbuf descriptor */
+               nvk_cmd_buffer_switch_mme_consumer(cmd);
+#endif
                struct nv_push *p = nvk_cmd_buffer_push(cmd, 2);
 
                P_1INC(p, NV9097, CALL_MME_MACRO(NVK_MME_BIND_CBUF_DESC));

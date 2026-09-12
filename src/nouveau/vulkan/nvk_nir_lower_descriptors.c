@@ -462,9 +462,17 @@ build_cbuf_map(nir_shader *nir, struct lower_descriptors_ctx *ctx)
       /* Prior to Turing, indirect cbufs require splitting the pushbuf and
        * pushing bits of the descriptor set.  Doing this every draw call is
        * probably more overhead than it's worth.
+       *
+       * On GM20B it is a correctness issue rather than a trade-off: without
+       * the promotion every descriptor set UBO read becomes a global LDG, and
+       * a fragment shader feeding a hardware loop from an LDG never retires,
+       * so the channel dies on a faultless timeout.  nvc0 reads uniforms from
+       * the constant banks on the same silicon.  Set NVK_SWITCH_NO_UBO_CBUF=1
+       * to restore the upstream behaviour.
        */
       if (ctx->dev_info->cls_eng3d < TURING_A &&
-          cbufs[i].key.type == NVK_CBUF_TYPE_UBO_DESC)
+          cbufs[i].key.type == NVK_CBUF_TYPE_UBO_DESC &&
+          debug_get_bool_option("NVK_SWITCH_NO_UBO_CBUF", false))
          continue;
 
       ctx->cbuf_map->cbufs[ctx->cbuf_map->cbuf_count++] = cbufs[i].key;
