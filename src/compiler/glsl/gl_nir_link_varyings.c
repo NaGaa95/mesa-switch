@@ -28,6 +28,7 @@
  */
 
 #include "main/errors.h"
+#include "util/u_debug.h"
 #include "main/macros.h"
 #include "main/menums.h"
 #include "main/mtypes.h"
@@ -858,6 +859,21 @@ static_input_output_matching(struct gl_shader_program *prog)
    return prog->GLSL_Version >= (prog->IsES ? 0 : 420);
 }
 
+/* some programs declare fragment inputs the vertex stage never writes; the SPIR-V path
+ * links them anyway, so don't fail the link here either */
+static bool
+allow_unmatched_inputs(void)
+{
+#ifdef __SWITCH__
+   static int allowed = -1;
+   if (allowed < 0)
+      allowed = debug_get_bool_option("MESA_GLSL_ALLOW_UNMATCHED_INPUTS", true);
+   return allowed;
+#else
+   return false;
+#endif
+}
+
 /**
  * Validate that outputs from one stage match inputs of another
  */
@@ -959,7 +975,8 @@ gl_nir_cross_validate_outputs_to_inputs(const struct gl_constants *consts,
                    * output declaration and there is Static Use of the
                    * declared input.
                    */
-                  if (input->data.used && static_input_output_matching(prog)) {
+                  if (input->data.used && static_input_output_matching(prog) &&
+                      !allow_unmatched_inputs()) {
                      linker_error(prog,
                                   "%s shader input `%s' with explicit location "
                                   "has no matching output\n",
