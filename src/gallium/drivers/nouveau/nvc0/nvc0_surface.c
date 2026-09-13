@@ -878,7 +878,12 @@ nvc0_clear(struct pipe_context *pipe, unsigned buffers,
    }
 
 out:
+#ifdef __SWITCH__
+   /* submits are IPC round trips on Horizon, kick with the draws that follow */
+   PUSH_KICK_DEFER(push);
+#else
    PUSH_KICK(push);
+#endif
    nvc0_screen_state_unlock(nvc0->screen);
 }
 
