@@ -470,8 +470,14 @@ nvc0_init_screen_caps(struct nvc0_screen *screen)
    caps->clear_scissored = true;
    caps->image_store_formatted = true;
    caps->query_memory_info = true;
+#ifdef __SWITCH__
+   /* no VRAM domain on Tegra, but CPU readbacks go through uncached memory */
+   caps->texture_transfer_modes =
+      debug_get_bool_option("NOUVEAU_SWITCH_BLIT_TRANSFER", true) ? PIPE_TEXTURE_TRANSFER_BLIT : 0;
+#else
    caps->texture_transfer_modes =
       screen->base.vram_domain & NOUVEAU_BO_VRAM ? PIPE_TEXTURE_TRANSFER_BLIT : 0;
+#endif
    caps->fbfetch = class_3d >= NVE4_3D_CLASS ? 1 : 0; /* needs testing on fermi */
    caps->seamless_cube_map_per_texture =
    caps->shader_ballot = class_3d >= NVE4_3D_CLASS;
