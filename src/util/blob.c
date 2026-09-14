@@ -25,6 +25,8 @@
 
 #include "blob.h"
 #include "u_math.h"
+#include "log.h"
+#include "u_debug.h"
 
 #ifdef HAVE_VALGRIND
 #include <valgrind.h>
@@ -270,6 +272,16 @@ ensure_can_read(struct blob_reader *blob, size_t size)
       return true;
 
    blob->overrun = true;
+
+   if (unlikely(debug_get_bool_option("MESA_BLOB_DEBUG", false))) {
+      mesa_loge("blob reader overrun: wanted %zu bytes at offset %zu of %zu",
+                size, (size_t)(blob->current - blob->data),
+                (size_t)(blob->end - blob->data));
+      if (debug_get_bool_option("MESA_BLOB_ABORT", false)) {
+         fflush(NULL);
+         abort();
+      }
+   }
 
    return false;
 }
