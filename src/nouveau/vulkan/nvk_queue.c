@@ -407,9 +407,6 @@ nvk_queue_submit_exec(struct nvk_queue *queue,
    struct nvk_device *dev = nvk_queue_device(queue);
    VkResult result;
    if (submit->command_buffer_count > 0) {
-      nvk_descriptor_table_flush_map(dev, &dev->images);
-      nvk_descriptor_table_flush_map(dev, &dev->samplers);
-      nvk_heap_flush_maps(dev, &dev->shader_heap);
       assert(dev->event_heap.arena.mem_flags & NVKMD_MEM_COHERENT);
 
       result = nvk_queue_state_update(queue, &queue->state);
