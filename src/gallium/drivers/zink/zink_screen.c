@@ -3792,6 +3792,10 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
       }
    }
    if (zink_descriptor_mode == ZINK_DESCRIPTOR_MODE_AUTO) {
+#ifdef __SWITCH__
+      /* prefer lazy updates on Switch; ZINK_DESCRIPTORS still overrides */
+      can_db = false;
+#endif
       switch(screen->info.driver_props.driverID) {
       /* descriptor buffer is not performant with virt yet */
       case VK_DRIVER_ID_MESA_VENUS:
