@@ -14,6 +14,7 @@
 
 #include "util/build_id.h"
 #include "util/detect_os.h"
+#include "util/hex.h"
 #include "util/mesa-blake3.h"
 #include "util/os_misc.h"
 #include "util/u_debug.h"
@@ -227,15 +228,21 @@ nvk_CreateInstance(const VkInstanceCreateInfo *pCreateInfo,
    STATIC_ASSERT(sizeof(instance->driver_build_sha) == BLAKE3_KEY_LEN);
    copy_build_id_to_sha1(instance->driver_build_sha, note);
 #else
-   /* Without dl_iterate_phdr, derive the build ID from the package
-    * version. Incremental rebuilds with the same version retain the cache
-    * UUID.
+   /* Without dl_iterate_phdr, take the build ID the build system supplied.
+    * Falling back to the package version keys the shader cache on the Mesa
+    * release alone, so two drivers built from different source share it.
     */
    STATIC_ASSERT(sizeof(instance->driver_build_sha) == BLAKE3_KEY_LEN);
    memset(instance->driver_build_sha, 0, BLAKE3_KEY_LEN);
+#ifdef NVK_BUILD_ID_OVERRIDE
+   mesa_hex_to_bytes(instance->driver_build_sha, NVK_BUILD_ID_OVERRIDE,
+                     MIN2(strlen(NVK_BUILD_ID_OVERRIDE) / 2,
+                          (size_t)BLAKE3_KEY_LEN));
+#else
    const char fallback_id[] = "nvk-" PACKAGE_VERSION;
    memcpy(instance->driver_build_sha, fallback_id,
           MIN2(sizeof(fallback_id) - 1, (size_t)BLAKE3_KEY_LEN));
+#endif
 #endif
 
    *pInstance = nvk_instance_to_handle(instance);

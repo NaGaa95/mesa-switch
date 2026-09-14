@@ -151,7 +151,8 @@ fi
     -Dmesa-clc=system \
     -Dprecomp-compiler=system \
     -Dcpp_rtti=false \
-    -Dbuild-tests=false
+    -Dbuild-tests=false \
+    -Dnvk-build-id="$(git rev-parse HEAD)"
 
 "${NINJA_BIN}" -C "${BUILD_DIR}"
 

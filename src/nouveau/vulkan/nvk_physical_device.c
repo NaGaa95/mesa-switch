@@ -1448,8 +1448,8 @@ nvk_physical_device_init_pipeline_cache(struct nvk_physical_device *pdev)
 
 #ifdef NVK_BUILD_ID_OVERRIDE
    {
-      unsigned size = strlen(NVK_BUILD_ID_OVERRIDE) / 2;
-      unsigned char *data = alloca(size);
+      unsigned char data[64];
+      const size_t size = MIN2(strlen(NVK_BUILD_ID_OVERRIDE) / 2, sizeof(data));
       mesa_hex_to_bytes(data, NVK_BUILD_ID_OVERRIDE, size);
       _mesa_blake3_update(&blake3_ctx, data, size);
    }
