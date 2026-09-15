@@ -170,7 +170,13 @@ nvk_AllocateMemory(VkDevice device,
    uint32_t alignment = pdev->nvkmd->bind_align_B;
 
    uint8_t pte_kind = 0, tile_mode = 0;
-   if (dedicated_info != NULL && dedicated_info->image != VK_NULL_HANDLE) {
+   /* Imported host memory is plain pitch memory without the image's tiled
+    * layout, so the image does not own it: nvk_image_plane_bind then gives
+    * the image its own address with its PTE kind, as for an image bound into
+    * a larger allocation.
+    */
+   if (dedicated_info != NULL && dedicated_info->image != VK_NULL_HANDLE &&
+       mem->vk.host_ptr == NULL) {
       VK_FROM_HANDLE(nvk_image, image, dedicated_info->image);
 
       mem->dedicated_image = image;
