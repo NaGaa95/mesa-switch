@@ -284,13 +284,11 @@ init_dispatch_tables(struct nvk_device *dev)
 static void
 nvk_device_init_cpu_write_mem_policy(struct nvk_device *dev)
 {
-   /* Default Horizon command/transient storage to CPU-uncached, GPU-cached
-    * memory. Environment options permit cached-CPU comparisons.
+   /* Storage the CPU only writes is mapped uncached, so publishing it to the
+    * GPU costs nothing. Environment options permit cached-CPU comparisons.
     */
-   dev->cmd_mem_cpu_uncached =
-      debug_get_bool_option("NVK_SWITCH_CMD_MEM_CPU_UNCACHED", true);
-   dev->mem_stream_cpu_uncached =
-      debug_get_bool_option("NVK_SWITCH_MEM_STREAM_CPU_UNCACHED", true);
+   dev->cpu_write_mem_uncached =
+      debug_get_bool_option("NVK_SWITCH_CPU_WRITE_MEM_UNCACHED", true);
 }
 
 static bool

@@ -48,13 +48,8 @@ nvk_mem_stream_chunk_create(struct nvk_device *dev,
       return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
 
    enum nvkmd_mem_flags flags = NVKMD_MEM_GART;
-   if (dev->mem_stream_cpu_uncached) {
-      /* Keep GPU caching enabled.  Horizon's COHERENT flag only changes the
-       * CPU mapping to uncached, making explicit CPU cache publication a
-       * safe no-op for these write-only streaming chunks.
-       */
+   if (dev->cpu_write_mem_uncached)
       flags |= NVKMD_MEM_COHERENT;
-   }
 
    result = nvkmd_dev_alloc_mapped_mem(dev->nvkmd, &dev->vk.base,
                                        NVK_MEM_STREAM_MAX_ALLOC_SIZE, 0,
