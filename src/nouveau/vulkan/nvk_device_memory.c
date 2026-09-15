@@ -466,14 +466,18 @@ nvk_GetMemoryHostPointerPropertiesEXT(
    if (handleType != VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT)
       return vk_error(dev, VK_ERROR_INVALID_EXTERNAL_HANDLE);
 
-   /* Imported host pages are cacheable RAM: expose only the host-visible,
-    * host-cached types.
+   /* Horizon can make imported pages uncached for coherent allocations,
+    * restoring their cache attribute when the NvMap is released.
     */
+   VkMemoryPropertyFlags import_flags = VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
+#ifdef __SWITCH__
+   import_flags |= VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+#endif
    uint32_t memory_types = 0;
    for (uint32_t i = 0; i < pdev->mem_type_count; i++) {
       const VkMemoryPropertyFlags props = pdev->mem_types[i].propertyFlags;
       if ((props & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) &&
-          (props & VK_MEMORY_PROPERTY_HOST_CACHED_BIT))
+          (props & import_flags))
          memory_types |= 1u << i;
    }
    if (memory_types == 0)

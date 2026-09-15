@@ -464,6 +464,24 @@ nouveau_horizon_memory_wrapper_create(
    return memory;
 }
 
+/* libnx's nvMapCreate flushes the CPU cache before making an uncached map,
+ * but ignores the result of svcSetMemoryAttribute. Check it ourselves so a
+ * coherent allocation can never succeed with cacheable CPU pages. Closing
+ * the NvMap restores caching before the caller can reuse the backing.
+ */
+static Result
+nouveau_horizon_memory_nvmap_create(NvMap *map, void *addr, uint32_t size,
+                                     uint32_t align, NvKind kind, bool cached)
+{
+   Result rc = nvMapCreate(map, addr, size, align, kind, cached);
+   if (R_SUCCEEDED(rc) && !cached) {
+      rc = svcSetMemoryAttribute(addr, size, 8, 8);
+      if (R_FAILED(rc))
+         nvMapClose(map);
+   }
+   return rc;
+}
+
 enum nouveau_horizon_status
 nouveau_horizon_memory_create(
    struct nouveau_horizon_device *device,
@@ -518,7 +536,7 @@ nouveau_horizon_memory_create(
       return NOUVEAU_HORIZON_ERROR_OUT_OF_HOST_MEMORY;
    }
 
-   const bool cpu_cacheable = is_host_import ||
+   const bool cpu_cacheable =
       (create_info->flags & NOUVEAU_HORIZON_MEMORY_CPU_CACHED) != 0;
 
    struct nouveau_horizon_bo_cache_entry *recycled = is_host_import ?
@@ -530,7 +548,7 @@ nouveau_horizon_memory_create(
       /* Trim the cache once and retry, as the allocation path below does. */
       Result rc = 0;
       for (unsigned attempt = 0;; attempt++) {
-         rc = nvMapCreate(&identity->map, identity->cpu_addr,
+         rc = nouveau_horizon_memory_nvmap_create(&identity->map, identity->cpu_addr,
                           (uint32_t)size_B, (uint32_t)align_B,
                           (NvKind)create_info->backing_kind,
                           cpu_cacheable);
@@ -569,7 +587,7 @@ nouveau_horizon_memory_create(
             return NOUVEAU_HORIZON_ERROR_OUT_OF_HOST_MEMORY;
          }
 
-         Result rc = nvMapCreate(&identity->map, identity->cpu_addr,
+         Result rc = nouveau_horizon_memory_nvmap_create(&identity->map, identity->cpu_addr,
                                  (uint32_t)size_B, (uint32_t)align_B,
                                  (NvKind)create_info->backing_kind,
                                  cpu_cacheable);
@@ -616,7 +634,8 @@ nouveau_horizon_memory_create(
       /* Imported memory keeps its contents; clean so the GPU's first read
        * observes them.
        */
-      armDCacheClean(identity->cpu_addr, (size_t)size_B);
+      if (cpu_cacheable)
+         armDCacheClean(identity->cpu_addr, (size_t)size_B);
    } else {
       memset(identity->cpu_addr, 0, (size_t)size_B);
       if (cpu_cacheable)

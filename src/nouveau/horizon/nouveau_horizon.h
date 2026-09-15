@@ -170,7 +170,8 @@ struct nouveau_horizon_memory_create_info {
 
    /* When set, wrap this caller-owned range instead of allocating.  Pointer
     * and size_B must be 4 KiB aligned and outlive the identity; the range is
-    * never freed, recycled or cleared.
+    * never freed, recycled or cleared. Without CPU_CACHED, the range is made
+    * uncached for the identity's lifetime and restored to cached on release.
     */
    void *import_host_ptr;
 };
