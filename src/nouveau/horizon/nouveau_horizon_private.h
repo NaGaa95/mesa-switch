@@ -64,6 +64,10 @@ struct nouveau_horizon_runtime {
 
    simple_mtx_t memory_identity_mutex;
    struct hash_table_u64 *memory_identities;
+
+   /* Every live device, so a process that is closing can give their GPU
+    * address spaces back (nouveau_horizon_runtime_shutdown). */
+   struct list_head devices;
 };
 
 struct nouveau_horizon_memory_identity {
@@ -89,6 +93,7 @@ struct nouveau_horizon_memory_identity {
 struct nouveau_horizon_device {
    uint32_t refcnt;
    struct nouveau_horizon_runtime *runtime;
+   struct list_head runtime_link;
    struct nouveau_horizon_logger logger;
 
    struct nv_device_info info;

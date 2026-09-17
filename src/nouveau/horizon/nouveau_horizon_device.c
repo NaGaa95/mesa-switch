@@ -265,6 +265,7 @@ nouveau_horizon_device_create(
       available_B >> 20,
       device->bo_cache_cap_B >> 20);
 
+   list_addtail(&device->runtime_link, &device->runtime->devices);
    *device_out = device;
    return NOUVEAU_HORIZON_SUCCESS;
 
@@ -343,6 +344,7 @@ nouveau_horizon_device_put(struct nouveau_horizon_device *device)
          " evictions",
          bo_hits, bo_misses, bo_evictions);
    }
+   list_del(&device->runtime_link);
    nouveau_horizon_device_bo_cache_finish(device);
    util_vma_heap_finish(&device->va_heap);
    simple_mtx_destroy(&device->channel_mutex);

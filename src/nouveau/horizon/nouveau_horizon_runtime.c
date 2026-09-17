@@ -289,6 +289,7 @@ nouveau_horizon_runtime_get(struct nouveau_horizon_runtime **runtime_out)
          simple_mtx_unlock(&nouveau_horizon_runtime_mutex);
          return NOUVEAU_HORIZON_ERROR_OUT_OF_HOST_MEMORY;
       }
+      list_inithead(&nouveau_horizon_runtime.devices);
       nouveau_horizon_runtime.initialized = true;
    }
 
@@ -321,6 +322,81 @@ nouveau_horizon_runtime_ref(struct nouveau_horizon_runtime *runtime)
    runtime->refcnt++;
    simple_mtx_unlock(&nouveau_horizon_runtime_mutex);
    return runtime;
+}
+
+void
+nouveau_horizon_runtime_shutdown(void (*step)(const char *what))
+{
+   /* The program that owned these buffers is gone and cannot free them one by
+    * one. Closing the driver sessions makes nvservices let go of every buffer
+    * and mapping of this process, which is what the homebrew loader needs
+    * before it can reset the heap.
+    *
+    * No lock is taken and nothing is freed: the caller has already ended every
+    * other thread, so the state is quiescent, and a thread that ended inside
+    * the driver may have taken this lock with it. Nothing may use the driver
+    * afterwards, so this is only for a process on its way out. */
+   if (!nouveau_horizon_runtime.initialized)
+      return;
+
+   nouveau_horizon_runtime.initialized = false;
+   nouveau_horizon_runtime.refcnt = 0;
+   /* step, when given, says what is being closed, so a caller whose log stops
+    * can tell what did not come back. */
+   /* A channel's command buffers are the GPU's until the channel is closed.
+    * Not the usual teardown: that waits for the work to finish, and the work
+    * belonged to a program that has already been ended. */
+   if (step != NULL)
+      step("channels");
+   list_for_each_entry(struct nouveau_horizon_device, device,
+                       &nouveau_horizon_runtime.devices, runtime_link) {
+      list_for_each_entry_safe(struct nouveau_horizon_channel, channel,
+                               &device->channels, device_link) {
+         if (channel->channel_ready) {
+            nvGpuChannelClose(&channel->gpu_channel);
+            channel->channel_ready = false;
+         }
+      }
+      list_inithead(&device->channels);
+   }
+   /* A buffer's pages stay with the GPU while its address space still binds
+    * them, so the address spaces go next. */
+   if (step != NULL)
+      step("address spaces");
+   list_for_each_entry_safe(struct nouveau_horizon_device, device,
+                            &nouveau_horizon_runtime.devices, runtime_link) {
+      nvAddressSpaceClose(&device->addr_space);
+   }
+   list_inithead(&nouveau_horizon_runtime.devices);
+   if (step != NULL)
+      step("buffers");
+   /* Closing the sessions does not make nvservices let the pages go; the
+    * handles do. Every buffer this process registered is in this table, and it
+    * is walked without its lock for the reason above. Done before the nvmap
+    * session is closed, which these handles belong to. */
+   if (nouveau_horizon_runtime.memory_identities != NULL) {
+      hash_table_u64_foreach(nouveau_horizon_runtime.memory_identities, entry) {
+         struct nouveau_horizon_memory_identity *identity = entry.data;
+
+         if (identity != NULL)
+            nvMapClose(&identity->map);
+      }
+   }
+   if (step != NULL)
+      step("gpu");
+   nvGpuExit();
+   if (step != NULL)
+      step("map");
+   nvMapExit();
+   if (step != NULL)
+      step("fence");
+   nvFenceExit();
+   /* Not nvExit(): its service guard is a lock like any other, and a thread
+    * that ended inside the driver can be holding it, which hangs the process
+    * that is trying to close. The buffers belong to the nvmap session, which
+    * has been closed above, so the base session can be left to the kernel. */
+   if (step != NULL)
+      step("done");
 }
 
 void

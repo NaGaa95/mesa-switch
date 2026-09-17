@@ -419,6 +419,13 @@ nouveau_horizon_runtime_ref(struct nouveau_horizon_runtime *runtime);
 void
 nouveau_horizon_runtime_put(struct nouveau_horizon_runtime *runtime);
 
+/* Closes the driver sessions whatever still references them, so nvservices
+ * gives back every buffer and mapping this process holds. For a process that is
+ * closing: nothing may touch the GPU afterwards. step, which may be NULL, is
+ * told which session is about to be closed. */
+void
+nouveau_horizon_runtime_shutdown(void (*step)(const char *what));
+
 /* Fill all GM20B information which is independent of a logical address
  * space.  This call does not acquire libnx services.
  */
