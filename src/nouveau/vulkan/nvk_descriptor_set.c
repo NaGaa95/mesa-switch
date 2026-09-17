@@ -59,6 +59,7 @@ nvk_descriptor_writer_init_push(const struct nvk_physical_device *pdev,
    w->layout = layout;
    w->set_map = push_set->data;
    w->set_size_B = sizeof(push_set->data);
+   push_set->size_B = layout->non_variable_descriptor_buffer_size;
 }
 
 static void
@@ -737,8 +738,12 @@ nvk_CreateDescriptorPool(VkDevice _device,
             return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
          }
       } else {
+         enum nvkmd_mem_flags mem_flags = NVKMD_MEM_LOCAL;
+         if (dev->cpu_write_mem_uncached)
+            mem_flags |= NVKMD_MEM_COHERENT;
+
          result = nvkmd_dev_alloc_mapped_mem(dev->nvkmd, &dev->vk.base,
-                                             mem_size, 0, NVKMD_MEM_LOCAL,
+                                             mem_size, 0, mem_flags,
                                              NVKMD_MEM_MAP_WR, &pool->mem);
          if (result != VK_SUCCESS) {
             nvk_destroy_descriptor_pool(dev, pAllocator, pool);

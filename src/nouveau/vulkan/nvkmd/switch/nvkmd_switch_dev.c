@@ -665,6 +665,15 @@ static void
 nvkmd_switch_dev_destroy(struct nvkmd_dev *_dev)
 {
    struct nvkmd_switch_dev *dev = nvkmd_switch_dev(_dev);
+
+   /* Anything still listed here is a client leak, so release it rather than
+    * leaving the NvMap and its backing store behind.
+    */
+   list_for_each_entry_safe(struct nvkmd_mem, mem, &_dev->mems, link) {
+      list_del(&mem->link);
+      nvkmd_switch_mem_free(mem);
+   }
+
    simple_mtx_destroy(&dev->base.mems_mutex);
    nouveau_horizon_device_put(dev->horizon);
    nouveau_horizon_runtime_put(dev->runtime);

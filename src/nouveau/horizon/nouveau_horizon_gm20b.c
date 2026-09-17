@@ -90,24 +90,36 @@ nouveau_horizon_gm20b_build_fence(
    enum nouveau_horizon_completion_mode completion_mode)
 {
    uint32_t *cmd = commands;
-   uint32_t syncpoint_increment = syncpoint_id | (1u << 16);
+   const bool cpu_visible =
+      completion_mode == NOUVEAU_HORIZON_COMPLETION_CPU;
 
-   /* UnknownFlush orders engine writes before the syncpoint action. */
-   *cmd++ = 0x451 | (0 << 13) | (0 << 16) | (4u << 29);
-   if (completion_mode == NOUVEAU_HORIZON_COMPLETION_CPU)
-      syncpoint_increment |= 1u << 20;
+   uint32_t syncpoint_increment =
+      NVVAL(NVB197, INCREMENT_SYNC_POINT, INDEX, syncpoint_id) |
+      NVDEF(NVB197, INCREMENT_SYNC_POINT, CONDITION, ROP_WRITES_DONE);
 
-   *cmd++ = 0x0B2 | (0 << 13) | (1 << 16) | (1u << 29);
+   /* Only a CPU or compositor read needs the GPU L2 written back. */
+   if (cpu_visible)
+      syncpoint_increment |=
+         NVDEF(NVB197, INCREMENT_SYNC_POINT, CLEAN_L2, TRUE);
+
+   *cmd++ = nouveau_horizon_gm20b_immediate_header(
+      NVB197_FLUSH_PENDING_WRITES, 0);
+   *cmd++ = nouveau_horizon_gm20b_incr_header(
+      NVB197_INCREMENT_SYNC_POINT, 1);
    *cmd++ = syncpoint_increment;
 
    /* GM20B CPU/compositor-visible completion needs the duplicated
     * cache-clean syncpoint action used by public deko3d on this GPU.
     */
-   if (completion_mode == NOUVEAU_HORIZON_COMPLETION_CPU) {
-      *cmd++ = 0x0B2 | (0 << 13) | (1 << 16) | (1u << 29);
+   if (cpu_visible) {
+      *cmd++ = nouveau_horizon_gm20b_incr_header(
+         NVB197_INCREMENT_SYNC_POINT, 1);
       *cmd++ = syncpoint_increment;
    }
 
+   assert((uint32_t)(cmd - commands) ==
+          (cpu_visible ? NOUVEAU_HORIZON_GM20B_FENCE_CPU_WORDS
+                       : NOUVEAU_HORIZON_GM20B_FENCE_GPU_WORDS));
    return cmd - commands;
 }
 

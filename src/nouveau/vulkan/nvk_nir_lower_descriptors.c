@@ -398,6 +398,17 @@ record_cbuf_uses_instr(UNUSED nir_builder *b, nir_instr *instr, void *_ctx)
    }
 }
 
+static bool
+cbuf_set_is_push(const struct lower_descriptors_ctx *ctx, uint8_t desc_set)
+{
+   const struct nvk_descriptor_set_layout *set_layout =
+      ctx->set_layouts[desc_set];
+
+   return set_layout != NULL &&
+          (set_layout->flags &
+           VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT);
+}
+
 static void
 build_cbuf_map(nir_shader *nir, struct lower_descriptors_ctx *ctx)
 {
@@ -459,12 +470,15 @@ build_cbuf_map(nir_shader *nir, struct lower_descriptors_ctx *ctx)
           cbufs[i].key.type == NVK_CBUF_TYPE_UBO_DESC)
          continue;
 
-      /* Prior to Turing, indirect cbufs require splitting the pushbuf and
-       * pushing bits of the descriptor set.  Doing this every draw call is
-       * probably more overhead than it's worth.
+      /* Prior to Turing, a cbuf whose descriptor the CPU cannot read at bind
+       * time needs the pushbuf split so the command streamer fetches it, which
+       * costs a non-prefetchable fetch per bind.  Push descriptor sets are
+       * readable, so promote those and leave the rest on global loads.
        */
       if (ctx->dev_info->cls_eng3d < TURING_A &&
-          cbufs[i].key.type == NVK_CBUF_TYPE_UBO_DESC)
+          cbufs[i].key.type == NVK_CBUF_TYPE_UBO_DESC &&
+          (debug_get_bool_option("NVK_SWITCH_NO_UBO_CBUF", false) ||
+           !cbuf_set_is_push(ctx, cbufs[i].key.desc_set)))
          continue;
 
       ctx->cbuf_map->cbufs[ctx->cbuf_map->cbuf_count++] = cbufs[i].key;

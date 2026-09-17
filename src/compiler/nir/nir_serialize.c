@@ -1811,7 +1811,20 @@ read_instr(read_ctx *ctx, nir_block *block)
       instr = &read_cmat_call(ctx)->instr;
       break;
    default:
-      UNREACHABLE("bad instr type");
+      mesa_loge("nir_deserialize: bad instr_type %u at blob offset %zu of %zu",
+                header.any.instr_type,
+                (size_t)(ctx->blob->current - ctx->blob->data),
+                (size_t)(ctx->blob->end - ctx->blob->data));
+      fflush(NULL);
+      abort();
+   }
+
+   if (unlikely(instr == NULL)) {
+      mesa_loge("nir_deserialize: instr_type %u produced no instr at offset %zu",
+                header.any.instr_type,
+                (size_t)(ctx->blob->current - ctx->blob->data));
+      fflush(NULL);
+      abort();
    }
 
    if (unlikely(ctx->nir->has_debug_info)) {

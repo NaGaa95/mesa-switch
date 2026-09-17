@@ -398,7 +398,7 @@ nvk_cmd_copy_buffer_ce(struct nvk_cmd_buffer *cmd,
       uint64_t size = region->size;
 
       while (size) {
-         struct nv_push *p = nvk_cmd_buffer_push(cmd, 10);
+         struct nv_push *p = nvk_cmd_buffer_push(cmd, 12);
 
          P_MTHD(p, NV90B5, OFFSET_IN_UPPER);
          P_NV90B5_OFFSET_IN_UPPER(p, src_addr >> 32);
@@ -406,11 +406,23 @@ nvk_cmd_copy_buffer_ce(struct nvk_cmd_buffer *cmd,
          P_NV90B5_OFFSET_OUT_UPPER(p, dst_addr >> 32);
          P_NV90B5_OFFSET_OUT_LOWER(p, dst_addr & 0xffffffff);
 
-         unsigned bytes = MIN2(size, 1 << 17);
+         /* Matching pitches keep the lines contiguous, so one launch moves
+          * LINE_COUNT * LINE_LENGTH_IN bytes rather than a single line.
+          */
+         const uint32_t max_line_B = 1 << 17;
+         uint32_t line_B, lines;
+         if (size > max_line_B) {
+            line_B = max_line_B;
+            lines = MIN2((uint64_t)max_line_B, size / max_line_B);
+         } else {
+            line_B = size;
+            lines = 1;
+         }
 
-         P_MTHD(p, NV90B5, LINE_LENGTH_IN);
-         P_NV90B5_LINE_LENGTH_IN(p, bytes);
-         P_NV90B5_LINE_COUNT(p, 1);
+         P_NV90B5_PITCH_IN(p, line_B);
+         P_NV90B5_PITCH_OUT(p, line_B);
+         P_NV90B5_LINE_LENGTH_IN(p, line_B);
+         P_NV90B5_LINE_COUNT(p, lines);
 
          P_IMMD(p, NV90B5, LAUNCH_DMA, {
                 .data_transfer_type = DATA_TRANSFER_TYPE_PIPELINED,
@@ -420,6 +432,7 @@ nvk_cmd_copy_buffer_ce(struct nvk_cmd_buffer *cmd,
                 .dst_memory_layout = DST_MEMORY_LAYOUT_PITCH,
          });
 
+         const uint64_t bytes = (uint64_t)line_B * lines;
          src_addr += bytes;
          dst_addr += bytes;
          size -= bytes;

@@ -458,7 +458,16 @@ nvc0_miptree_transfer_map(struct pipe_context *pctx,
 
    size = tx->base.layer_stride;
 
-   ret = nouveau_bo_new(dev, NOUVEAU_BO_GART | NOUVEAU_BO_MAP, 0,
+   unsigned bo_flags = NOUVEAU_BO_GART | NOUVEAU_BO_MAP;
+#ifdef __SWITCH__
+   /* Nothing reads a write-only staging copy back, so an uncached map spares
+    * both the publication and the cache lines the upload would evict.
+    */
+   if (!(usage & PIPE_MAP_READ))
+      bo_flags |= NOUVEAU_BO_COHERENT | NOUVEAU_BO_SWITCH_GPU_CACHED;
+#endif
+
+   ret = nouveau_bo_new(dev, bo_flags, 0,
                         size * tx->nlayers, NULL, &tx->rect[1].bo);
    if (ret) {
       pipe_resource_reference(&tx->base.resource, NULL);

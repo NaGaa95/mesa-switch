@@ -52,8 +52,7 @@ struct nvk_device {
     * memory; GPU caching is controlled separately by
     * NVKMD_MEM_GPU_UNCACHED.
     */
-   bool cmd_mem_cpu_uncached;
-   bool mem_stream_cpu_uncached;
+   bool cpu_write_mem_uncached;
 
    struct nvk_upload_queue upload;
 

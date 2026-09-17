@@ -15,7 +15,7 @@ PYTHON_BIN="${PYTHON:-python}"
 BUILD_TYPE="${MESA_BUILD_TYPE:-release}"
 OPTIMIZATION="${MESA_OPTIMIZATION:-2}"
 ALLOW_DIRTY="${ALLOW_DIRTY:-0}"
-SDK_BASENAME="${SDK_BASENAME:-mesa-26.2.1-switch-unified-horizon-sdk}"
+SDK_BASENAME="${SDK_BASENAME:-mesa-26.2.2-switch-unified-horizon-sdk}"
 export MESA_SWITCH_RUST_TARGET="${MESA_SWITCH_RUST_TARGET:-aarch64-unknown-linux-gnu}"
 
 if [[ -n "${MSYSTEM:-}" ]]; then
@@ -151,7 +151,8 @@ fi
     -Dmesa-clc=system \
     -Dprecomp-compiler=system \
     -Dcpp_rtti=false \
-    -Dbuild-tests=false
+    -Dbuild-tests=false \
+    -Dnvk-build-id="$(git rev-parse HEAD)"
 
 "${NINJA_BIN}" -C "${BUILD_DIR}"
 

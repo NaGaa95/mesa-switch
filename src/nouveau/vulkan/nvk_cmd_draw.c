@@ -4404,6 +4404,17 @@ nvk_cmd_flush_gfx_cbufs(struct nvk_cmd_buffer *cmd)
                P_INLINE_DATA(p, desc_addr >> 32);
                P_INLINE_DATA(p, desc_addr);
             } else {
+#ifdef HAVE_SWITCH_PLATFORM
+               /* nvk_cmd_buffer_push_indirect() flushes a deferred Horizon MME
+                * sync before it splits the pushbuf.  Left to itself that emits
+                * NV906F_SEMAPHORE* methods BETWEEN the CALL_MME_MACRO header
+                * below and the three descriptor words the indirect push
+                * supplies, so the macro consumes the semaphore payload as its
+                * cbuf descriptor and the channel dies on the first draw.
+                * Flush it here, while there is no half-built method.
+                */
+               nvk_cmd_buffer_switch_mme_consumer(cmd);
+#endif
                struct nv_push *p = nvk_cmd_buffer_push(cmd, 2);
 
                P_1INC(p, NV9097, CALL_MME_MACRO(NVK_MME_BIND_CBUF_DESC));

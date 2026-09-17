@@ -39,7 +39,7 @@
 static uint8_t
 nvk_cmd_buffer_subchannel_mask(struct nvk_cmd_buffer *cmd);
 
-static void
+void
 nvk_descriptor_state_fini(struct nvk_cmd_buffer *cmd,
                           struct nvk_descriptor_state *desc)
 {
@@ -1599,9 +1599,14 @@ nvk_cmd_buffer_flush_push_descriptors(struct nvk_cmd_buffer *cmd,
          continue;
 
       struct nvk_push_descriptor_set *push_set = desc->sets[set_idx].push;
+      uint32_t upload_size_B = align(push_set->size_B, min_cbuf_alignment);
+      if (upload_size_B == 0)
+         upload_size_B = sizeof(push_set->data);
+      upload_size_B = MIN2(upload_size_B, sizeof(push_set->data));
+
       uint64_t push_set_addr;
       result = nvk_cmd_buffer_upload_data(cmd, push_set->data,
-                                          sizeof(push_set->data),
+                                          upload_size_B,
                                           min_cbuf_alignment,
                                           &push_set_addr);
       if (unlikely(result != VK_SUCCESS)) {
@@ -1611,7 +1616,7 @@ nvk_cmd_buffer_flush_push_descriptors(struct nvk_cmd_buffer *cmd,
 
       struct nvk_buffer_address set_addr = {
          .base_addr = push_set_addr,
-         .size = sizeof(push_set->data),
+         .size = upload_size_B,
       };
       nvk_descriptor_state_set_root(cmd, desc, sets[set_idx], set_addr);
    }

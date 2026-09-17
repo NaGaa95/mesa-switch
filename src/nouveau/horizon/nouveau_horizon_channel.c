@@ -152,6 +152,22 @@ nouveau_horizon_channel_latch_error(
    return channel->error.status;
 }
 
+static const char *
+nouveau_horizon_notification_name(uint32_t type)
+{
+   switch (type) {
+   case 8: return "fifo idle timeout";
+   case 13: return "graphics engine error (sw notify)";
+   case 24: return "graphics semaphore timeout";
+   case 25: return "graphics illegal notify";
+   case 31: return "mmu fault";
+   case 32: return "pbdma error";
+   case 43: return "channel reset verification error";
+   case 80: return "pushbuffer crc mismatch";
+   default: return "unknown";
+   }
+}
+
 static bool
 nouveau_horizon_notification_query_is_empty(Result rc)
 {
@@ -211,11 +227,12 @@ nouveau_horizon_channel_check_error_locked(
       nouveau_horizon_log(
          channel->device, NOUVEAU_HORIZON_LOG_ERROR,
          "channel %llu lost: notification_rc=0x%x "
-         "notification={type=%u info=%u status=%u} error_rc=0x%x "
-         "error={type=%u info=[%u,%u,%u,%u]}",
+         "notification={type=%u (%s) info=%u status=%u} error_rc=0x%x "
+         "error={type=%u info=[0x%x,0x%x,0x%x,0x%x]}",
          (unsigned long long)channel->id,
          R_VALUE(notification_rc),
-         notification.info32, notification.info16, notification.status,
+         notification.info32, nouveau_horizon_notification_name(notification.info32),
+         notification.info16, notification.status,
          R_VALUE(error_rc),
          native_error.type, native_error.info[0], native_error.info[1],
          native_error.info[2], native_error.info[3]);

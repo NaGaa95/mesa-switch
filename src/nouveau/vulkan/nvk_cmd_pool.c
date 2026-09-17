@@ -23,14 +23,8 @@ nvk_cmd_mem_create(struct nvk_cmd_pool *pool, bool force_gart, struct nvk_cmd_me
 
    enum nvkmd_mem_flags flags = force_gart ? NVKMD_MEM_GART
                                            : NVKMD_MEM_LOCAL;
-   if (dev->cmd_mem_cpu_uncached) {
-      /* On Horizon, COHERENT selects a CPU-uncached NvMap.  Do not set
-       * GPU_UNCACHED: command fetches and transient command-buffer uploads
-       * retain GPU caching, with submission's system-memory acquire making
-       * new CPU writes visible.
-       */
+   if (dev->cpu_write_mem_uncached)
       flags |= NVKMD_MEM_COHERENT;
-   }
 
    result = nvkmd_dev_alloc_mapped_mem(dev->nvkmd, &pool->vk.base,
                                        NVK_CMD_MEM_SIZE, 0,
