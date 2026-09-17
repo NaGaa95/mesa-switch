@@ -250,6 +250,13 @@ bool util_queue_init(struct util_queue *queue,
                      void *global_data);
 void util_queue_destroy(struct util_queue *queue);
 
+/* Ends every queue's worker threads and joins them, leaving the queues
+ * themselves alone: what the atexit handler does, for a program that has to
+ * have no thread of its own left before it hands its process back. A worker's
+ * stack is memory its process borrowed, and on Horizon the homebrew loader
+ * cannot take a process back whose heap still lends pages out. */
+void util_queue_kill_all_threads(void);
+
 /* optional cleanup callback is called after fence is signaled: */
 void util_queue_add_job(struct util_queue *queue,
                         void *job,

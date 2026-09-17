@@ -87,6 +87,15 @@ global_init(void)
    atexit(atexit_handler);
 }
 
+void
+util_queue_kill_all_threads(void)
+{
+   /* The mutex is made by the first queue; a process with none has nothing to
+    * end, and call_once here leaves it in the same state either way. */
+   call_once(&atexit_once_flag, global_init);
+   atexit_handler();
+}
+
 static void
 add_to_atexit_list(struct util_queue *queue)
 {
