@@ -11,6 +11,10 @@ cmake = 'C:/msys64/clang64/bin/cmake.exe'
 [properties]
 needs_exe_wrapper = false
 
+[built-in options]
+cmake_prefix_path = ['C:/msys64/clang64']
+pkg_config_path = ['C:/msys64/clang64/lib/pkgconfig', 'C:/msys64/clang64/share/pkgconfig']
+
 [host_machine]
 system = 'windows'
 cpu_family = 'x86_64'
