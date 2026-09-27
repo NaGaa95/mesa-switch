@@ -302,8 +302,8 @@ nvk_cmd_buffer_push_indirect(struct nvk_cmd_buffer *cmd,
                              uint64_t addr, uint32_t range)
 {
 #ifdef HAVE_SWITCH_PLATFORM
-   if (range > 0)
-      nvk_cmd_buffer_switch_mme_consumer(cmd);
+   /* The caller must synchronize before starting an incomplete method. */
+   assert(!cmd->switch_mme_sync_pending || vk_command_buffer_has_error(&cmd->vk));
 #endif
 
    nvk_cmd_buffer_flush_push(cmd, true);
