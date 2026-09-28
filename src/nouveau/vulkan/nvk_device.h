@@ -53,6 +53,7 @@ struct nvk_device {
     * NVKMD_MEM_GPU_UNCACHED.
     */
    bool cpu_write_mem_uncached;
+   bool ubo_delta_enabled;
 
    struct nvk_upload_queue upload;
 

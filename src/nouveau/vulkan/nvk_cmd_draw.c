@@ -848,6 +848,8 @@ nvk_cmd_buffer_begin_graphics(struct nvk_cmd_buffer *cmd,
    }
 
    cmd->state.gfx.descriptors.flush_root = nvk_cmd_flush_gfx_root_desc;
+   cmd->state.gfx.descriptors.dynamic_buffers_valid = 0;
+   cmd->state.gfx.descriptors.dynamic_starts_valid = false;
 
    if (cmd->vk.level != VK_COMMAND_BUFFER_LEVEL_PRIMARY &&
        (pBeginInfo->flags & VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT)) {
@@ -1181,15 +1183,23 @@ get_depth_stencil_plane_params(struct nvk_image_view *iview,
    *image_out = nil_image;
 }
 
-static struct nvk_zcull_plane*
-nvk_get_zcull_plane(struct nvk_rendering_state *render) {
-   if (render->depth_att.iview) {
-      struct nvk_image *img = (struct nvk_image*) render->depth_att.iview->vk.image;
-      if (img->zcull.nil.size_B > 0) {
-         return &img->zcull;
-      }
-   }
-   return NULL;
+static struct nvk_image *
+nvk_get_zcull_image(const struct nvk_rendering_state *render)
+{
+   const struct nvk_image_view *iview = render->depth_att.iview;
+   if (iview == NULL)
+      return NULL;
+
+#ifdef HAVE_SWITCH_PLATFORM
+   if (render->linear || render->view_mask > 1 ||
+       render->area.extent.width == 0 || render->area.extent.height == 0 ||
+       (render->view_mask == 0 && render->layer_count != 1) ||
+       iview->vk.base_mip_level != 0 || iview->vk.base_array_layer != 0 ||
+       iview->vk.layer_count != 1)
+      return NULL;
+#endif
+
+   return (struct nvk_image *)iview->vk.image;
 }
 
 static uint32_t
@@ -1531,14 +1541,20 @@ nvk_CmdBeginRendering(VkCommandBuffer commandBuffer,
       P_IMMD(p, NV9097, SET_ZT_SELECT, 0 /* target_count */);
    }
 
-   /* TODO: zcull for depth-stencil */
-   struct nvk_zcull_plane *zcull_plane = nvk_get_zcull_plane(render);
+   struct nvk_image *zcull_image = nvk_get_zcull_image(render);
+   struct nvk_zcull_plane *zcull_plane =
+      zcull_image != NULL && zcull_image->zcull.addr != 0 ?
+      &zcull_image->zcull : NULL;
    bool use_zcull = pdev->info.has_zcull_info &&
       pRenderingInfo->pDepthAttachment != NULL &&
       pRenderingInfo->pDepthAttachment->imageView != VK_NULL_HANDLE &&
-      pRenderingInfo->pDepthAttachment->loadOp != VK_ATTACHMENT_LOAD_OP_NONE &&
       (zcull_plane ||
        pRenderingInfo->pDepthAttachment->loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR);
+#ifdef HAVE_SWITCH_PLATFORM
+   use_zcull &= zcull_image != NULL &&
+                (zcull_plane != NULL || zcull_image->zcull.transient_eligible);
+#endif
+   render->zcull_enabled = use_zcull;
 
    if (use_zcull) {
       uint32_t start_count = nv_push_dw_count(p);
@@ -1715,17 +1731,20 @@ nvk_CmdBeginRendering(VkCommandBuffer commandBuffer,
    if (sample_layout != NIL_SAMPLE_LAYOUT_INVALID)
       nvk_cmd_set_sample_layout(cmd, sample_layout);
 
-   if (render->flags & VK_RENDERING_RESUMING_BIT)
-      return;
-
    if (use_zcull) {
+      /* A resumed pass has no guaranteed snapshot; rebuild without touching depth. */
+      const VkAttachmentLoadOp load_op =
+         (render->flags & VK_RENDERING_RESUMING_BIT) ?
+         VK_ATTACHMENT_LOAD_OP_DONT_CARE :
+         pRenderingInfo->pDepthAttachment->loadOp;
       float depth = 0.0f;
-      switch (pRenderingInfo->pDepthAttachment->loadOp) {
+      switch (load_op) {
          case VK_ATTACHMENT_LOAD_OP_CLEAR:
             depth =
                pRenderingInfo->pDepthAttachment->clearValue.depthStencil.depth;
             FALLTHROUGH;
          case VK_ATTACHMENT_LOAD_OP_DONT_CARE:
+         case VK_ATTACHMENT_LOAD_OP_NONE:
             p = nvk_cmd_buffer_push(cmd, 4);
             P_IMMD(p, NV9097, SET_Z_CLEAR_VALUE, fui(depth));
 
@@ -1749,6 +1768,9 @@ nvk_CmdBeginRendering(VkCommandBuffer commandBuffer,
             break;
       }
    }
+
+   if (render->flags & VK_RENDERING_RESUMING_BIT)
+      return;
 
    for (uint32_t i = 0; i < pRenderingInfo->colorAttachmentCount; i++) {
       const struct nvk_image_view *iview = render->color_att[i].iview;
@@ -1830,8 +1852,9 @@ nvk_CmdEndRendering2KHR(VkCommandBuffer commandBuffer,
    VK_FROM_HANDLE(nvk_cmd_buffer, cmd, commandBuffer);
    struct nvk_rendering_state *render = &cmd->state.gfx.render;
 
-   struct nvk_zcull_plane* zcull_plane = nvk_get_zcull_plane(render);
-   if (zcull_plane &&
+   struct nvk_image *zcull_image = nvk_get_zcull_image(render);
+   if (render->zcull_enabled && zcull_image && zcull_image->zcull.addr != 0 &&
+       !(render->flags & VK_RENDERING_SUSPENDING_BIT) &&
        render->depth_att.store_op == VK_ATTACHMENT_STORE_OP_STORE) {
       struct nv_push *p = nvk_cmd_buffer_push(cmd, 2);
       P_IMMD(p, NV9097, STORE_ZCULL, 0);
@@ -2343,9 +2366,18 @@ nvk_cmd_flush_gfx_shaders(struct nvk_cmd_buffer *cmd)
                stage, has_task_shader)];
          for (uint32_t i = 0; i < cbuf_map->cbuf_count; i++) {
             if (memcmp(&cbuf_group->cbufs[i], &cbuf_map->cbufs[i],
-                       sizeof(cbuf_group->cbufs[i])) != 0) {
+                       sizeof(cbuf_group->cbufs[i])) != 0 ||
+                (cbuf_map->cbufs[i].type == NVK_CBUF_TYPE_SHADER_DATA &&
+                 cbuf_group->shader != shader)) {
                cbuf_group->cbufs[i] = cbuf_map->cbufs[i];
                cbuf_group->dirty |= BITFIELD_BIT(i);
+               const enum nvk_cbuf_type type = cbuf_map->cbufs[i].type;
+               cbuf_group->descriptor_slots &= ~BITFIELD_BIT(i);
+               cbuf_group->dynamic_ubo_slots &= ~BITFIELD_BIT(i);
+               if (type == NVK_CBUF_TYPE_DESC_SET || type == NVK_CBUF_TYPE_UBO_DESC)
+                  cbuf_group->descriptor_slots |= BITFIELD_BIT(i);
+               else if (type == NVK_CBUF_TYPE_DYNAMIC_UBO)
+                  cbuf_group->dynamic_ubo_slots |= BITFIELD_BIT(i);
             }
          }
       }
@@ -2394,6 +2426,15 @@ nvk_cmd_flush_gfx_shaders(struct nvk_cmd_buffer *cmd)
       nv_push_raw(p, &last_vtgm->push_dw[dw_start], dw_count);
    }
 
+   for (uint32_t g = 0; g < ARRAY_SIZE(cmd->state.gfx.cbuf_groups); g++)
+      cmd->state.gfx.cbuf_groups[g].shader = NULL;
+   for (mesa_shader_stage stage = 0; stage < MESA_SHADER_MESH_STAGES; stage++) {
+      const struct nvk_shader *shader = cmd->state.gfx.shaders[stage];
+      if (shader != NULL) {
+         const uint32_t g = nvk_cbuf_binding_for_stage(stage, has_task_shader);
+         cmd->state.gfx.cbuf_groups[g].shader = shader;
+      }
+   }
    cmd->state.gfx.shaders_dirty = 0;
 }
 
@@ -4332,21 +4373,26 @@ nvk_cmd_flush_gfx_cbufs(struct nvk_cmd_buffer *cmd)
    const uint32_t min_cbuf_alignment = nvk_min_cbuf_alignment(&pdev->info);
    struct nvk_descriptor_state *desc = &cmd->state.gfx.descriptors;
 
-   const struct nvk_shader *mesh_shader =
-      cmd->state.gfx.shaders[MESA_SHADER_MESH];
-   const bool has_task_shader =
-      mesh_shader != NULL && mesh_shader->info.mesh.has_task_shader;
-
-   /* Find cbuf maps for the 5 cbuf groups */
    const struct nvk_shader *cbuf_shaders[5] = { NULL, };
-   for (mesa_shader_stage stage = 0; stage < MESA_SHADER_MESH_STAGES; stage++) {
-      const struct nvk_shader *shader = cmd->state.gfx.shaders[stage];
-      if (shader == NULL)
-         continue;
+   if (dev->ubo_delta_enabled) {
+      for (uint32_t g = 0; g < ARRAY_SIZE(cbuf_shaders); g++)
+         cbuf_shaders[g] = cmd->state.gfx.cbuf_groups[g].shader;
+   } else {
+      const struct nvk_shader *mesh_shader =
+         cmd->state.gfx.shaders[MESA_SHADER_MESH];
+      const bool has_task_shader =
+         mesh_shader != NULL && mesh_shader->info.mesh.has_task_shader;
 
-      uint32_t group = nvk_cbuf_binding_for_stage(stage, has_task_shader);
-      assert(group < ARRAY_SIZE(cbuf_shaders));
-      cbuf_shaders[group] = shader;
+      /* Find cbuf maps for the 5 cbuf groups */
+      for (mesa_shader_stage stage = 0; stage < MESA_SHADER_MESH_STAGES; stage++) {
+         const struct nvk_shader *shader = cmd->state.gfx.shaders[stage];
+         if (shader == NULL)
+            continue;
+
+         uint32_t group = nvk_cbuf_binding_for_stage(stage, has_task_shader);
+         assert(group < ARRAY_SIZE(cbuf_shaders));
+         cbuf_shaders[group] = shader;
+      }
    }
 
    bool bound_any_cbuf = false;
@@ -4405,14 +4451,6 @@ nvk_cmd_flush_gfx_cbufs(struct nvk_cmd_buffer *cmd)
                P_INLINE_DATA(p, desc_addr);
             } else {
 #ifdef HAVE_SWITCH_PLATFORM
-               /* nvk_cmd_buffer_push_indirect() flushes a deferred Horizon MME
-                * sync before it splits the pushbuf.  Left to itself that emits
-                * NV906F_SEMAPHORE* methods BETWEEN the CALL_MME_MACRO header
-                * below and the three descriptor words the indirect push
-                * supplies, so the macro consumes the semaphore payload as its
-                * cbuf descriptor and the channel dies on the first draw.
-                * Flush it here, while there is no half-built method.
-                */
                nvk_cmd_buffer_switch_mme_consumer(cmd);
 #endif
                struct nv_push *p = nvk_cmd_buffer_push(cmd, 2);
@@ -5246,6 +5284,9 @@ nvk_CmdDrawIndirect2KHR(VkCommandBuffer commandBuffer,
       P_INLINE_DATA(p, stride >> 32);
       P_INLINE_DATA(p, stride);
    } else {
+#ifdef HAVE_SWITCH_PLATFORM
+      nvk_cmd_buffer_switch_mme_consumer(cmd);
+#endif
       const uint32_t max_draws_per_push =
          MAX2(((NV_PUSH_MAX_COUNT - 3) * 4) / stride, 1);
 
@@ -5354,6 +5395,10 @@ nvk_CmdDrawIndexedIndirect2KHR(VkCommandBuffer commandBuffer,
       P_INLINE_DATA(p, stride >> 32);
       P_INLINE_DATA(p, stride);
    } else {
+#ifdef HAVE_SWITCH_PLATFORM
+      if (pInfo->drawCount > 0)
+         nvk_cmd_buffer_switch_mme_consumer(cmd);
+#endif
       const uint32_t max_draws_per_push =
          MAX2(((NV_PUSH_MAX_COUNT - 3) * 4) / stride, 1);
 
@@ -5607,6 +5652,9 @@ nvk_CmdDrawIndirectByteCount2EXT(VkCommandBuffer commandBuffer,
       P_INLINE_DATA(p, counter_addr >> 32);
       P_INLINE_DATA(p, counter_addr);
    } else {
+#ifdef HAVE_SWITCH_PLATFORM
+      nvk_cmd_buffer_switch_mme_consumer(cmd);
+#endif
       struct nv_push *p = nvk_cmd_buffer_push(cmd, 8);
       P_IMMD(p, NV9097, SET_DRAW_AUTO_START, counterOffset);
       P_IMMD(p, NV9097, SET_DRAW_AUTO_STRIDE, vertexStride);
@@ -5954,6 +6002,9 @@ nvk_CmdBeginTransformFeedback2EXT(VkCommandBuffer commandBuffer,
          P_INLINE_DATA(p, cr_addr >> 32);
          P_INLINE_DATA(p, cr_addr);
       } else {
+#ifdef HAVE_SWITCH_PLATFORM
+         nvk_cmd_buffer_switch_mme_consumer(cmd);
+#endif
          struct nv_push *p = nvk_cmd_buffer_push(cmd, 2);
          P_1INC(p, NV9097, CALL_MME_MACRO(NVK_MME_XFB_COUNTER_LOAD));
          P_INLINE_DATA(p, cr_idx);

@@ -432,6 +432,10 @@ nouveau_horizon_runtime_shutdown(void (*step)(const char *what));
 void
 nouveau_horizon_get_gm20b_info(struct nv_device_info *info_out);
 
+/* Requires a live runtime reference. Invalid geometry leaves ZCULL disabled. */
+void
+nouveau_horizon_add_zcull_info(struct nv_device_info *info_out);
+
 enum nouveau_horizon_status
 nouveau_horizon_device_create(
    struct nouveau_horizon_runtime *runtime,

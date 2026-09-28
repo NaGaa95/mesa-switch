@@ -92,6 +92,9 @@ struct foz_dbs_list_updater {
 };
 
 struct foz_db {
+#ifdef __SWITCH__
+   struct foz_db *shared;
+#endif
    FILE *file[FOZ_MAX_DBS];          /* An array of all foz dbs */
    FILE *db_idx;                     /* The default writable foz db idx */
    simple_mtx_t mtx;                 /* Mutex for file/hash table read/writes */

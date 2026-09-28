@@ -1229,6 +1229,10 @@ nvk_CmdExecuteGeneratedCommandsEXT(VkCommandBuffer commandBuffer,
    const uint32_t max_seq_per_push =
       (NV_PUSH_MAX_COUNT * 4) / layout->cmd_seq_stride_B;
 
+#ifdef HAVE_SWITCH_PLATFORM
+   if (seq_count > 0)
+      nvk_cmd_buffer_switch_mme_consumer(cmd);
+#endif
    while (seq_count > 0) {
       uint32_t push_seq = MIN2(seq_count, max_seq_per_push);
       uint32_t push_size_B = push_seq * layout->cmd_seq_stride_B;

@@ -257,6 +257,9 @@ nvk_CmdWaitEvents2(VkCommandBuffer commandBuffer,
       });
    }
 
+   for (uint32_t i = 0; i < eventCount; i++)
+      nvk_cmd_image_layout_transition(cmd, &pDependencyInfos[i]);
+
    nvk_cmd_invalidate_deps(cmd, eventCount, pDependencyInfos);
 }
 

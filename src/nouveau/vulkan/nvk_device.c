@@ -335,6 +335,10 @@ nvk_CreateDevice(VkPhysicalDevice physicalDevice,
 
    init_dispatch_tables(dev);
 
+#ifdef HAVE_SWITCH_PLATFORM
+   dev->ubo_delta_enabled = true;
+#endif
+
    dev->vk.shader_ops = &nvk_device_shader_ops;
    dev->vk.check_status = &nvk_device_check_status;
 
