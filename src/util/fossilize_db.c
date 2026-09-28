@@ -698,14 +698,23 @@ foz_read_entry(struct foz_db *foz_db, const uint8_t *cache_key_160bit,
 
    struct foz_db_entry *entry =
       _mesa_hash_table_u64_search(foz_db->index_db, hash);
+#ifndef __SWITCH__
    if (!entry && foz_db->db_idx) {
       update_foz_index(foz_db, foz_db->db_idx, 0);
       entry = _mesa_hash_table_u64_search(foz_db->index_db, hash);
    }
+#endif
    if (!entry) {
       simple_mtx_unlock(&foz_db->mtx);
       return NULL;
    }
+
+#ifdef __SWITCH__
+   struct foz_db_entry snapshot = *entry;
+   entry = &snapshot;
+   simple_mtx_unlock(&foz_db->mtx);
+   flockfile(foz_db->file[entry->file_idx]);
+#endif
 
    uint8_t file_idx = entry->file_idx;
    if (fseek(foz_db->file[file_idx], entry->offset, SEEK_SET) < 0)
@@ -726,16 +735,24 @@ foz_read_entry(struct foz_db *foz_db, const uint8_t *cache_key_160bit,
 
    uint32_t data_sz = entry->header.payload_size;
    data = malloc(data_sz);
+   if (!data)
+      goto fail;
    if (fread(data, 1, data_sz, foz_db->file[file_idx]) != data_sz)
       goto fail;
+
+#ifdef __SWITCH__
+   funlockfile(foz_db->file[file_idx]);
+#endif
 
    /* verify checksum */
    if (entry->header.crc != 0) {
       if (util_hash_crc32(data, data_sz) != entry->header.crc)
-         goto fail;
+         goto fail_checksum;
    }
 
+#ifndef __SWITCH__
    simple_mtx_unlock(&foz_db->mtx);
+#endif
 
    if (size)
       *size = data_sz;
@@ -743,10 +760,14 @@ foz_read_entry(struct foz_db *foz_db, const uint8_t *cache_key_160bit,
    return data;
 
 fail:
-   free(data);
-
-   /* reading db entry failed. reset the file offset */
+#ifdef __SWITCH__
+   funlockfile(foz_db->file[file_idx]);
+#endif
+fail_checksum:
+#ifndef __SWITCH__
    simple_mtx_unlock(&foz_db->mtx);
+#endif
+   free(data);
 
    return NULL;
 }
@@ -779,7 +800,9 @@ foz_write_entry(struct foz_db *foz_db, const uint8_t *cache_key_160bit,
 
    simple_mtx_lock(&foz_db->mtx);
 
+#ifndef __SWITCH__
    update_foz_index(foz_db, foz_db->db_idx, 0);
+#endif
 
    struct foz_db_entry *entry =
       _mesa_hash_table_u64_search(foz_db->index_db, hash);
@@ -790,6 +813,10 @@ foz_write_entry(struct foz_db *foz_db, const uint8_t *cache_key_160bit,
       return NULL;
    }
 
+#ifdef __SWITCH__
+   simple_mtx_unlock(&foz_db->mtx);
+#endif
+
    /* Prepare db entry header and blob ready for writing */
    struct foz_payload_header header;
    header.uncompressed_size = blob_size;
@@ -797,7 +824,11 @@ foz_write_entry(struct foz_db *foz_db, const uint8_t *cache_key_160bit,
    header.payload_size = blob_size;
    header.crc = util_hash_crc32(blob, blob_size);
 
-   fseek(foz_db->file[0], 0, SEEK_END);
+#ifdef __SWITCH__
+   flockfile(foz_db->file[0]);
+#endif
+   if (fseek(foz_db->file[0], 0, SEEK_END) != 0)
+      goto fail;
 
    /* Write hash header to db */
    char hash_str[BLAKE3_HEX_LEN];
@@ -806,7 +837,10 @@ foz_write_entry(struct foz_db *foz_db, const uint8_t *cache_key_160bit,
        FOSSILIZE_BLOB_HASH_LENGTH)
       goto fail;
 
-   uint64_t offset = ftell(foz_db->file[0]);
+   long position = ftell(foz_db->file[0]);
+   if (position < 0)
+      goto fail;
+   uint64_t offset = position;
 
    /* Write db entry header */
    if (fwrite(&header, 1, sizeof(header), foz_db->file[0]) != sizeof(header))
@@ -817,12 +851,16 @@ foz_write_entry(struct foz_db *foz_db, const uint8_t *cache_key_160bit,
       goto fail;
 
    /* Flush everything to file to reduce chance of cache corruption */
-   fflush(foz_db->file[0]);
+   if (fflush(foz_db->file[0]) != 0)
+      goto fail;
+#ifdef __SWITCH__
+   funlockfile(foz_db->file[0]);
+#endif
 
    /* Write hash header to index db */
    if (fwrite(hash_str, 1, FOSSILIZE_BLOB_HASH_LENGTH, foz_db->db_idx) !=
        FOSSILIZE_BLOB_HASH_LENGTH)
-      goto fail;
+      goto fail_index;
 
    header.uncompressed_size = sizeof(uint64_t);
    header.format = FOSSILIZE_COMPRESSION_NONE;
@@ -831,16 +869,27 @@ foz_write_entry(struct foz_db *foz_db, const uint8_t *cache_key_160bit,
 
    if (fwrite(&header, 1, sizeof(header), foz_db->db_idx) !=
        sizeof(header))
-      goto fail;
+      goto fail_index;
 
    if (fwrite(&offset, 1, sizeof(uint64_t), foz_db->db_idx) !=
        sizeof(uint64_t))
-      goto fail;
+      goto fail_index;
 
    /* Flush everything to file to reduce chance of cache corruption */
-   fflush(foz_db->db_idx);
+   if (fflush(foz_db->db_idx) != 0)
+      goto fail_index;
 
+#ifdef __SWITCH__
+   /* Publish only after both files have been written successfully. */
+   simple_mtx_lock(&foz_db->mtx);
+#endif
    entry = ralloc(foz_db->mem_ctx, struct foz_db_entry);
+   if (!entry) {
+#ifdef __SWITCH__
+      simple_mtx_unlock(&foz_db->mtx);
+#endif
+      goto fail_index;
+   }
    entry->header = header;
    entry->offset = offset;
    entry->file_idx = 0;
@@ -854,7 +903,13 @@ foz_write_entry(struct foz_db *foz_db, const uint8_t *cache_key_160bit,
    return true;
 
 fail:
+#ifdef __SWITCH__
+   funlockfile(foz_db->file[0]);
+#endif
+fail_index:
+#ifndef __SWITCH__
    simple_mtx_unlock(&foz_db->mtx);
+#endif
 fail_file:
    flock(fileno(foz_db->file[0]), LOCK_UN);
    simple_mtx_unlock(&foz_db->flock_mtx);
