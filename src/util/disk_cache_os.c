@@ -1141,8 +1141,11 @@ disk_cache_touch_cache_user_marker(char *path)
 bool
 disk_cache_mmap_cache_index(void *mem_ctx, struct disk_cache *cache)
 {
-   int fd = -1;
    bool mapped = false;
+   size_t size = sizeof(*cache->size) + CACHE_INDEX_MAX_KEYS * CACHE_KEY_SIZE;
+
+#ifndef __SWITCH__
+   int fd = -1;
 
    char *path = ralloc_asprintf(mem_ctx, "%s/index", cache->path);
    if (path == NULL)
@@ -1157,7 +1160,6 @@ disk_cache_mmap_cache_index(void *mem_ctx, struct disk_cache *cache)
       goto path_fail;
 
    /* Force the index file to be the expected size. */
-   size_t size = sizeof(*cache->size) + CACHE_INDEX_MAX_KEYS * CACHE_KEY_SIZE;
    if (sb.st_size != size) {
 #if HAVE_POSIX_FALLOCATE
       /* posix_fallocate() ensures disk space is allocated otherwise it
@@ -1181,6 +1183,7 @@ disk_cache_mmap_cache_index(void *mem_ctx, struct disk_cache *cache)
          goto path_fail;
 #endif
    }
+#endif
 
    /* We map this shared so that other processes see updates that we
     * make.
@@ -1215,8 +1218,10 @@ disk_cache_mmap_cache_index(void *mem_ctx, struct disk_cache *cache)
    mapped = true;
 
 path_fail:
+#ifndef __SWITCH__
    if (fd != -1)
       close(fd);
+#endif
 
    return mapped;
 }
