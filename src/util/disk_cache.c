@@ -212,7 +212,7 @@ disk_cache_type_create(const char *gpu_name,
    return cache;
 
  fail:
-   ralloc_free(cache);
+   disk_cache_destroy(cache);
    ralloc_free(local);
 
    return NULL;
@@ -352,7 +352,9 @@ disk_cache_destroy(struct disk_cache *cache)
    if (cache && util_queue_is_initialized(&cache->cache_queue)) {
       util_queue_finish(&cache->cache_queue);
       util_queue_destroy(&cache->cache_queue);
+   }
 
+   if (cache) {
       if (cache->foz_ro_cache)
          disk_cache_destroy(cache->foz_ro_cache);
 
@@ -362,7 +364,8 @@ disk_cache_destroy(struct disk_cache *cache)
       if (cache->type == DISK_CACHE_DATABASE)
          mesa_cache_db_multipart_close(&cache->cache_db);
 
-      disk_cache_destroy_mmap(cache);
+      if (cache->index_mmap_size)
+         disk_cache_destroy_mmap(cache);
    }
 
    ralloc_free(cache);
