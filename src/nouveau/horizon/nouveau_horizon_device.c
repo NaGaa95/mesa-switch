@@ -61,19 +61,43 @@ nouveau_horizon_get_gm20b_info(struct nv_device_info *info_out)
    info_out->nc_atom_size_B = 128;
 }
 
-static void
-nouveau_horizon_add_runtime_device_info(struct nouveau_horizon_device *device)
+void
+nouveau_horizon_add_zcull_info(struct nv_device_info *info_out)
 {
-   const nvioctl_zcull_info *zcull = nvGpuGetZcullInfo();
-   const uint32_t ctxsw_size = nvGpuGetZcullCtxSize();
-   if (zcull == NULL || ctxsw_size == 0 ||
-       zcull->width_align_pixels == 0 ||
-       zcull->height_align_pixels == 0 ||
-       zcull->pixel_squares_by_aliquots == 0 ||
-       zcull->aliquot_total == 0)
+   if (info_out == NULL)
       return;
 
-   device->info.zcull_info = (struct nv_zcull_device_info) {
+   info_out->has_zcull_info = false;
+   memset(&info_out->zcull_info, 0, sizeof(info_out->zcull_info));
+
+   const nvioctl_zcull_info *zcull = nvGpuGetZcullInfo();
+   const uint32_t ctxsw_size = nvGpuGetZcullCtxSize();
+   /* NIL supports 16 subregions; GM20B geometry fields are 16 bits. */
+   if (zcull == NULL || ctxsw_size == 0 ||
+       zcull->width_align_pixels == 0 ||
+       zcull->width_align_pixels > UINT16_MAX ||
+       zcull->height_align_pixels == 0 ||
+       zcull->height_align_pixels > UINT16_MAX ||
+       zcull->pixel_squares_by_aliquots == 0 ||
+       zcull->aliquot_total == 0 ||
+       zcull->aliquot_total > UINT16_MAX ||
+       zcull->subregion_count == 0 || zcull->subregion_count > 16 ||
+       zcull->subregion_width_align_pixels == 0 ||
+       zcull->subregion_width_align_pixels > UINT16_MAX ||
+       zcull->subregion_height_align_pixels == 0 ||
+       zcull->subregion_height_align_pixels > UINT16_MAX ||
+       zcull->region_byte_multiplier == 0 ||
+       (zcull->region_byte_multiplier & 3) != 0 ||
+       ((zcull->region_header_size | zcull->subregion_header_size) & 3) != 0)
+      return;
+
+   const uint64_t max_size_B =
+      (uint64_t)zcull->aliquot_total * zcull->region_byte_multiplier +
+      zcull->region_header_size + zcull->subregion_header_size;
+   if (max_size_B > UINT32_MAX)
+      return;
+
+   info_out->zcull_info = (struct nv_zcull_device_info) {
       .width_align_pixels = zcull->width_align_pixels,
       .height_align_pixels = zcull->height_align_pixels,
       .pixel_squares_by_aliquots = zcull->pixel_squares_by_aliquots,
@@ -90,7 +114,7 @@ nouveau_horizon_add_runtime_device_info(struct nouveau_horizon_device *device)
       /* nvhost allocates the GM20B Z-cull context at a 4 KiB boundary. */
       .ctxsw_align = 0x1000,
    };
-   device->info.has_zcull_info = true;
+   info_out->has_zcull_info = true;
 }
 
 static uint32_t
@@ -209,7 +233,7 @@ nouveau_horizon_device_create(
       device->enable_timing = create_info->enable_timing;
    }
    nouveau_horizon_get_gm20b_info(&device->info);
-   nouveau_horizon_add_runtime_device_info(device);
+   nouveau_horizon_add_zcull_info(&device->info);
 
    const nvioctl_gpu_characteristics *gpu_info = nvGpuGetCharacteristics();
    device->page_size_B = nouveau_horizon_choose_page_size(gpu_info);

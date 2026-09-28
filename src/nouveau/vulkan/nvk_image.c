@@ -854,6 +854,38 @@ nvk_image_can_compress(const struct nvk_physical_device *pdev,
    return true;
 }
 
+#ifdef __SWITCH__
+static bool
+nvk_switch_image_has_zcull_layout(const struct nvk_image *image,
+                                 const struct nv_zcull_device_info *info)
+{
+   /* One saved plane cannot represent independent mip levels or layers. */
+   if (image->vk.image_type != VK_IMAGE_TYPE_2D ||
+       image->vk.mip_levels != 1 || image->vk.array_layers != 1 ||
+       image->vk.external_handle_types != 0 ||
+       (image->vk.create_flags & VK_IMAGE_CREATE_ALIAS_BIT))
+      return false;
+
+   const uint64_t width =
+      DIV_ROUND_UP((uint64_t)image->vk.extent.width,
+                   info->subregion_width_align_pixels) *
+      info->subregion_width_align_pixels;
+   const uint64_t height =
+      DIV_ROUND_UP((uint64_t)image->vk.extent.height,
+                   info->subregion_height_align_pixels) *
+      info->subregion_height_align_pixels;
+   if (width > UINT16_MAX || height > UINT16_MAX)
+      return false;
+
+   const uint64_t normalized_aliquots =
+      DIV_ROUND_UP(DIV_ROUND_UP(width * height,
+                                info->pixel_squares_by_aliquots),
+                   info->subregion_count) * info->subregion_count;
+
+   return normalized_aliquots <= 0xffffff;
+}
+#endif
+
 static VkResult
 nvk_image_init(struct nvk_device *dev,
                struct nvk_image *image,
@@ -1090,7 +1122,6 @@ nvk_image_init(struct nvk_device *dev,
       }
    }
 
-#ifndef __SWITCH__
    const VkImageUsageFlagBits READ_ONLY_IMAGE_USAGE =
       VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
       VK_IMAGE_USAGE_SAMPLED_BIT |
@@ -1103,18 +1134,25 @@ nvk_image_init(struct nvk_device *dev,
    const VkImageUsageFlagBits ZCULL_COMPATIBLE_IMAGE_USAGE =
       VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | READ_ONLY_IMAGE_USAGE;
 
-   if ((image->vk.aspects & VK_IMAGE_ASPECT_DEPTH_BIT) &&
+   bool zcull_layout = pdev->info.has_zcull_info &&
+       (image->vk.aspects & VK_IMAGE_ASPECT_DEPTH_BIT) &&
        (image->vk.usage & VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) &&
-       !(image->vk.usage & ~ZCULL_COMPATIBLE_IMAGE_USAGE) &&
        !(image->vk.create_flags & VK_IMAGE_CREATE_SPARSE_BINDING_BIT) &&
        image->vk.image_type != VK_IMAGE_TYPE_3D &&
-       image->vk.tiling == VK_IMAGE_TILING_OPTIMAL &&
-       pdev->info.has_zcull_info) {
+       image->vk.tiling == VK_IMAGE_TILING_OPTIMAL;
+#ifdef __SWITCH__
+   zcull_layout = zcull_layout &&
+      nvk_switch_image_has_zcull_layout(image, &pdev->info.zcull_info);
+   image->zcull.transient_eligible = zcull_layout &&
+      !(image->vk.usage & ~(ZCULL_COMPATIBLE_IMAGE_USAGE |
+                           VK_IMAGE_USAGE_TRANSFER_DST_BIT));
+#endif
+
+   if (zcull_layout && !(image->vk.usage & ~ZCULL_COMPATIBLE_IMAGE_USAGE)) {
       image->zcull.nil = nil_zcull_new(&pdev->info.zcull_info, 0, 0,
                                        image->vk.extent.width,
                                        image->vk.extent.height);
    }
-#endif
 
    const enum pipe_format plane0_format = image->planes[0].nil.format.p_format;
    if (plane0_format == PIPE_FORMAT_Z32_FLOAT_S8X24_UINT) {
@@ -1695,6 +1733,14 @@ nvk_image_zcull_bind(struct nvk_zcull_plane *zcull,
                      struct nvk_device_memory *mem,
                      uint64_t offset_B)
 {
+#ifdef __SWITCH__
+   /* External writers cannot maintain our saved depth hierarchy. */
+   if ((mem->mem->flags & NVKMD_MEM_SHARED) || mem->vk.host_ptr != NULL) {
+      zcull->addr = 0;
+      return VK_SUCCESS;
+   }
+#endif
+
    offset_B += zcull->plane_offset_B;
    assert(offset_B % zcull->nil.align_B == 0);
    zcull->addr = mem->mem->va->addr + offset_B;
@@ -1733,6 +1779,10 @@ nvk_bind_image_memory(struct nvk_device *dev,
 #endif
 
    assert(mem != NULL);
+#ifdef __SWITCH__
+   if ((mem->mem->flags & NVKMD_MEM_SHARED) || mem->vk.host_ptr != NULL)
+      image->zcull.transient_eligible = false;
+#endif
    if (image->disjoint) {
       const VkBindImagePlaneMemoryInfo *plane_info =
          vk_find_struct_const(info->pNext, BIND_IMAGE_PLANE_MEMORY_INFO);

@@ -1169,22 +1169,42 @@ nvk_cmd_invalidate_deps(struct nvk_cmd_buffer *cmd,
       P_IMMD(p, NVB1C0, INVALIDATE_SKED_CACHES, 0);
 }
 
-static void
+void
 nvk_cmd_image_layout_transition(struct nvk_cmd_buffer *cmd,
                                 const VkDependencyInfo *dep)
 {
+   bool initialized_zcull = false;
    for (uint32_t i = 0; i < dep->imageMemoryBarrierCount; i++) {
       const VkImageMemoryBarrier2 *bar = &dep->pImageMemoryBarriers[i];
       if (bar->oldLayout == VK_IMAGE_LAYOUT_UNDEFINED &&
-          bar->newLayout != VK_IMAGE_LAYOUT_UNDEFINED) {
+          bar->newLayout != VK_IMAGE_LAYOUT_UNDEFINED &&
+          (bar->subresourceRange.aspectMask & VK_IMAGE_ASPECT_DEPTH_BIT)) {
          VK_FROM_HANDLE(nvk_image, image, bar->image);
          /*
           * zcull hardware kills the context if we try to LOAD_ZCULL on garbage
           * data. Handle this by initializing the zcull data to zero.
           */
-         if (image->zcull.nil.size_B > 0)
+         if (image->zcull.addr != 0) {
             nvk_cmd_fill_memory_ce(cmd, image->zcull.addr, image->zcull.nil.size_B, 0);
+            initialized_zcull = true;
+         }
       }
+   }
+
+   if (initialized_zcull) {
+      /* Finish pipelined fills before a subsequent LOAD_ZCULL can read them. */
+      struct nv_push *p = nvk_cmd_buffer_push(cmd, 5);
+      P_MTHD(p, NV90B5, LINE_LENGTH_IN);
+      P_NV90B5_LINE_LENGTH_IN(p, 0);
+      P_NV90B5_LINE_COUNT(p, 0);
+      P_IMMD(p, NV90B5, LAUNCH_DMA, {
+         .data_transfer_type = DATA_TRANSFER_TYPE_NON_PIPELINED,
+         .multi_line_enable = false,
+         .flush_enable = FLUSH_ENABLE_TRUE,
+         .src_memory_layout = SRC_MEMORY_LAYOUT_PITCH,
+         .dst_memory_layout = DST_MEMORY_LAYOUT_PITCH,
+         .remap_enable = REMAP_ENABLE_TRUE,
+      });
    }
 }
 

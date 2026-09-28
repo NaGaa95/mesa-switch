@@ -459,10 +459,13 @@ nvkmd_switch_try_create_pdev(struct vk_object_base *log_obj,
    pdev->base.ops = &nvkmd_switch_pdev_ops;
    pdev->base.debug_flags = debug_flags;
 
-   /* Use static GM20B properties without acquiring libnx services during
-    * enumeration.
-    */
    nouveau_horizon_get_gm20b_info(&pdev->base.dev_info);
+
+   struct nouveau_horizon_runtime *runtime = NULL;
+   if (nouveau_horizon_runtime_get(&runtime) == NOUVEAU_HORIZON_SUCCESS) {
+      nouveau_horizon_add_zcull_info(&pdev->base.dev_info);
+      nouveau_horizon_runtime_put(runtime);
+   }
 
    pdev->base.kmd_info = (struct nvkmd_info) {
       .has_dma_buf = false,

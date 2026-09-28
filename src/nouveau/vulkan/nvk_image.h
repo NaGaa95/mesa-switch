@@ -89,8 +89,10 @@ struct nvk_image_plane {
 
 struct nvk_zcull_plane {
    struct nil_zcull nil;
+   /* Zero until bound to backing that can preserve the hierarchy. */
    uint64_t addr;
    uint64_t plane_offset_B;
+   bool transient_eligible;
 };
 
 struct nvk_image {

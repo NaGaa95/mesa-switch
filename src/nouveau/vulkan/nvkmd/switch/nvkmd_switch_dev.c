@@ -31,6 +31,8 @@ struct nvkmd_switch_ctx {
    struct nvkmd_ctx base;
    enum nvkmd_engines engines;
    struct nouveau_horizon_channel *channel;
+   struct nouveau_horizon_memory *zcull_memory;
+   struct nouveau_horizon_va *zcull_va;
    struct nouveau_horizon_fence last_fence;
    bool has_last_fence;
    bool teardown_quarantined;
@@ -261,6 +263,8 @@ nvkmd_switch_ctx_try_destroy(struct nvkmd_ctx *_ctx,
       return false;
    }
 
+   nouveau_horizon_va_put(ctx->zcull_va);
+   nouveau_horizon_memory_put(ctx->zcull_memory);
    FREE(ctx);
    return true;
 }
@@ -1135,6 +1139,47 @@ nvkmd_switch_dev_import_dma_buf(struct nvkmd_dev *_dev,
                     "nvkmd-switch: dma-buf import is unsupported");
 }
 
+static enum nouveau_horizon_status
+nvkmd_switch_ctx_init_zcull(struct nvkmd_switch_ctx *ctx)
+{
+   struct nvkmd_switch_dev *dev = nvkmd_switch_dev(ctx->base.dev);
+   const struct nv_zcull_device_info *info =
+      &dev->base.pdev->dev_info.zcull_info;
+   const uint64_t align_B = MAX2(info->ctxsw_align, 0x20000);
+
+   /* Keep channel storage outside client cleanup for independent quarantine. */
+   const struct nouveau_horizon_memory_create_info memory_info = {
+      .size_B = info->ctxsw_size,
+      .align_B = align_B,
+      .backing_kind = NvKind_Pitch,
+      .flags = NOUVEAU_HORIZON_MEMORY_CPU_VISIBLE |
+               NOUVEAU_HORIZON_MEMORY_CPU_CACHED |
+               NOUVEAU_HORIZON_MEMORY_GPU_CACHED |
+               NOUVEAU_HORIZON_MEMORY_ZERO,
+   };
+   enum nouveau_horizon_status status = nouveau_horizon_memory_create(
+      dev->horizon, &memory_info, &ctx->zcull_memory);
+   if (status != NOUVEAU_HORIZON_SUCCESS)
+      return status;
+
+   const uint64_t size_B = nouveau_horizon_memory_get_size(ctx->zcull_memory);
+   const struct nouveau_horizon_va_create_info va_info = {
+      .size_B = size_B,
+      .align_B = align_B,
+   };
+   status = nouveau_horizon_va_create(dev->horizon, &va_info, &ctx->zcull_va);
+   if (status != NOUVEAU_HORIZON_SUCCESS)
+      return status;
+
+   status = nouveau_horizon_va_bind(ctx->zcull_va, 0, ctx->zcull_memory,
+                                    0, size_B);
+   if (status != NOUVEAU_HORIZON_SUCCESS)
+      return status;
+
+   return nouveau_horizon_channel_bind_zcull(
+      ctx->channel, nouveau_horizon_va_get_addr(ctx->zcull_va));
+}
+
 static VkResult
 nvkmd_switch_dev_create_ctx(struct nvkmd_dev *_dev,
                             struct vk_object_base *log_obj,
@@ -1167,6 +1212,17 @@ nvkmd_switch_dev_create_ctx(struct nvkmd_dev *_dev,
          return nvkmd_switch_status_result(log_obj, status,
                                             VK_ERROR_INITIALIZATION_FAILED,
                                             "create channel");
+      }
+   }
+
+   if ((engines & NVKMD_ENGINE_3D) && _dev->pdev->dev_info.has_zcull_info) {
+      const enum nouveau_horizon_status status =
+         nvkmd_switch_ctx_init_zcull(ctx);
+      if (status != NOUVEAU_HORIZON_SUCCESS) {
+         (void)nvkmd_switch_ctx_try_destroy(&ctx->base, log_obj);
+         return nvkmd_switch_status_result(log_obj, status,
+                                           VK_ERROR_INITIALIZATION_FAILED,
+                                           "initialize ZCULL context");
       }
    }
 
