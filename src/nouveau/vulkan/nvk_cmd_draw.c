@@ -1181,15 +1181,23 @@ get_depth_stencil_plane_params(struct nvk_image_view *iview,
    *image_out = nil_image;
 }
 
-static struct nvk_zcull_plane*
-nvk_get_zcull_plane(struct nvk_rendering_state *render) {
-   if (render->depth_att.iview) {
-      struct nvk_image *img = (struct nvk_image*) render->depth_att.iview->vk.image;
-      if (img->zcull.nil.size_B > 0) {
-         return &img->zcull;
-      }
-   }
-   return NULL;
+static struct nvk_image *
+nvk_get_zcull_image(const struct nvk_rendering_state *render)
+{
+   const struct nvk_image_view *iview = render->depth_att.iview;
+   if (iview == NULL)
+      return NULL;
+
+#ifdef HAVE_SWITCH_PLATFORM
+   if (render->linear || render->view_mask > 1 ||
+       render->area.extent.width == 0 || render->area.extent.height == 0 ||
+       (render->view_mask == 0 && render->layer_count != 1) ||
+       iview->vk.base_mip_level != 0 || iview->vk.base_array_layer != 0 ||
+       iview->vk.layer_count != 1)
+      return NULL;
+#endif
+
+   return (struct nvk_image *)iview->vk.image;
 }
 
 static uint32_t
@@ -1531,14 +1539,20 @@ nvk_CmdBeginRendering(VkCommandBuffer commandBuffer,
       P_IMMD(p, NV9097, SET_ZT_SELECT, 0 /* target_count */);
    }
 
-   /* TODO: zcull for depth-stencil */
-   struct nvk_zcull_plane *zcull_plane = nvk_get_zcull_plane(render);
+   struct nvk_image *zcull_image = nvk_get_zcull_image(render);
+   struct nvk_zcull_plane *zcull_plane =
+      zcull_image != NULL && zcull_image->zcull.addr != 0 ?
+      &zcull_image->zcull : NULL;
    bool use_zcull = pdev->info.has_zcull_info &&
       pRenderingInfo->pDepthAttachment != NULL &&
       pRenderingInfo->pDepthAttachment->imageView != VK_NULL_HANDLE &&
-      pRenderingInfo->pDepthAttachment->loadOp != VK_ATTACHMENT_LOAD_OP_NONE &&
       (zcull_plane ||
        pRenderingInfo->pDepthAttachment->loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR);
+#ifdef HAVE_SWITCH_PLATFORM
+   use_zcull &= zcull_image != NULL &&
+                (zcull_plane != NULL || zcull_image->zcull.transient_eligible);
+#endif
+   render->zcull_enabled = use_zcull;
 
    if (use_zcull) {
       uint32_t start_count = nv_push_dw_count(p);
@@ -1715,17 +1729,20 @@ nvk_CmdBeginRendering(VkCommandBuffer commandBuffer,
    if (sample_layout != NIL_SAMPLE_LAYOUT_INVALID)
       nvk_cmd_set_sample_layout(cmd, sample_layout);
 
-   if (render->flags & VK_RENDERING_RESUMING_BIT)
-      return;
-
    if (use_zcull) {
+      /* A resumed pass has no guaranteed snapshot; rebuild without touching depth. */
+      const VkAttachmentLoadOp load_op =
+         (render->flags & VK_RENDERING_RESUMING_BIT) ?
+         VK_ATTACHMENT_LOAD_OP_DONT_CARE :
+         pRenderingInfo->pDepthAttachment->loadOp;
       float depth = 0.0f;
-      switch (pRenderingInfo->pDepthAttachment->loadOp) {
+      switch (load_op) {
          case VK_ATTACHMENT_LOAD_OP_CLEAR:
             depth =
                pRenderingInfo->pDepthAttachment->clearValue.depthStencil.depth;
             FALLTHROUGH;
          case VK_ATTACHMENT_LOAD_OP_DONT_CARE:
+         case VK_ATTACHMENT_LOAD_OP_NONE:
             p = nvk_cmd_buffer_push(cmd, 4);
             P_IMMD(p, NV9097, SET_Z_CLEAR_VALUE, fui(depth));
 
@@ -1749,6 +1766,9 @@ nvk_CmdBeginRendering(VkCommandBuffer commandBuffer,
             break;
       }
    }
+
+   if (render->flags & VK_RENDERING_RESUMING_BIT)
+      return;
 
    for (uint32_t i = 0; i < pRenderingInfo->colorAttachmentCount; i++) {
       const struct nvk_image_view *iview = render->color_att[i].iview;
@@ -1830,8 +1850,9 @@ nvk_CmdEndRendering2KHR(VkCommandBuffer commandBuffer,
    VK_FROM_HANDLE(nvk_cmd_buffer, cmd, commandBuffer);
    struct nvk_rendering_state *render = &cmd->state.gfx.render;
 
-   struct nvk_zcull_plane* zcull_plane = nvk_get_zcull_plane(render);
-   if (zcull_plane &&
+   struct nvk_image *zcull_image = nvk_get_zcull_image(render);
+   if (render->zcull_enabled && zcull_image && zcull_image->zcull.addr != 0 &&
+       !(render->flags & VK_RENDERING_SUSPENDING_BIT) &&
        render->depth_att.store_op == VK_ATTACHMENT_STORE_OP_STORE) {
       struct nv_push *p = nvk_cmd_buffer_push(cmd, 2);
       P_IMMD(p, NV9097, STORE_ZCULL, 0);

@@ -198,7 +198,7 @@ struct nvk_rendering_state {
 
    /* True if all the conditions are met to allow rendering to linear */
    bool linear;
-
+   bool zcull_enabled;
 };
 
 struct nvk_graphics_state {
@@ -429,6 +429,9 @@ void nvk_cmd_flush_wait_dep(struct nvk_cmd_buffer *cmd,
 void nvk_cmd_invalidate_deps(struct nvk_cmd_buffer *cmd,
                              uint32_t dep_count,
                              const VkDependencyInfo *deps);
+
+void nvk_cmd_image_layout_transition(struct nvk_cmd_buffer *cmd,
+                                      const VkDependencyInfo *dep);
 
 void
 nvk_cmd_buffer_flush_push_descriptors(struct nvk_cmd_buffer *cmd,
