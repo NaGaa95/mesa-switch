@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 
@@ -56,11 +57,20 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--ar", required=True)
     parser.add_argument("--output", required=True)
+    parser.add_argument("--whole-archive", action="append", default=[])
     parser.add_argument("archives", nargs="+")
+    parser.add_argument("--link-command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
 
     output_path = Path(args.output).resolve()
     input_paths = [Path(archive).resolve() for archive in args.archives]
+    whole_paths = [Path(archive).resolve() for archive in args.whole_archive]
+    if whole_paths and not args.link_command:
+        parser.error("--whole-archive requires --link-command")
+    if len(set(whole_paths)) != len(whole_paths):
+        parser.error("duplicate --whole-archive input")
+    if not set(whole_paths).issubset(input_paths):
+        parser.error("--whole-archive inputs must also be listed in archives")
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Mesa uses thin archives internally, so they must remain at their
@@ -72,21 +82,35 @@ def main() -> None:
     temp_output = output_path.with_name(output_path.name + ".tmp")
     temp_output.unlink(missing_ok=True)
 
-    mri_lines = [
-        "CREATE " + Path(os.path.relpath(temp_output, common_root)).as_posix()
-    ]
-    for archive in input_paths:
-        archive_relative = Path(os.path.relpath(archive, common_root)).as_posix()
-        mri_lines.append(f"ADDLIB {archive_relative}")
+    with tempfile.TemporaryDirectory(prefix="nvk-link-", dir=output_path.parent) as tmp:
+        mri_lines = [
+            "CREATE " + Path(os.path.relpath(temp_output, common_root)).as_posix()
+        ]
+        if whole_paths:
+            # Bind weak dispatch references before standalone archive extraction.
+            linked = Path(tmp) / "vulkan-dispatch.o"
+            subprocess.run([
+                *args.link_command, "-nostdlib", "-r", "-Wl,--whole-archive",
+                *(str(path) for path in whole_paths), "-Wl,--no-whole-archive",
+                "-o", str(linked),
+            ], check=True)
+            linked_relative = Path(os.path.relpath(linked, common_root)).as_posix()
+            mri_lines.append(f"ADDMOD {linked_relative}")
 
-    mri_lines.extend(["SAVE", "END", ""])
-    subprocess.run(
-        [resolve_archiver(args.ar), "-M"],
-        cwd=common_root,
-        input="\n".join(mri_lines),
-        text=True,
-        check=True,
-    )
+        for archive in input_paths:
+            if archive in whole_paths:
+                continue
+            archive_relative = Path(os.path.relpath(archive, common_root)).as_posix()
+            mri_lines.append(f"ADDLIB {archive_relative}")
+
+        mri_lines.extend(["SAVE", "END", ""])
+        subprocess.run(
+            [resolve_archiver(args.ar), "-M"],
+            cwd=common_root,
+            input="\n".join(mri_lines),
+            text=True,
+            check=True,
+        )
 
     os.replace(temp_output, output_path)
 
