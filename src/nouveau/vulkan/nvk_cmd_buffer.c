@@ -7,6 +7,7 @@
 #include "nvk_buffer.h"
 #include "nvk_cmd_pool.h"
 #include "nvk_descriptor_set_layout.h"
+#include "nvk_descriptor_delta.h"
 #include "nvk_device.h"
 #include "nvk_device_memory.h"
 #include "nvk_entrypoints.h"
@@ -1247,10 +1248,12 @@ nvk_cmd_bind_shaders(struct vk_command_buffer *vk_cmd,
 
 #define NVK_VK_GRAPHICS_STAGE_BITS (VK_SHADER_STAGE_ALL_GRAPHICS | VK_SHADER_STAGE_TASK_BIT_EXT | VK_SHADER_STAGE_MESH_BIT_EXT)
 
-void
-nvk_cmd_dirty_cbufs_for_descriptors(struct nvk_cmd_buffer *cmd,
-                                    VkShaderStageFlags stages,
-                                    uint32_t sets_start, uint32_t sets_end)
+static void
+nvk_cmd_dirty_cbufs_for_descriptors_delta(struct nvk_cmd_buffer *cmd,
+                                         VkShaderStageFlags stages,
+                                         uint32_t sets_start, uint32_t sets_end,
+                                         uint64_t dynamic_changed,
+                                         uint32_t dynamic_starts_changed)
 {
    if (!(stages & NVK_VK_GRAPHICS_STAGE_BITS))
       return;
@@ -1269,27 +1272,70 @@ nvk_cmd_dirty_cbufs_for_descriptors(struct nvk_cmd_buffer *cmd,
 
    u_foreach_bit(g, groups) {
       struct nvk_cbuf_group *group = &cmd->state.gfx.cbuf_groups[g];
-
-      for (uint32_t i = 0; i < ARRAY_SIZE(group->cbufs); i++) {
+      const struct nvk_root_descriptor_table *root =
+         (const void *)cmd->state.gfx.descriptors.root;
+      const uint32_t slots = group->descriptor_slots | group->dynamic_ubo_slots;
+      u_foreach_bit(i, slots) {
          const struct nvk_cbuf *cbuf = &group->cbufs[i];
-         switch (cbuf->type) {
-         case NVK_CBUF_TYPE_INVALID:
-         case NVK_CBUF_TYPE_ROOT_DESC:
-         case NVK_CBUF_TYPE_SHADER_DATA:
-            break;
+         if (cbuf->desc_set < sets_start || cbuf->desc_set >= sets_end)
+            continue;
 
-         case NVK_CBUF_TYPE_DESC_SET:
-         case NVK_CBUF_TYPE_UBO_DESC:
-         case NVK_CBUF_TYPE_DYNAMIC_UBO:
-            if (cbuf->desc_set >= sets_start && cbuf->desc_set < sets_end)
-               group->dirty |= BITFIELD_BIT(i);
-            break;
-
-         default:
-            UNREACHABLE("Invalid cbuf type");
+         if (cbuf->type == NVK_CBUF_TYPE_DYNAMIC_UBO) {
+            const uint32_t d = root->set_dynamic_buffer_start[cbuf->desc_set] +
+                               cbuf->dynamic_idx;
+            if (!(dynamic_starts_changed & BITFIELD_BIT(cbuf->desc_set)) &&
+                d < NVK_MAX_DYNAMIC_BUFFERS &&
+                !(dynamic_changed & BITFIELD64_BIT(d))) {
+               continue;
+            }
          }
+         group->dirty |= BITFIELD_BIT(i);
       }
    }
+}
+
+void
+nvk_cmd_dirty_cbufs_for_descriptors(struct nvk_cmd_buffer *cmd,
+                                    VkShaderStageFlags stages,
+                                    uint32_t sets_start, uint32_t sets_end)
+{
+   nvk_cmd_dirty_cbufs_for_descriptors_delta(cmd, stages, sets_start, sets_end,
+                                            UINT64_MAX, UINT32_MAX);
+}
+
+static uint64_t
+nvk_cmd_update_dynamic_buffers(struct nvk_cmd_buffer *cmd,
+                               struct nvk_descriptor_state *desc,
+                               uint32_t next[4][NVK_MAX_DYNAMIC_BUFFERS],
+                               uint32_t first, uint32_t end, bool delta)
+{
+   const struct nvk_root_descriptor_table *root = (const void *)desc->root;
+   const uint64_t range = nvk_descriptor_range_mask(first, end);
+   uint64_t changed = range & ~desc->dynamic_buffers_valid;
+
+   if (first == end)
+      return 0;
+
+   for (uint32_t k = 0; k < 4; k++) {
+      struct nvk_descriptor_delta update;
+      if (delta) {
+         update = nvk_descriptor_delta(root->dynamic_buffers[k], next[k],
+                                       desc->dynamic_buffers_valid, first, end);
+      } else {
+         update = (struct nvk_descriptor_delta) {
+            .changed = range, .first = first, .count = end - first,
+         };
+      }
+      changed |= update.changed;
+      if (update.count == 0)
+         continue;
+      nvk_descriptor_state_set_root_array(cmd, desc, dynamic_buffers[k],
+                                          update.first, update.count,
+                                          &next[k][update.first]);
+   }
+   if (desc->flush_root != NULL)
+      desc->dynamic_buffers_valid |= range;
+   return changed;
 }
 
 static void
@@ -1297,9 +1343,17 @@ nvk_bind_descriptor_sets(struct nvk_cmd_buffer *cmd,
                          struct nvk_descriptor_state *desc,
                          const VkBindDescriptorSetsInfoKHR *info)
 {
+   if (info->descriptorSetCount == 0)
+      return;
+
    VK_FROM_HANDLE(vk_pipeline_layout, pipeline_layout, info->layout);
    struct nvk_device *dev = nvk_cmd_buffer_device(cmd);
    const struct nvk_physical_device *pdev = nvk_device_physical(dev);
+
+   const bool delta = dev->ubo_delta_enabled &&
+                      desc == &cmd->state.gfx.descriptors &&
+                      desc->flush_root != NULL &&
+                      !nvk_use_hw_root_table(&pdev->info, true);
 
    uint32_t dynamic_buffers[4][NVK_MAX_DYNAMIC_BUFFERS];
    uint8_t set_dynamic_buffer_start[NVK_MAX_SETS];
@@ -1328,6 +1382,7 @@ nvk_bind_descriptor_sets(struct nvk_cmd_buffer *cmd,
    const uint8_t dyn_buffer_start =
       pipeline_layout->dynamic_descriptor_offset[info->firstSet];
    uint8_t dyn_buffer_end = dyn_buffer_start;
+   uint32_t dynamic_starts_changed = 0;
 
    uint32_t next_dyn_offset = 0;
    for (uint32_t i = 0; i < info->descriptorSetCount; ++i) {
@@ -1349,6 +1404,8 @@ nvk_bind_descriptor_sets(struct nvk_cmd_buffer *cmd,
          nvk_descriptor_state_set_root(cmd, desc, sets[s], set_addr);
       }
 
+      if (set_dynamic_buffer_start[s] != dyn_buffer_end)
+         dynamic_starts_changed |= BITFIELD_BIT(s);
       set_dynamic_buffer_start[s] = dyn_buffer_end;
 
       if (pipeline_layout->set_layouts[s] != NULL) {
@@ -1374,6 +1431,10 @@ nvk_bind_descriptor_sets(struct nvk_cmd_buffer *cmd,
                   dynamic_buffers[k][dyn_buffer_end + j] = db.values[k];
             }
             next_dyn_offset += set->layout->vk.dynamic_descriptor_count;
+         } else if (set == NULL) {
+            for (uint32_t k = 0; k < 4; k++)
+               memset(&dynamic_buffers[k][dyn_buffer_end], 0,
+                      set_layout->vk.dynamic_descriptor_count * sizeof(uint32_t));
          }
 
          dyn_buffer_end += set_layout->vk.dynamic_descriptor_count;
@@ -1384,21 +1445,29 @@ nvk_bind_descriptor_sets(struct nvk_cmd_buffer *cmd,
    assert(dyn_buffer_end <= NVK_MAX_DYNAMIC_BUFFERS);
    assert(next_dyn_offset <= info->dynamicOffsetCount);
 
-   for (int i = 0; i < 4; i++)
-      nvk_descriptor_state_set_root_array(cmd, desc, dynamic_buffers[i],
-                                          dyn_buffer_start, dyn_buffer_end - dyn_buffer_start,
-                                          &dynamic_buffers[i][dyn_buffer_start]);
+   const uint64_t dynamic_changed =
+      nvk_cmd_update_dynamic_buffers(cmd, desc, dynamic_buffers,
+                                      dyn_buffer_start, dyn_buffer_end, delta);
 
    /* We need to at least sync everything from first_set to NVK_MAX_SETS.
     * However, we only save anything if firstSet >= 4 so we may as well sync
     * everything just to be safe.
     */
-   nvk_descriptor_state_set_root_array(cmd, desc, set_dynamic_buffer_start,
-                                       0, NVK_MAX_SETS,
-                                       set_dynamic_buffer_start);
+   const struct nvk_root_descriptor_table *root = (const void *)desc->root;
+   if (!delta || !desc->dynamic_starts_valid ||
+       memcmp(root->set_dynamic_buffer_start, set_dynamic_buffer_start,
+              sizeof(set_dynamic_buffer_start)) != 0) {
+      nvk_descriptor_state_set_root_array(cmd, desc, set_dynamic_buffer_start,
+                                          0, NVK_MAX_SETS,
+                                          set_dynamic_buffer_start);
+      desc->dynamic_starts_valid = desc->flush_root != NULL;
+   }
 
-   nvk_cmd_dirty_cbufs_for_descriptors(cmd, info->stageFlags, info->firstSet,
-                                       info->firstSet + info->descriptorSetCount);
+   nvk_cmd_dirty_cbufs_for_descriptors_delta(
+      cmd, info->stageFlags, info->firstSet,
+      info->firstSet + info->descriptorSetCount,
+      delta ? dynamic_changed : UINT64_MAX,
+      delta ? dynamic_starts_changed : UINT32_MAX);
 }
 
 VKAPI_ATTR void VKAPI_CALL

@@ -121,6 +121,10 @@ struct nvk_descriptor_state {
 
    struct nvk_descriptor_set_binding sets[NVK_MAX_SETS];
    uint32_t push_dirty;
+
+   /* Values already published to this command buffer's graphics root table. */
+   uint64_t dynamic_buffers_valid;
+   bool dynamic_starts_valid;
 };
 
 #define nvk_descriptor_state_get_root(desc, member, dst) do { \
@@ -210,6 +214,9 @@ struct nvk_graphics_state {
 
    struct nvk_cbuf_group {
       uint16_t dirty;
+      uint16_t descriptor_slots;
+      uint16_t dynamic_ubo_slots;
+      const struct nvk_shader *shader;
       struct nvk_cbuf cbufs[16];
    } cbuf_groups[5];
 

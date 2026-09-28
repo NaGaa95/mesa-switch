@@ -848,6 +848,8 @@ nvk_cmd_buffer_begin_graphics(struct nvk_cmd_buffer *cmd,
    }
 
    cmd->state.gfx.descriptors.flush_root = nvk_cmd_flush_gfx_root_desc;
+   cmd->state.gfx.descriptors.dynamic_buffers_valid = 0;
+   cmd->state.gfx.descriptors.dynamic_starts_valid = false;
 
    if (cmd->vk.level != VK_COMMAND_BUFFER_LEVEL_PRIMARY &&
        (pBeginInfo->flags & VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT)) {
@@ -2364,9 +2366,18 @@ nvk_cmd_flush_gfx_shaders(struct nvk_cmd_buffer *cmd)
                stage, has_task_shader)];
          for (uint32_t i = 0; i < cbuf_map->cbuf_count; i++) {
             if (memcmp(&cbuf_group->cbufs[i], &cbuf_map->cbufs[i],
-                       sizeof(cbuf_group->cbufs[i])) != 0) {
+                       sizeof(cbuf_group->cbufs[i])) != 0 ||
+                (cbuf_map->cbufs[i].type == NVK_CBUF_TYPE_SHADER_DATA &&
+                 cbuf_group->shader != shader)) {
                cbuf_group->cbufs[i] = cbuf_map->cbufs[i];
                cbuf_group->dirty |= BITFIELD_BIT(i);
+               const enum nvk_cbuf_type type = cbuf_map->cbufs[i].type;
+               cbuf_group->descriptor_slots &= ~BITFIELD_BIT(i);
+               cbuf_group->dynamic_ubo_slots &= ~BITFIELD_BIT(i);
+               if (type == NVK_CBUF_TYPE_DESC_SET || type == NVK_CBUF_TYPE_UBO_DESC)
+                  cbuf_group->descriptor_slots |= BITFIELD_BIT(i);
+               else if (type == NVK_CBUF_TYPE_DYNAMIC_UBO)
+                  cbuf_group->dynamic_ubo_slots |= BITFIELD_BIT(i);
             }
          }
       }
@@ -2415,6 +2426,15 @@ nvk_cmd_flush_gfx_shaders(struct nvk_cmd_buffer *cmd)
       nv_push_raw(p, &last_vtgm->push_dw[dw_start], dw_count);
    }
 
+   for (uint32_t g = 0; g < ARRAY_SIZE(cmd->state.gfx.cbuf_groups); g++)
+      cmd->state.gfx.cbuf_groups[g].shader = NULL;
+   for (mesa_shader_stage stage = 0; stage < MESA_SHADER_MESH_STAGES; stage++) {
+      const struct nvk_shader *shader = cmd->state.gfx.shaders[stage];
+      if (shader != NULL) {
+         const uint32_t g = nvk_cbuf_binding_for_stage(stage, has_task_shader);
+         cmd->state.gfx.cbuf_groups[g].shader = shader;
+      }
+   }
    cmd->state.gfx.shaders_dirty = 0;
 }
 
@@ -4353,21 +4373,26 @@ nvk_cmd_flush_gfx_cbufs(struct nvk_cmd_buffer *cmd)
    const uint32_t min_cbuf_alignment = nvk_min_cbuf_alignment(&pdev->info);
    struct nvk_descriptor_state *desc = &cmd->state.gfx.descriptors;
 
-   const struct nvk_shader *mesh_shader =
-      cmd->state.gfx.shaders[MESA_SHADER_MESH];
-   const bool has_task_shader =
-      mesh_shader != NULL && mesh_shader->info.mesh.has_task_shader;
-
-   /* Find cbuf maps for the 5 cbuf groups */
    const struct nvk_shader *cbuf_shaders[5] = { NULL, };
-   for (mesa_shader_stage stage = 0; stage < MESA_SHADER_MESH_STAGES; stage++) {
-      const struct nvk_shader *shader = cmd->state.gfx.shaders[stage];
-      if (shader == NULL)
-         continue;
+   if (dev->ubo_delta_enabled) {
+      for (uint32_t g = 0; g < ARRAY_SIZE(cbuf_shaders); g++)
+         cbuf_shaders[g] = cmd->state.gfx.cbuf_groups[g].shader;
+   } else {
+      const struct nvk_shader *mesh_shader =
+         cmd->state.gfx.shaders[MESA_SHADER_MESH];
+      const bool has_task_shader =
+         mesh_shader != NULL && mesh_shader->info.mesh.has_task_shader;
 
-      uint32_t group = nvk_cbuf_binding_for_stage(stage, has_task_shader);
-      assert(group < ARRAY_SIZE(cbuf_shaders));
-      cbuf_shaders[group] = shader;
+      /* Find cbuf maps for the 5 cbuf groups */
+      for (mesa_shader_stage stage = 0; stage < MESA_SHADER_MESH_STAGES; stage++) {
+         const struct nvk_shader *shader = cmd->state.gfx.shaders[stage];
+         if (shader == NULL)
+            continue;
+
+         uint32_t group = nvk_cbuf_binding_for_stage(stage, has_task_shader);
+         assert(group < ARRAY_SIZE(cbuf_shaders));
+         cbuf_shaders[group] = shader;
+      }
    }
 
    bool bound_any_cbuf = false;
