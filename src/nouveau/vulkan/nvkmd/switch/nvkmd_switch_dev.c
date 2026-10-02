@@ -36,7 +36,30 @@ struct nvkmd_switch_ctx {
    struct nouveau_horizon_fence last_fence;
    bool has_last_fence;
    bool teardown_quarantined;
+   /* GPFIFO entries appended by exec() and not yet kicked off. */
+   uint32_t pending_exec_entries;
 };
+
+/* Kick the channel as soon as this many entries are pending, instead of
+ * waiting for the GPFIFO to fill. A frame of a GPU-driven engine (one
+ * indirect draw per material group, several passes) is ~2000 entries on its
+ * own; filling the queue first leaves no room for the submit tail and the
+ * kernel then refuses the kick ("no queue space" -> VK_ERROR_DEVICE_LOST).
+ *
+ * NVK_SWITCH_KICK_ENTRIES overrides the threshold; 0 disables the early kick
+ * (only the "queue full" kick remains).
+ */
+#define NVKMD_SWITCH_KICK_ENTRIES 512u
+
+static uint32_t
+nvkmd_switch_kick_entries(void)
+{
+   static int64_t entries = -1;
+   if (entries < 0)
+      entries = debug_get_num_option("NVK_SWITCH_KICK_ENTRIES",
+                                     NVKMD_SWITCH_KICK_ENTRIES);
+   return (uint32_t)entries;
+}
 
 static struct nvkmd_switch_dev *
 nvkmd_switch_dev(struct nvkmd_dev *dev)
@@ -228,6 +251,7 @@ nvkmd_switch_ctx_submit(struct nvkmd_switch_ctx *ctx,
 
    ctx->last_fence = fence;
    ctx->has_last_fence = nouveau_horizon_fence_is_valid(&fence);
+   ctx->pending_exec_entries = 0;
    return VK_SUCCESS;
 }
 
@@ -425,6 +449,17 @@ nvkmd_switch_ctx_exec(struct nvkmd_ctx *_ctx,
          goto done;
       }
       first += count;
+      ctx->pending_exec_entries += count;
+      /* The chunk ends on a complete entry (see above), so this is a safe
+       * split point for the GPU command stream.
+       */
+      const uint32_t kick_entries = nvkmd_switch_kick_entries();
+      if (kick_entries != 0 && ctx->pending_exec_entries >= kick_entries) {
+         result = nvkmd_switch_ctx_submit(
+            ctx, log_obj, NOUVEAU_HORIZON_COMPLETION_GPU);
+         if (result != VK_SUCCESS)
+            goto done;
+      }
    }
 
 done:
