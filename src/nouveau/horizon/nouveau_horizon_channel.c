@@ -1391,6 +1391,52 @@ nouveau_horizon_channel_native_priority(
    }
 }
 
+/* libnx's nvGpuChannelCreate allocates the hardware GPFIFO ring with
+ * GPFIFO_QUEUE_SIZE = 0x800 entries. Pre-Turing, every vkCmdDraw*Indirect
+ * costs an indirect push entry plus a resume entry, so a GPU-driven frame with
+ * ~1000 indirect draws is ~2000-2500 entries: a single frame fills the whole
+ * ring. Every frame then hits native submission pressure (Busy) and waits for
+ * the GPU to retire the previous one, so CPU and GPU run one after the other.
+ *
+ * Same body as libnx 4.12.0 (nx/source/nvidia/gpu_channel.c) with a larger
+ * ring. The CPU-side staging array (entries[GPFIFO_QUEUE_SIZE], one kickoff)
+ * is unchanged. Falls back to smaller rings if the service refuses.
+ */
+static Result
+nouveau_horizon_gpu_channel_create(NvGpuChannel *c, struct NvAddressSpace *as,
+                                   NvChannelPriority prio, uint32_t *ring_out)
+{
+   static const uint32_t sizes[] = { 0x2000, 0x1000, GPFIFO_QUEUE_SIZE };
+   Result res = 0;
+   for (unsigned i = 0; i < sizeof(sizes) / sizeof(sizes[0]); i++) {
+      res = nvChannelCreate(&c->base, "/dev/nvhost-gpu");
+      if (R_FAILED(res))
+         return res;
+
+      c->fence_incr = 0;
+      c->num_entries = 0;
+
+      res = nvioctlNvhostAsGpu_BindChannel(as->fd, c->base.fd);
+      if (R_SUCCEEDED(res))
+         res = nvioctlChannel_AllocGpfifoEx2(c->base.fd, sizes[i], 1, 0, 0, 0, 0, &c->fence);
+      if (R_SUCCEEDED(res))
+         res = nvioctlChannel_AllocObjCtx(c->base.fd, NvClassNumber_3D, 0, &c->object_id);
+      if (R_SUCCEEDED(res))
+         res = nvQueryEvent(c->base.fd, NvEventId_Gpu_ErrorNotifier, &c->error_event);
+      if (R_SUCCEEDED(res))
+         res = nvioctlChannel_SetErrorNotifier(c->base.fd, 1);
+      if (R_SUCCEEDED(res))
+         res = nvChannelSetPriority(&c->base, prio);
+
+      if (R_SUCCEEDED(res)) {
+         *ring_out = sizes[i];
+         return res;
+      }
+      nvGpuChannelClose(c);
+   }
+   return res;
+}
+
 static enum nouveau_horizon_status
 nouveau_horizon_channel_init_credits(
    struct nouveau_horizon_channel *channel,
@@ -1529,9 +1575,14 @@ nouveau_horizon_channel_create(
    const enum nouveau_horizon_channel_priority priority =
       create_info != NULL ? create_info->priority :
                             NOUVEAU_HORIZON_CHANNEL_PRIORITY_MEDIUM;
-   const Result rc = nvGpuChannelCreate(
+   uint32_t ring_entries = 0;
+   const Result rc = nouveau_horizon_gpu_channel_create(
       &channel->gpu_channel, &device->addr_space,
-      nouveau_horizon_channel_native_priority(priority));
+      nouveau_horizon_channel_native_priority(priority), &ring_entries);
+   if (R_SUCCEEDED(rc))
+      nouveau_horizon_log(device, NOUVEAU_HORIZON_LOG_INFO,
+                          "channel GPFIFO ring: %u entries (libnx default %u)",
+                          ring_entries, (unsigned)GPFIFO_QUEUE_SIZE);
    if (R_FAILED(rc)) {
       status = nouveau_horizon_status_from_result(
          rc, NOUVEAU_HORIZON_ERROR_SYSTEM);
